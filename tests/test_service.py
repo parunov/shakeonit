@@ -111,6 +111,21 @@ async def test_visible_collections_include_group_catalog_and_user_collections(se
 
 
 @pytest.mark.asyncio
+async def test_private_notification_subscription_follows_active_membership(service):
+    collection_id = await make_collection(service)
+
+    assert await service.notification_subscription(collection_id, 2) is False
+    await service.set_notification_subscription(collection_id, 2, True)
+    assert await service.notification_subscription(collection_id, 2) is True
+    assert [row["user_id"] for row in await service.notification_subscribers(collection_id)] == [2]
+
+    await service.remove_participant(collection_id, 2, 2)
+    assert await service.notification_subscription(collection_id, 2) is False
+    await service.join(collection_id, 2, subscribe=True)
+    assert await service.notification_subscription(collection_id, 2) is True
+
+
+@pytest.mark.asyncio
 async def test_cancel_removes_effect_but_keeps_history(service):
     collection_id = await make_collection(service)
     transaction_id = await service.add_expense(collection_id, 2, 1000, [1, 2], "Такси")

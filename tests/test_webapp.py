@@ -2,6 +2,8 @@ import hashlib
 import hmac
 import json
 import time
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from urllib.parse import urlencode
 
 import pytest
@@ -196,3 +198,30 @@ async def test_collection_api_survives_cancel_after_member_left(tmp_path):
     former = next(member for member in payload["participants"] if member["id"] == 2)
     assert former["active"] is False
     assert payload["debts"][0]["creditor_name"] == "Бывший участник"
+
+
+@pytest.mark.asyncio
+async def test_join_can_enable_private_collection_notifications(tmp_path):
+    database = Database(tmp_path / "notifications.db")
+    await database.initialize()
+    service = BudgetService(database)
+    await service.upsert_user(1, "owner", "Организатор")
+    collection_id = await service.create_collection(-100500, "Поездка", "EUR", 1)
+    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    application = web.Application()
+    setup_webapp_routes(application, bot, service, settings)
+    member_auth = signed_init_data(user={"id": 2, "first_name": "Участник"})
+
+    async with TestClient(TestServer(application)) as client:
+        response = await client.post(
+            f"/api/collections/{collection_id}/join",
+            json={"subscribe": True},
+            headers={"X-Telegram-Init-Data": member_auth},
+        )
+        payload = await response.json()
+
+    assert response.status == 200
+    assert payload["notifications_enabled"] is True
+    assert await service.notification_subscription(collection_id, 2) is True
+    assert bot.send_message.await_count == 2

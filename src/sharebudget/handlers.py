@@ -35,6 +35,7 @@ from .keyboards import (
 )
 from .links import group_start_param
 from .money import format_money, parse_amount
+from .notifications import notify_subscribers
 from .render import collection_text, history_text, transaction_text, user_label
 from .service import BudgetService, DomainError
 from .states import AddExpense, AddRepayment, CreateCollection, EditTransaction, PaymentDetails
@@ -167,12 +168,17 @@ async def start(
             return
         was_member = await service.is_participant(collection["id"], message.from_user.id)
         if not was_member:
-            await service.join(collection["id"], message.from_user.id)
+            await service.join(collection["id"], message.from_user.id, subscribe=True)
+        else:
+            await service.set_notification_subscription(
+                collection["id"], message.from_user.id, True
+            )
         await message.answer(
             (
                 "✅ <b>Подключение завершено</b>\n\n"
                 f"Вы {'уже участвовали' if was_member else 'теперь участвуете'} в сборе "
-                f"«{escape(collection['title'])}». Бот запомнил ваш Telegram ID."
+                f"«{escape(collection['title'])}». Бот запомнил ваш Telegram ID.\n\n"
+                "🔔 Личные уведомления по этому сбору включены."
             ),
             reply_markup=main_menu(),
             parse_mode=ParseMode.HTML,
@@ -393,7 +399,16 @@ async def join_collection(callback: CallbackQuery, service: BudgetService) -> No
     await sync_user(service, callback)
     collection_id = int(callback.data.split(":")[1])
     was_member = await service.is_participant(collection_id, callback.from_user.id)
-    await service.join(collection_id, callback.from_user.id)
+    subscribe = callback.message.chat.type == ChatType.PRIVATE
+    await service.join(collection_id, callback.from_user.id, subscribe=subscribe)
+    collection = await service.get_collection(collection_id)
+    await notify_subscribers(
+        callback.bot,
+        service,
+        collection,
+        f"🙋 {escape(callback.from_user.full_name)} участвует в сборе.",
+        exclude_user_ids={callback.from_user.id},
+    )
     await callback.answer(
         "✅ Вы уже участвуете в сборе."
         if was_member
@@ -514,6 +529,15 @@ async def expense_comment(message: Message, state: FSMContext, service: BudgetSe
         data["collection_id"], message.from_user.id, data["amount"], data["selected"], comment
     )
     collection = await service.get_collection(data["collection_id"])
+    await notify_subscribers(
+        message.bot,
+        service,
+        collection,
+        f"💸 {escape(message.from_user.full_name)} добавил затрату "
+        f"<b>{format_money(data['amount'], collection['currency'])}</b>"
+        f" · {escape(comment) if comment else 'без комментария'}.",
+        exclude_user_ids={message.from_user.id},
+    )
     await state.clear()
     await message.answer(
         f"✅ Затрата #{transaction_id} добавлена: "
@@ -614,6 +638,15 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
             ]
         ]
     )
+    await notify_subscribers(
+        message.bot,
+        service,
+        collection,
+        f"⏳ {escape(message.from_user.full_name)} сообщил о возврате "
+        f"<b>{format_money(amount, collection['currency'])}</b>. "
+        "Баланс изменится после подтверждения получателем.",
+        exclude_user_ids={message.from_user.id, data["creditor_id"]},
+    )
     try:
         await message.bot.send_message(
             data["creditor_id"],
@@ -643,6 +676,15 @@ async def repayment_confirm(callback: CallbackQuery, service: BudgetService) -> 
     collection_id = await service.confirm_repayment(transaction_id, callback.from_user.id)
     await callback.answer("Получение подтверждено. Балансы пересчитаны.", show_alert=True)
     collection = await service.get_collection(collection_id)
+    transaction = await service.transaction(transaction_id)
+    await notify_subscribers(
+        callback.bot,
+        service,
+        collection,
+        f"✅ {escape(callback.from_user.full_name)} подтвердил получение возврата "
+        f"#{transaction_id}: <b>{format_money(transaction['amount'], collection['currency'])}</b>.",
+        exclude_user_ids={callback.from_user.id},
+    )
     await safe_edit(
         callback.message,
         f"✅ <b>Получение подтверждено</b>\n\nВозврат #{transaction_id} учтён в балансах.",
@@ -727,6 +769,15 @@ async def transaction_cancel_prompt(callback: CallbackQuery, service: BudgetServ
 async def transaction_cancel(callback: CallbackQuery, service: BudgetService) -> None:
     transaction_id = int(callback.data.split(":")[1])
     collection_id = await service.cancel_transaction(transaction_id, callback.from_user.id)
+    collection = await service.get_collection(collection_id)
+    await notify_subscribers(
+        callback.bot,
+        service,
+        collection,
+        f"↩️ {escape(callback.from_user.full_name)} отменил транзакцию #{transaction_id}. "
+        "Балансы пересчитаны.",
+        exclude_user_ids={callback.from_user.id},
+    )
     await callback.answer("Транзакция отменена", show_alert=True)
     await show_collection(callback.message, collection_id, callback.from_user.id, service)
 
@@ -771,6 +822,15 @@ async def transaction_edit_comment(
     await state.clear()
     await message.answer("✅ Транзакция обновлена.", reply_markup=main_menu())
     collection = await service.get_collection(collection_id)
+    await notify_subscribers(
+        message.bot,
+        service,
+        collection,
+        f"✏️ {escape(message.from_user.full_name)} обновил транзакцию "
+        f"#{data['transaction_id']}: "
+        f"<b>{format_money(data['amount'], collection['currency'])}</b>.",
+        exclude_user_ids={message.from_user.id},
+    )
     await message.answer(
         await collection_text(service, collection),
         reply_markup=await collection_markup(
@@ -850,9 +910,16 @@ async def members(callback: CallbackQuery, service: BudgetService) -> None:
 @router.callback_query(F.data.startswith("leave:"))
 async def leave(callback: CallbackQuery, service: BudgetService) -> None:
     collection_id = int(callback.data.split(":")[1])
-    await service.remove_participant(collection_id, callback.from_user.id, callback.from_user.id)
-    await callback.answer("Вы вышли из сбора", show_alert=True)
     collection = await service.get_collection(collection_id)
+    await service.remove_participant(collection_id, callback.from_user.id, callback.from_user.id)
+    await notify_subscribers(
+        callback.bot,
+        service,
+        collection,
+        f"👋 {escape(callback.from_user.full_name)} вышел из сбора.",
+        exclude_user_ids={callback.from_user.id},
+    )
+    await callback.answer("Вы вышли из сбора", show_alert=True)
     await safe_edit(
         callback.message,
         f"Вы больше не участвуете в сборе <b>{escape(collection['title'])}</b>.",
@@ -905,7 +972,15 @@ async def archive_prompt(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("archiveyes:"))
 async def archive_confirm(callback: CallbackQuery, service: BudgetService) -> None:
     collection_id = int(callback.data.split(":")[1])
+    collection = await service.get_collection(collection_id)
     await service.archive(collection_id, callback.from_user.id)
+    await notify_subscribers(
+        callback.bot,
+        service,
+        collection,
+        f"📦 {escape(callback.from_user.full_name)} завершил сбор. Архив — 30 дней.",
+        exclude_user_ids={callback.from_user.id},
+    )
     await callback.answer("Сбор перемещен в архив", show_alert=True)
     await show_collection(callback.message, collection_id, callback.from_user.id, service)
 
@@ -914,6 +989,14 @@ async def archive_confirm(callback: CallbackQuery, service: BudgetService) -> No
 async def restore(callback: CallbackQuery, service: BudgetService) -> None:
     collection_id = int(callback.data.split(":")[1])
     await service.restore(collection_id, callback.from_user.id)
+    collection = await service.get_collection(collection_id)
+    await notify_subscribers(
+        callback.bot,
+        service,
+        collection,
+        f"♻️ {escape(callback.from_user.full_name)} восстановил сбор.",
+        exclude_user_ids={callback.from_user.id},
+    )
     await callback.answer("Сбор восстановлен", show_alert=True)
     await show_collection(callback.message, collection_id, callback.from_user.id, service)
 
@@ -936,6 +1019,15 @@ async def transfer_prompt(callback: CallbackQuery, service: BudgetService) -> No
 async def transfer_do(callback: CallbackQuery, service: BudgetService) -> None:
     _, collection_id, user_id = callback.data.split(":")
     await service.transfer_admin(int(collection_id), callback.from_user.id, int(user_id))
+    collection = await service.get_collection(int(collection_id))
+    new_admin = await service.get_user(int(user_id))
+    await notify_subscribers(
+        callback.bot,
+        service,
+        collection,
+        f"👑 Новый администратор сбора — {escape(new_admin['full_name'])}.",
+        exclude_user_ids={callback.from_user.id},
+    )
     await callback.answer("Роль передана", show_alert=True)
     await show_collection(callback.message, int(collection_id), callback.from_user.id, service)
 
@@ -957,7 +1049,16 @@ async def remove_prompt(callback: CallbackQuery, service: BudgetService) -> None
 @router.callback_query(F.data.startswith("removedo:"))
 async def remove_do(callback: CallbackQuery, service: BudgetService) -> None:
     _, collection_id, user_id = callback.data.split(":")
+    collection = await service.get_collection(int(collection_id))
+    member = await service.get_user(int(user_id))
     await service.remove_participant(int(collection_id), callback.from_user.id, int(user_id))
+    await notify_subscribers(
+        callback.bot,
+        service,
+        collection,
+        f"👥 {escape(member['full_name'])} больше не участвует в сборе.",
+        exclude_user_ids={callback.from_user.id, int(user_id)},
+    )
     await callback.answer("Участник удален", show_alert=True)
     await show_collection(callback.message, int(collection_id), callback.from_user.id, service)
 
@@ -1025,6 +1126,15 @@ async def quick_expense(
         amount,
         participant_ids,
         " ".join(comment_tokens),
+    )
+    await notify_subscribers(
+        message.bot,
+        service,
+        collection,
+        f"💸 {escape(message.from_user.full_name)} добавил затрату "
+        f"<b>{format_money(amount, collection['currency'])}</b> · "
+        f"{' '.join(escape(token) for token in comment_tokens) or 'без комментария'}.",
+        exclude_user_ids={actor_id},
     )
     await message.reply(
         f"✅ Затрата #{transaction_id} добавлена в «{escape(collection['title'])}»: "

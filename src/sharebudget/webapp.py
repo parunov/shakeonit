@@ -23,6 +23,7 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, web
 from .config import Settings
 from .links import parse_group_start_param
 from .money import CURRENCIES, format_money, parse_amount
+from .notifications import notify_subscribers
 from .service import BudgetService, DomainError
 
 LOGGER = logging.getLogger(__name__)
@@ -138,18 +139,55 @@ async def _require_member(service: BudgetService, collection_id: int, user_id: i
     return collection
 
 
-async def _report(bot: Bot, chat_id: int, text: str, reply_markup=None) -> bool:
+async def _report(
+    bot: Bot,
+    service: BudgetService,
+    collection,
+    text: str,
+    reply_markup=None,
+    *,
+    exclude_user_ids=(),
+    subscriber_reply_markup=None,
+) -> tuple[bool, int]:
     try:
         await bot.send_message(
-            chat_id,
+            collection["chat_id"],
             text,
             parse_mode="HTML",
             disable_notification=True,
             reply_markup=reply_markup,
         )
+        group_sent = True
+    except TelegramAPIError:
+        LOGGER.warning(
+            "Could not publish Mini App report to chat %s", collection["chat_id"], exc_info=True
+        )
+        group_sent = False
+    notifications_sent = await notify_subscribers(
+        bot,
+        service,
+        collection,
+        text,
+        exclude_user_ids=exclude_user_ids,
+        reply_markup=subscriber_reply_markup,
+    )
+    return group_sent, notifications_sent
+
+
+async def _confirm_private_subscription(
+    bot: Bot, service: BudgetService, collection, user_id: int
+) -> bool:
+    try:
+        await bot.send_message(
+            user_id,
+            f"🔔 <b>Уведомления включены</b>\n\nСбор: «{escape(collection['title'])}». "
+            "Теперь важные операции будут приходить в этот чат.",
+            parse_mode="HTML",
+        )
         return True
     except TelegramAPIError:
-        LOGGER.warning("Could not publish Mini App report to chat %s", chat_id, exc_info=True)
+        await service.set_notification_subscription(collection["id"], user_id, False)
+        LOGGER.info("Telegram write access is unavailable for user %s", user_id)
         return False
 
 
@@ -297,6 +335,9 @@ async def collection_details(request: web.Request) -> web.Response:
                 for debt in snapshot.debts
             ],
             "total": snapshot.total,
+            "notifications_enabled": await service.notification_subscription(
+                collection_id, user["id"]
+            ),
             "history": [
                 {
                     "id": row["id"],
@@ -333,14 +374,23 @@ async def create_collection(request: web.Request) -> web.Response:
         chat_id, str(payload.get("title", "")), str(payload.get("currency", "")), user["id"]
     )
     collection = await service.get_collection(collection_id)
-    sent = await _report(
+    sent, notifications_sent = await _report(
         bot,
-        chat_id,
+        service,
+        collection,
         f"🧾 {_name(user)} создал сбор <b>«{escape(collection['title'])}»</b> · "
         f"{collection['currency']}\n\nНажмите «Участвовать» — регистрация займет один шаг.",
         _collection_invite_markup(request.app[SETTINGS_KEY], collection_id),
+        exclude_user_ids={user["id"]},
     )
-    return web.json_response({"ok": True, "collection_id": collection_id, "report_sent": sent})
+    return web.json_response(
+        {
+            "ok": True,
+            "collection_id": collection_id,
+            "report_sent": sent,
+            "notifications_sent": notifications_sent,
+        }
+    )
 
 
 async def prepare_chat_request(request: web.Request) -> web.Response:
@@ -375,13 +425,22 @@ async def add_expense(request: web.Request) -> web.Response:
     transaction_id = await service.add_expense(
         collection_id, user["id"], amount, participant_ids, comment
     )
-    sent = await _report(
+    sent, notifications_sent = await _report(
         bot,
-        collection["chat_id"],
+        service,
+        collection,
         f"💸 {_name(user)} добавил затрату <b>{format_money(amount, collection['currency'])}</b>"
         f" · {escape(comment) if comment else 'без комментария'} · на {len(participant_ids)} чел.",
+        exclude_user_ids={user["id"]},
     )
-    return web.json_response({"ok": True, "transaction_id": transaction_id, "report_sent": sent})
+    return web.json_response(
+        {
+            "ok": True,
+            "transaction_id": transaction_id,
+            "report_sent": sent,
+            "notifications_sent": notifications_sent,
+        }
+    )
 
 
 async def add_repayment(request: web.Request) -> web.Response:
@@ -406,13 +465,15 @@ async def add_repayment(request: web.Request) -> web.Response:
             ]
         ]
     )
-    sent = await _report(
+    sent, notifications_sent = await _report(
         bot,
-        collection["chat_id"],
+        service,
+        collection,
         f"⏳ {_name(user)} сообщил о возврате долга {escape(creditor['full_name'])}: "
         f"<b>{format_money(amount, collection['currency'])}</b>. Баланс изменится после "
         "подтверждения получателем.",
         confirm_markup,
+        exclude_user_ids={user["id"], creditor_id},
     )
     try:
         await bot.send_message(
@@ -425,7 +486,14 @@ async def add_repayment(request: web.Request) -> web.Response:
         )
     except TelegramAPIError:
         LOGGER.info("Creditor %s has no private chat with bot", creditor_id)
-    return web.json_response({"ok": True, "transaction_id": transaction_id, "report_sent": sent})
+    return web.json_response(
+        {
+            "ok": True,
+            "transaction_id": transaction_id,
+            "report_sent": sent,
+            "notifications_sent": notifications_sent,
+        }
+    )
 
 
 async def confirm_repayment(request: web.Request) -> web.Response:
@@ -436,14 +504,18 @@ async def confirm_repayment(request: web.Request) -> web.Response:
         raise ApiError("Возврат долга не найден", 404)
     collection = await _require_member(service, transaction["collection_id"], user["id"])
     await service.confirm_repayment(transaction_id, user["id"])
-    sent = await _report(
+    sent, notifications_sent = await _report(
         bot,
-        collection["chat_id"],
+        service,
+        collection,
         f"✅ {_name(user)} подтвердил получение возврата #{transaction_id}: "
         f"<b>{format_money(transaction['amount'], collection['currency'])}</b>. "
         "Балансы пересчитаны.",
+        exclude_user_ids={user["id"]},
     )
-    return web.json_response({"ok": True, "report_sent": sent})
+    return web.json_response(
+        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+    )
 
 
 async def join_collection(request: web.Request) -> web.Response:
@@ -452,13 +524,26 @@ async def join_collection(request: web.Request) -> web.Response:
     collection = await service.get_collection(collection_id)
     if not collection or collection["status"] != "active":
         raise ApiError("Активный сбор не найден", 404)
-    await service.join(collection_id, user["id"])
-    sent = await _report(
+    payload = await _json_body(request)
+    subscribe = payload.get("subscribe") is True
+    await service.join(collection_id, user["id"], subscribe=subscribe)
+    if subscribe:
+        subscribe = await _confirm_private_subscription(bot, service, collection, user["id"])
+    sent, notifications_sent = await _report(
         bot,
-        collection["chat_id"],
+        service,
+        collection,
         f"🙋 {_name(user)} участвует в сборе <b>«{escape(collection['title'])}»</b>.",
+        exclude_user_ids={user["id"]},
     )
-    return web.json_response({"ok": True, "report_sent": sent})
+    return web.json_response(
+        {
+            "ok": True,
+            "report_sent": sent,
+            "notifications_sent": notifications_sent,
+            "notifications_enabled": subscribe,
+        }
+    )
 
 
 async def global_history(request: web.Request) -> web.Response:
@@ -493,13 +578,17 @@ async def edit_transaction(request: web.Request) -> web.Response:
     amount = parse_amount(str(payload.get("amount", "")))
     comment = str(payload.get("comment", ""))
     await service.edit_transaction(transaction_id, user["id"], amount, comment)
-    sent = await _report(
+    sent, notifications_sent = await _report(
         bot,
-        collection["chat_id"],
+        service,
+        collection,
         f"✏️ {_name(user)} обновил транзакцию #{transaction_id}: "
         f"<b>{format_money(amount, collection['currency'])}</b>",
+        exclude_user_ids={user["id"]},
     )
-    return web.json_response({"ok": True, "report_sent": sent})
+    return web.json_response(
+        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+    )
 
 
 async def cancel_transaction(request: web.Request) -> web.Response:
@@ -510,12 +599,16 @@ async def cancel_transaction(request: web.Request) -> web.Response:
         raise ApiError("Транзакция не найдена", 404)
     collection = await _require_member(service, transaction["collection_id"], user["id"])
     await service.cancel_transaction(transaction_id, user["id"])
-    sent = await _report(
+    sent, notifications_sent = await _report(
         bot,
-        collection["chat_id"],
+        service,
+        collection,
         f"↩️ {_name(user)} отменил транзакцию #{transaction_id}. Балансы пересчитаны.",
+        exclude_user_ids={user["id"]},
     )
-    return web.json_response({"ok": True, "report_sent": sent})
+    return web.json_response(
+        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+    )
 
 
 async def leave_collection(request: web.Request) -> web.Response:
@@ -523,12 +616,16 @@ async def leave_collection(request: web.Request) -> web.Response:
     collection_id = int(request.match_info["collection_id"])
     collection = await _require_member(service, collection_id, user["id"])
     await service.remove_participant(collection_id, user["id"], user["id"])
-    sent = await _report(
+    sent, notifications_sent = await _report(
         bot,
-        collection["chat_id"],
+        service,
+        collection,
         f"👋 {_name(user)} вышел из сбора <b>«{escape(collection['title'])}»</b>.",
+        exclude_user_ids={user["id"]},
     )
-    return web.json_response({"ok": True, "report_sent": sent})
+    return web.json_response(
+        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+    )
 
 
 async def save_payment(request: web.Request) -> web.Response:
@@ -543,6 +640,20 @@ async def save_preferred_currency(request: web.Request) -> web.Response:
     payload = await _json_body(request)
     await service.set_preferred_currency(user["id"], str(payload.get("currency", "")))
     return web.json_response({"ok": True})
+
+
+async def save_notification_subscription(request: web.Request) -> web.Response:
+    service, bot, user = _context(request)
+    collection_id = int(request.match_info["collection_id"])
+    collection = await _require_member(service, collection_id, user["id"])
+    payload = await _json_body(request)
+    enabled = payload.get("enabled")
+    if not isinstance(enabled, bool):
+        raise ApiError("Некорректная настройка уведомлений")
+    await service.set_notification_subscription(collection_id, user["id"], enabled)
+    if enabled:
+        enabled = await _confirm_private_subscription(bot, service, collection, user["id"])
+    return web.json_response({"ok": True, "notifications_enabled": enabled})
 
 
 async def exchange_rates(request: web.Request) -> web.Response:
@@ -577,12 +688,16 @@ async def archive_collection(request: web.Request) -> web.Response:
     collection_id = int(request.match_info["collection_id"])
     collection = await _require_member(service, collection_id, user["id"])
     await service.archive(collection_id, user["id"])
-    sent = await _report(
+    sent, notifications_sent = await _report(
         bot,
-        collection["chat_id"],
+        service,
+        collection,
         f"📦 {_name(user)} завершил сбор <b>«{escape(collection['title'])}»</b>. Архив — 30 дней.",
+        exclude_user_ids={user["id"]},
     )
-    return web.json_response({"ok": True, "report_sent": sent})
+    return web.json_response(
+        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+    )
 
 
 async def restore_collection(request: web.Request) -> web.Response:
@@ -590,12 +705,16 @@ async def restore_collection(request: web.Request) -> web.Response:
     collection_id = int(request.match_info["collection_id"])
     collection = await _require_member(service, collection_id, user["id"])
     await service.restore(collection_id, user["id"])
-    sent = await _report(
+    sent, notifications_sent = await _report(
         bot,
-        collection["chat_id"],
+        service,
+        collection,
         f"♻️ {_name(user)} восстановил сбор <b>«{escape(collection['title'])}»</b>.",
+        exclude_user_ids={user["id"]},
     )
-    return web.json_response({"ok": True, "report_sent": sent})
+    return web.json_response(
+        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+    )
 
 
 async def transfer_admin(request: web.Request) -> web.Response:
@@ -606,13 +725,17 @@ async def transfer_admin(request: web.Request) -> web.Response:
     new_admin_id = _integer(payload, "user_id", "Выберите участника")
     await service.transfer_admin(collection_id, user["id"], new_admin_id)
     member = await _member(service, collection_id, new_admin_id)
-    sent = await _report(
+    sent, notifications_sent = await _report(
         bot,
-        collection["chat_id"],
+        service,
+        collection,
         f"👑 Администратор сбора <b>«{escape(collection['title'])}»</b> — "
         f"{escape(member['full_name'])}.",
+        exclude_user_ids={user["id"]},
     )
-    return web.json_response({"ok": True, "report_sent": sent})
+    return web.json_response(
+        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+    )
 
 
 async def remove_member(request: web.Request) -> web.Response:
@@ -623,13 +746,17 @@ async def remove_member(request: web.Request) -> web.Response:
     member_id = _integer(payload, "user_id", "Выберите участника")
     member = await _member(service, collection_id, member_id)
     await service.remove_participant(collection_id, user["id"], member_id)
-    sent = await _report(
+    sent, notifications_sent = await _report(
         bot,
-        collection["chat_id"],
+        service,
+        collection,
         f"👥 {escape(member['full_name'])} больше не участвует в сборе "
         f"<b>«{escape(collection['title'])}»</b>.",
+        exclude_user_ids={user["id"], member_id},
     )
-    return web.json_response({"ok": True, "report_sent": sent})
+    return web.json_response(
+        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+    )
 
 
 async def app_index(_: web.Request) -> web.FileResponse:
@@ -684,6 +811,9 @@ def setup_webapp_routes(
     application.router.add_post("/api/collections/{collection_id}/expenses", add_expense)
     application.router.add_post("/api/collections/{collection_id}/repayments", add_repayment)
     application.router.add_post("/api/collections/{collection_id}/join", join_collection)
+    application.router.add_patch(
+        "/api/collections/{collection_id}/notifications", save_notification_subscription
+    )
     application.router.add_post("/api/collections/{collection_id}/leave", leave_collection)
     application.router.add_post("/api/collections/{collection_id}/archive", archive_collection)
     application.router.add_post("/api/collections/{collection_id}/restore", restore_collection)

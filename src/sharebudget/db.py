@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS participants (
     collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
     user_id INTEGER NOT NULL REFERENCES users(id),
     active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    notifications_enabled INTEGER NOT NULL DEFAULT 0 CHECK (notifications_enabled IN (0, 1)),
     joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (collection_id, user_id)
 );
@@ -106,6 +107,11 @@ class Database:
             if "active" not in {column[1] for column in columns}:
                 await connection.execute(
                     "ALTER TABLE participants ADD COLUMN active INTEGER NOT NULL DEFAULT 1"
+                )
+            if "notifications_enabled" not in {column[1] for column in columns}:
+                await connection.execute(
+                    "ALTER TABLE participants ADD COLUMN notifications_enabled "
+                    "INTEGER NOT NULL DEFAULT 0"
                 )
             await connection.execute(
                 """

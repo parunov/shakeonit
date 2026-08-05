@@ -125,6 +125,11 @@ button:disabled { opacity: .5; cursor: default; }
 .invite-button > span { display: grid; gap: 3px; }
 .invite-button > span > small { color: var(--muted); font-size: 12px; }
 .invite-button > i { color: var(--accent); font-size: 23px; font-style: normal; }
+.notification-toggle { display: grid; grid-template-columns: 34px 1fr auto; align-items: center; gap: 10px; width: 100%; margin: 12px 0; padding: 13px 14px; border: 1px solid var(--line); border-radius: 16px; color: var(--text); background: var(--surface); text-align: left; }
+.notification-toggle.enabled { border-color: color-mix(in srgb, var(--good) 35%, var(--line)); background: color-mix(in srgb, var(--good) 8%, var(--surface)); }
+.notification-toggle > span:nth-child(2) { display: grid; gap: 3px; }
+.notification-toggle small { color: var(--muted); font-size: 12px; font-weight: 400; }
+.notification-toggle > i { color: var(--accent); font-size: 22px; font-style: normal; }
 
 .bottom-nav {
   position: fixed; z-index: 20; left: 10px; right: 10px; bottom: calc(8px + env(safe-area-inset-bottom));

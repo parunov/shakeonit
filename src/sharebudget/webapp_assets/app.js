@@ -95,7 +95,11 @@ function closeSheet() {
 
 function reportToast(result, fallback = "Готово") {
   haptic("light");
-  toast(result.report_sent === false ? `${fallback} · отчёт останется здесь` : `${fallback} · отчёт отправлен в чат`);
+  if (result.notifications_sent > 0) {
+    toast(`${fallback} · подписчики уведомлены: ${result.notifications_sent}`);
+  } else {
+    toast(result.report_sent === false ? `${fallback} · отчёт останется здесь` : `${fallback} · отчёт отправлен в чат`);
+  }
 }
 
 async function reloadBootstrap() {
@@ -232,7 +236,7 @@ function renderInvitation() {
   state.nav = "collections";
   title.textContent = invitation.collection.title;
   updateNav();
-  app.innerHTML = `<section class="hero"><div class="hero-label">ПРИГЛАШЕНИЕ В СБОР</div><div class="hero-value">${e(invitation.collection.title)}</div><div class="hero-meta">Валюта · ${e(invitation.collection.currency)}</div></section><div class="status-banner">Нажмите кнопку — Telegram ID будет безопасно получен из Mini App, без логина и пароля.</div><button class="primary-button" type="button" data-action="join-invitation" data-id="${invitation.collection.id}">🙋 Участвовать в сборе</button>`;
+  app.innerHTML = `<section class="hero"><div class="hero-label">ПРИГЛАШЕНИЕ В СБОР</div><div class="hero-value">${e(invitation.collection.title)}</div><div class="hero-meta">Валюта · ${e(invitation.collection.currency)}</div></section><div class="status-banner">Telegram безопасно передаст ваш ID. Разрешите уведомления, чтобы узнавать о тратах и возвратах, даже если вас нет в группе сбора.</div><div class="sheet-actions"><button class="primary-button" type="button" data-action="join-subscribe" data-id="${invitation.collection.id}">🔔 Участвовать и получать уведомления</button><button class="secondary-button" type="button" data-action="join-invitation" data-id="${invitation.collection.id}">Участвовать без уведомлений</button></div>`;
 }
 
 function renderWelcome() {
@@ -303,6 +307,7 @@ function renderCollection() {
     </section>
     ${collection.status === "active" ? `<div class="quick-actions"><button class="action-button" type="button" data-action="expense">💸 Добавить затрату</button><button class="action-button" type="button" data-action="repay">🤝 Вернуть долг</button></div>` : `<div class="status-banner">📦 Сбор находится в архиве. Балансы и история доступны без изменений.</div>`}
     <div class="status-banner">${myBalance > 0 ? `Вам должны <b>${money(myBalance, collection.currency)}</b>` : myBalance < 0 ? `Вы должны <b>${money(-myBalance, collection.currency)}</b>` : "✅ Ваш расчёт закрыт"}</div>
+    ${collection.status === "active" ? `<button class="notification-toggle ${data.notifications_enabled ? "enabled" : ""}" type="button" data-action="toggle-notifications" data-enabled="${data.notifications_enabled}"><span>${data.notifications_enabled ? "🔔" : "🔕"}</span><span><b>${data.notifications_enabled ? "Уведомления включены" : "Получать уведомления"}</b><small>${data.notifications_enabled ? "Бот сообщит о новых операциях в личном чате" : "Даже если вас нет в Telegram-группе"}</small></span><i>›</i></button>` : ""}
     <div class="tabs">${tabs.map(([key, label]) => `<button type="button" data-action="tab" data-tab="${key}" class="${state.collectionTab === key ? "active" : ""}">${label}</button>`).join("")}</div>
     <section class="panel">${renderCollectionPanel(data, isAdmin)}</section>`;
 }
@@ -389,6 +394,12 @@ function confirmAction(message) {
   });
 }
 
+function requestWritePermission() {
+  if (tg?.initDataUnsafe?.user?.allows_write_to_pm) return Promise.resolve(true);
+  if (!tg?.requestWriteAccess) return Promise.resolve(false);
+  return new Promise((resolve) => tg.requestWriteAccess((allowed) => resolve(Boolean(allowed))));
+}
+
 async function refreshCurrent(tab = state.collectionTab) {
   await reloadBootstrap();
   if (state.collection) await openCollection(state.collection.collection.id, tab, true);
@@ -406,10 +417,13 @@ app.addEventListener("click", async (event) => {
       return renderInvitation();
     }
     if (action === "welcome-continue") return continueAfterWelcome();
-    if (action === "join-invitation") {
+    if (action === "join-invitation" || action === "join-subscribe") {
       setBusy(target, true);
-      const result = await api(`/api/collections/${target.dataset.id}/join`, { method: "POST", body: "{}" });
-      reportToast(result, "Вы участвуете в сборе");
+      const requestedSubscription = action === "join-subscribe";
+      const subscribe = requestedSubscription ? await requestWritePermission() : false;
+      const result = await api(`/api/collections/${target.dataset.id}/join`, { method: "POST", body: JSON.stringify({ subscribe }) });
+      reportToast(result, result.notifications_enabled ? "Вы участвуете · уведомления включены" : "Вы участвуете в сборе");
+      if (requestedSubscription && !result.notifications_enabled) toast("Вы участвуете, но Telegram не разрешил личные уведомления", true);
       await reloadBootstrap();
       return await openCollection(target.dataset.id, "overview", true);
     }
@@ -419,6 +433,18 @@ app.addEventListener("click", async (event) => {
     if (action === "tab") { state.collectionTab = target.dataset.tab; renderCollection(); return; }
     if (action === "edit-transaction") return editSheet(target.dataset.id);
     if (action === "payment") return paymentSheet();
+    if (action === "toggle-notifications") {
+      const enabled = target.dataset.enabled === "true";
+      if (!enabled && !await requestWritePermission()) {
+        toast("Разрешите боту присылать сообщения в окне Telegram", true);
+        return;
+      }
+      setBusy(target, true);
+      const id = state.collection.collection.id;
+      const result = await api(`/api/collections/${id}/notifications`, { method: "PATCH", body: JSON.stringify({ enabled: !enabled }) });
+      toast(result.notifications_enabled ? "Уведомления включены" : enabled ? "Уведомления выключены" : "Telegram не разрешил уведомления", !enabled && !result.notifications_enabled);
+      return await openCollection(id, state.collectionTab, true);
+    }
     if (action === "share-invite") {
       const collection = state.collection.collection;
       const inviteUrl = state.bootstrap.main_app_enabled

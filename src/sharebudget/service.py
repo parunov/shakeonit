@@ -260,7 +260,7 @@ class BudgetService:
             )
             return row is not None
 
-    async def join(self, collection_id: int, user_id: int) -> None:
+    async def join(self, collection_id: int, user_id: int, subscribe: bool = False) -> None:
         collection = await self._active_collection(collection_id)
         async with self.db.connect() as connection:
             existing = await _fetchone(
@@ -270,10 +270,16 @@ class BudgetService:
             )
             await connection.execute(
                 """
-                INSERT INTO participants(collection_id,user_id,active) VALUES (?,?,1)
-                ON CONFLICT(collection_id,user_id) DO UPDATE SET active=1
+                INSERT INTO participants(
+                    collection_id,user_id,active,notifications_enabled
+                ) VALUES (?,?,1,?)
+                ON CONFLICT(collection_id,user_id) DO UPDATE SET
+                    active=1,
+                    notifications_enabled=MAX(
+                        participants.notifications_enabled,excluded.notifications_enabled
+                    )
                 """,
-                (collection["id"], user_id),
+                (collection["id"], user_id, int(subscribe)),
             )
             if not existing or not existing["active"]:
                 await connection.execute(
@@ -282,6 +288,46 @@ class BudgetService:
                     (collection_id, user_id, user_id),
                 )
             await connection.commit()
+
+    async def notification_subscription(self, collection_id: int, user_id: int) -> bool:
+        async with self.db.connect() as connection:
+            row = await _fetchone(
+                connection,
+                """
+                SELECT notifications_enabled FROM participants
+                WHERE collection_id=? AND user_id=? AND active=1
+                """,
+                (collection_id, user_id),
+            )
+            return bool(row and row["notifications_enabled"])
+
+    async def set_notification_subscription(
+        self, collection_id: int, user_id: int, enabled: bool
+    ) -> None:
+        await self._collection(collection_id)
+        if not await self.is_participant(collection_id, user_id):
+            raise DomainError("Уведомления доступны только участникам сбора")
+        async with self.db.connect() as connection:
+            await connection.execute(
+                """
+                UPDATE participants SET notifications_enabled=?
+                WHERE collection_id=? AND user_id=? AND active=1
+                """,
+                (int(enabled), collection_id, user_id),
+            )
+            await connection.commit()
+
+    async def notification_subscribers(self, collection_id: int):
+        async with self.db.connect() as connection:
+            return await connection.execute_fetchall(
+                """
+                SELECT p.user_id,u.full_name FROM participants p
+                JOIN users u ON u.id=p.user_id
+                WHERE p.collection_id=? AND p.active=1 AND p.notifications_enabled=1
+                ORDER BY p.user_id
+                """,
+                (collection_id,),
+            )
 
     async def list_participants(self, collection_id: int):
         async with self.db.connect() as connection:
@@ -721,7 +767,10 @@ class BudgetService:
             raise DomainError("Нельзя выйти или удалить участника с ненулевым балансом")
         async with self.db.connect() as connection:
             await connection.execute(
-                "UPDATE participants SET active=0 WHERE collection_id=? AND user_id=?",
+                """
+                UPDATE participants SET active=0,notifications_enabled=0
+                WHERE collection_id=? AND user_id=?
+                """,
                 (collection_id, user_id),
             )
             await connection.execute(
