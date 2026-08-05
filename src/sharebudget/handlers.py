@@ -135,8 +135,20 @@ async def show_collection(message: Message, collection_id: int, actor_id: int, s
 
 
 @router.message(CommandStart())
-async def start(message: Message, command: CommandObject, service: BudgetService) -> None:
+async def start(
+    message: Message,
+    command: CommandObject,
+    service: BudgetService,
+    settings: Settings,
+) -> None:
     await sync_user(service, message)
+    if command.args == "app" and message.chat.type == ChatType.PRIVATE and settings.webapp_url:
+        await message.answer(
+            "✅ <b>ShakeOnIt готов</b>\n\nОткройте приложение — вход уже подтвержден Telegram.",
+            reply_markup=webapp_launch(settings.webapp_url),
+            parse_mode=ParseMode.HTML,
+        )
+        return
     match = re.fullmatch(r"collection_(\d+)", command.args or "")
     if match and message.chat.type == ChatType.PRIVATE:
         collection = await service.get_collection(int(match.group(1)))
