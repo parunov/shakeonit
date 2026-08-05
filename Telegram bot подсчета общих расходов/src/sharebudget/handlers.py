@@ -1,0 +1,763 @@
+from __future__ import annotations
+
+import re
+from html import escape
+
+from aiogram import F, Router
+from aiogram.enums import ChatType, ParseMode
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+
+from .keyboards import (
+    admin_actions,
+    collection_actions,
+    collections_keyboard,
+    confirmation,
+    currencies,
+    history_keyboard,
+    main_menu,
+    participant_picker,
+    people_keyboard,
+    transaction_actions,
+)
+from .money import format_money, parse_amount
+from .render import collection_text, history_text, transaction_text, user_label
+from .service import BudgetService, DomainError
+from .states import AddExpense, AddRepayment, CreateCollection, EditTransaction, PaymentDetails
+
+router = Router()
+
+HELP_TEXT = """<b>❓ Помощь</b>
+
+<b>Сбор</b> — отдельный бюджет события: поездки, праздника или общего подарка. Каждый сбор имеет одну валюту.
+
+<b>Затрата</b> — один участник заплатил, а сумма делится поровну между выбранными людьми. Плательщика тоже можно выбрать.
+
+<b>Вернуть долг</b> — фактический перевод от одного участника другому. Он сразу уменьшает долг.
+
+На экране сбора всегда показаны чистые балансы и оптимальный список переводов. Отмена транзакции сохраняет ее в истории, но исключает из расчета.
+
+Команды: /menu, /new, /collections, /expense, /repay, /balance, /help, /cancel"""
+
+TUTORIAL_TEXT = """<b>🎓 Как пользоваться ShareBudget</b>
+
+1. Добавьте бота в Telegram-группу и нажмите «Создать сбор».
+2. Назовите событие и выберите BYN, RUB, EUR или USD.
+3. Друзья нажимают «Участвовать в сборе» — только после этого их можно выбрать в затрате.
+4. Тот, кто заплатил, нажимает «Добавить затрату», вводит сумму, отмечает людей и пишет короткое описание.
+5. Когда кто-то действительно переводит деньги, используйте «Вернуть долг».
+6. Экран сбора сразу покажет, кто кому и сколько должен. В «Истории» видны все действия.
+
+Быстрая запись при включенном Privacy Mode: <code>/expense@имя_бота 40 @ivan @maxim билеты</code>. Она работает, если в группе один активный сбор, а отмеченные пользователи нажали «Участвовать в сборе».
+
+Администратор может отменять и редактировать любые транзакции, удалять неиспользованных участников, передавать роль и завершать сбор. Восстановить сбор из архива можно 30 дней."""
+
+
+async def sync_user(service: BudgetService, event: Message | CallbackQuery) -> None:
+    user = event.from_user
+    await service.upsert_user(user.id, user.username, user.full_name)
+
+
+async def safe_edit(message: Message, text: str, reply_markup=None) -> None:
+    try:
+        await message.edit_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc):
+            raise
+
+
+async def show_collection(message: Message, collection_id: int, actor_id: int, service):
+    collection = await service.get_collection(collection_id)
+    if not collection:
+        raise DomainError("Сбор не найден")
+    is_member = await service.is_participant(collection_id, actor_id)
+    text = await collection_text(service, collection)
+    keyboard = collection_actions(collection, is_member, collection["admin_id"] == actor_id)
+    await safe_edit(message, text, keyboard)
+
+
+@router.message(CommandStart())
+async def start(message: Message, service: BudgetService) -> None:
+    await sync_user(service, message)
+    await message.answer(
+        "👋 <b>ShareBudget</b> помогает честно делить общие траты и фиксировать возвраты долгов.\n\n"
+        "Начните с короткого обучения или создайте сбор в группе с друзьями.",
+        reply_markup=main_menu(),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.message(Command("menu"))
+@router.message(F.text == "🏠 Главное меню")
+async def menu(message: Message, state: FSMContext, service: BudgetService) -> None:
+    await sync_user(service, message)
+    await state.clear()
+    await message.answer("Что хотите сделать?", reply_markup=main_menu())
+
+
+@router.message(Command("cancel"))
+async def cancel_flow(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Действие отменено.", reply_markup=main_menu())
+
+
+@router.message(Command("help"))
+@router.message(F.text == "❓ Помощь")
+async def help_screen(message: Message) -> None:
+    await message.answer(HELP_TEXT, parse_mode=ParseMode.HTML, reply_markup=main_menu())
+
+
+@router.message(F.text == "🎓 Обучение")
+async def tutorial(message: Message) -> None:
+    await message.answer(TUTORIAL_TEXT, parse_mode=ParseMode.HTML, reply_markup=main_menu())
+
+
+@router.message(Command("new"))
+@router.message(F.text == "➕ Создать сбор")
+async def new_collection(message: Message, state: FSMContext, service: BudgetService) -> None:
+    await sync_user(service, message)
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer(
+            "Создавать сбор нужно в общей Telegram-группе. Добавьте туда бота и повторите команду."
+        )
+        return
+    await state.set_state(CreateCollection.title)
+    await state.update_data(chat_id=message.chat.id)
+    await message.answer("Как назовем сбор? Например: <b>Поездка в Берлин</b>", parse_mode="HTML")
+
+
+@router.message(CreateCollection.title)
+async def collection_title(message: Message, state: FSMContext) -> None:
+    title = (message.text or "").strip()
+    if not 2 <= len(title) <= 80:
+        await message.answer("Название должно содержать от 2 до 80 символов. Попробуйте еще раз.")
+        return
+    await state.update_data(title=title)
+    await state.set_state(CreateCollection.currency)
+    await message.answer("Выберите единую валюту этого сбора:", reply_markup=currencies())
+
+
+@router.callback_query(CreateCollection.currency, F.data.startswith("currency:"))
+async def collection_currency(
+    callback: CallbackQuery, state: FSMContext, service: BudgetService
+) -> None:
+    await sync_user(service, callback)
+    data = await state.get_data()
+    currency = callback.data.split(":", 1)[1]
+    collection_id = await service.create_collection(
+        data["chat_id"], data["title"], currency, callback.from_user.id
+    )
+    await state.clear()
+    await callback.answer("Сбор создан")
+    await callback.message.edit_text(
+        f"✅ Сбор <b>{escape(data['title'])}</b> создан. Вы уже участвуете в нем.",
+        parse_mode=ParseMode.HTML,
+    )
+    collection = await service.get_collection(collection_id)
+    await callback.message.answer(
+        await collection_text(service, collection),
+        reply_markup=collection_actions(collection, True, True),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.message(Command("collections"))
+@router.message(F.text == "📋 Мои сборы")
+async def my_collections(message: Message, service: BudgetService) -> None:
+    await sync_user(service, message)
+    rows = await service.list_collections(message.from_user.id)
+    if not rows:
+        await message.answer("Вы пока не участвуете ни в одном сборе.")
+        return
+    await message.answer("Ваши активные и архивные сборы:", reply_markup=collections_keyboard(rows))
+
+
+@router.callback_query(F.data.startswith("open:"))
+async def open_collection(callback: CallbackQuery, service: BudgetService) -> None:
+    await sync_user(service, callback)
+    await callback.answer()
+    await show_collection(
+        callback.message, int(callback.data.split(":")[1]), callback.from_user.id, service
+    )
+
+
+@router.callback_query(F.data.startswith("join:"))
+async def join_collection(callback: CallbackQuery, service: BudgetService) -> None:
+    await sync_user(service, callback)
+    collection_id = int(callback.data.split(":")[1])
+    await service.join(collection_id, callback.from_user.id)
+    await callback.answer("Вы участвуете в сборе!", show_alert=True)
+    await show_collection(callback.message, collection_id, callback.from_user.id, service)
+
+
+async def choose_collection(message: Message, service, action: str, empty_text: str) -> None:
+    chat_id = (
+        message.chat.id if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP) else None
+    )
+    rows = await service.list_collections(message.from_user.id, chat_id, include_archived=False)
+    if not rows:
+        await message.answer(empty_text)
+    elif len(rows) == 1:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=rows[0]["title"], callback_data=f"{action}:{rows[0]['id']}"
+                    )
+                ]
+            ]
+        )
+        await message.answer("Выберите сбор:", reply_markup=keyboard)
+    else:
+        await message.answer("Выберите сбор:", reply_markup=collections_keyboard(rows, action))
+
+
+@router.message(Command("expense"))
+@router.message(F.text == "💸 Добавить затрату")
+async def expense_start(message: Message, state: FSMContext, service: BudgetService) -> None:
+    await sync_user(service, message)
+    await state.clear()
+    command = re.fullmatch(r"/expense(?:@[A-Za-z0-9_]+)?(?:\s+(.+))?", (message.text or "").strip())
+    if command and command.group(1):
+        await quick_expense(message, command.group(1), service)
+        return
+    await choose_collection(
+        message, service, "expense", "Нет активных сборов для добавления затраты."
+    )
+
+
+@router.callback_query(F.data.startswith("expense:"))
+async def expense_collection(
+    callback: CallbackQuery, state: FSMContext, service: BudgetService
+) -> None:
+    await sync_user(service, callback)
+    collection_id = int(callback.data.split(":")[1])
+    if not await service.is_participant(collection_id, callback.from_user.id):
+        raise DomainError("Сначала вступите в сбор")
+    await state.set_state(AddExpense.amount)
+    await state.update_data(collection_id=collection_id)
+    await callback.answer()
+    await callback.message.answer(
+        "Введите сумму затраты, например <b>120,50</b>:", parse_mode="HTML"
+    )
+
+
+@router.message(AddExpense.amount)
+async def expense_amount(message: Message, state: FSMContext, service: BudgetService) -> None:
+    try:
+        amount = parse_amount(message.text or "")
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    data = await state.get_data()
+    rows = await service.list_participants(data["collection_id"])
+    await state.update_data(amount=amount, selected=[])
+    await state.set_state(AddExpense.participants)
+    await message.answer(
+        "На кого разделить эту сумму? Можно отметить и самого плательщика.",
+        reply_markup=participant_picker(rows, set()),
+    )
+
+
+@router.callback_query(AddExpense.participants, F.data.startswith("share:"))
+async def expense_participants(
+    callback: CallbackQuery, state: FSMContext, service: BudgetService
+) -> None:
+    data = await state.get_data()
+    rows = await service.list_participants(data["collection_id"])
+    selected = set(data.get("selected", []))
+    value = callback.data.split(":")[1]
+    if value == "all":
+        selected = {row["id"] for row in rows}
+    elif value == "done":
+        if not selected:
+            await callback.answer("Выберите хотя бы одного участника", show_alert=True)
+            return
+        await state.update_data(selected=list(selected))
+        await state.set_state(AddExpense.comment)
+        await callback.answer()
+        await callback.message.answer(
+            "Кратко опишите затрату (например, «билеты»). Отправьте <b>—</b>, если без комментария.",
+            parse_mode="HTML",
+        )
+        return
+    else:
+        user_id = int(value)
+        selected.symmetric_difference_update({user_id})
+    await state.update_data(selected=list(selected))
+    await callback.answer()
+    await safe_edit(
+        callback.message,
+        "На кого разделить эту сумму? Можно отметить и самого плательщика.",
+        participant_picker(rows, selected),
+    )
+
+
+@router.message(AddExpense.comment)
+async def expense_comment(message: Message, state: FSMContext, service: BudgetService) -> None:
+    data = await state.get_data()
+    comment = "" if (message.text or "").strip() in ("-", "—") else (message.text or "").strip()
+    transaction_id = await service.add_expense(
+        data["collection_id"], message.from_user.id, data["amount"], data["selected"], comment
+    )
+    collection = await service.get_collection(data["collection_id"])
+    await state.clear()
+    await message.answer(
+        f"✅ Затрата #{transaction_id} добавлена: "
+        f"<b>{format_money(data['amount'], collection['currency'])}</b>.",
+        parse_mode="HTML",
+        reply_markup=main_menu(),
+    )
+    await message.answer(
+        await collection_text(service, collection),
+        reply_markup=collection_actions(
+            collection, True, collection["admin_id"] == message.from_user.id
+        ),
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("repay"))
+@router.message(F.text == "🤝 Вернуть долг")
+async def repay_start(message: Message, state: FSMContext, service: BudgetService) -> None:
+    await sync_user(service, message)
+    await state.clear()
+    await choose_collection(message, service, "repay", "Нет активных сборов для возврата долга.")
+
+
+@router.callback_query(F.data.startswith("repay:"))
+async def repay_collection(
+    callback: CallbackQuery, state: FSMContext, service: BudgetService
+) -> None:
+    await sync_user(service, callback)
+    collection_id = int(callback.data.split(":")[1])
+    if not await service.is_participant(collection_id, callback.from_user.id):
+        raise DomainError("Сначала вступите в сбор")
+    debts = await service.settlement(collection_id)
+    creditor_ids = {debt.creditor_id for debt in debts if debt.debtor_id == callback.from_user.id}
+    rows = [
+        row for row in await service.list_participants(collection_id) if row["id"] in creditor_ids
+    ]
+    if not rows:
+        await callback.answer("По текущему балансу у вас нет долгов", show_alert=True)
+        return
+    await state.set_state(AddRepayment.creditor)
+    await state.update_data(collection_id=collection_id)
+    await callback.answer()
+    await callback.message.answer(
+        "Кому вы вернули долг?",
+        reply_markup=people_keyboard(rows, "creditor", callback.from_user.id),
+    )
+
+
+@router.callback_query(AddRepayment.creditor, F.data.startswith("creditor:"))
+async def repay_creditor(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(creditor_id=int(callback.data.split(":")[1]))
+    await state.set_state(AddRepayment.amount)
+    await callback.answer()
+    await callback.message.answer("Введите фактически переведенную сумму:")
+
+
+@router.message(AddRepayment.amount)
+async def repay_amount(message: Message, state: FSMContext, service: BudgetService) -> None:
+    try:
+        amount = parse_amount(message.text or "")
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    data = await state.get_data()
+    transaction_id = await service.add_repayment(
+        data["collection_id"], message.from_user.id, data["creditor_id"], amount
+    )
+    collection = await service.get_collection(data["collection_id"])
+    await state.clear()
+    await message.answer(
+        f"✅ Возврат #{transaction_id} на сумму "
+        f"<b>{format_money(amount, collection['currency'])}</b> записан.",
+        parse_mode="HTML",
+        reply_markup=main_menu(),
+    )
+    await message.answer(
+        await collection_text(service, collection),
+        reply_markup=collection_actions(
+            collection, True, collection["admin_id"] == message.from_user.id
+        ),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("history:"))
+async def history(callback: CallbackQuery, service: BudgetService) -> None:
+    await sync_user(service, callback)
+    _, collection_id_raw, offset_raw = callback.data.split(":")
+    collection_id, offset = int(collection_id_raw), int(offset_raw)
+    if not await service.is_participant(collection_id, callback.from_user.id):
+        raise DomainError("История доступна только участникам сбора")
+    collection = await service.get_collection(collection_id)
+    page = await service.history(collection_id, 11, offset)
+    rows = page[:10]
+    participants = await service.list_participants(collection_id)
+    text = history_text(
+        collection, rows, await service.collection_total(collection_id), len(participants)
+    )
+    debts = await service.settlement(collection_id)
+    names = {row["id"]: user_label(row) for row in participants}
+    text += "\n\n<b>Финальный список балансов</b>\n"
+    text += (
+        "\n".join(
+            f"• {names[d.debtor_id]} → {names[d.creditor_id]}: "
+            f"<b>{format_money(d.amount, collection['currency'])}</b>"
+            for d in debts
+        )
+        if debts
+        else "✅ Все рассчитались"
+    )
+    await callback.answer()
+    await safe_edit(
+        callback.message,
+        text,
+        history_keyboard(collection_id, rows, offset, len(page) > 10),
+    )
+
+
+@router.callback_query(F.data.startswith("tx:"))
+async def transaction_details(callback: CallbackQuery, service: BudgetService) -> None:
+    await sync_user(service, callback)
+    transaction = await service.transaction(int(callback.data.split(":")[1]))
+    if not transaction or not await service.is_participant(
+        transaction["collection_id"], callback.from_user.id
+    ):
+        raise DomainError("Транзакция не найдена")
+    collection = await service.get_collection(transaction["collection_id"])
+    await callback.answer()
+    await safe_edit(
+        callback.message,
+        await transaction_text(service, transaction),
+        transaction_actions(transaction, collection, callback.from_user.id),
+    )
+
+
+@router.callback_query(F.data.startswith("txcancel:"))
+async def transaction_cancel_prompt(callback: CallbackQuery, service: BudgetService) -> None:
+    transaction_id = int(callback.data.split(":")[1])
+    transaction = await service.transaction(transaction_id)
+    if not transaction:
+        raise DomainError("Транзакция не найдена")
+    await callback.answer()
+    await callback.message.answer(
+        f"Отменить транзакцию #{transaction_id}? Она останется в истории.",
+        reply_markup=confirmation("txcancel", transaction_id, f"tx:{transaction_id}"),
+    )
+
+
+@router.callback_query(F.data.startswith("txcancelyes:"))
+async def transaction_cancel(callback: CallbackQuery, service: BudgetService) -> None:
+    transaction_id = int(callback.data.split(":")[1])
+    collection_id = await service.cancel_transaction(transaction_id, callback.from_user.id)
+    await callback.answer("Транзакция отменена", show_alert=True)
+    await show_collection(callback.message, collection_id, callback.from_user.id, service)
+
+
+@router.callback_query(F.data.startswith("txedit:"))
+async def transaction_edit_start(
+    callback: CallbackQuery, state: FSMContext, service: BudgetService
+) -> None:
+    transaction = await service.transaction(int(callback.data.split(":")[1]))
+    if not transaction:
+        raise DomainError("Транзакция не найдена")
+    collection = await service.get_collection(transaction["collection_id"])
+    if callback.from_user.id not in (transaction["creator_id"], collection["admin_id"]):
+        raise DomainError("Недостаточно прав")
+    await state.set_state(EditTransaction.amount)
+    await state.update_data(transaction_id=transaction["id"])
+    await callback.answer()
+    await callback.message.answer("Введите новую сумму:")
+
+
+@router.message(EditTransaction.amount)
+async def transaction_edit_amount(message: Message, state: FSMContext) -> None:
+    try:
+        amount = parse_amount(message.text or "")
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    await state.update_data(amount=amount)
+    await state.set_state(EditTransaction.comment)
+    await message.answer("Введите новый комментарий или отправьте <b>—</b>:", parse_mode="HTML")
+
+
+@router.message(EditTransaction.comment)
+async def transaction_edit_comment(
+    message: Message, state: FSMContext, service: BudgetService
+) -> None:
+    data = await state.get_data()
+    comment = "" if (message.text or "").strip() in ("-", "—") else (message.text or "")
+    collection_id = await service.edit_transaction(
+        data["transaction_id"], message.from_user.id, data["amount"], comment
+    )
+    await state.clear()
+    await message.answer("✅ Транзакция обновлена.", reply_markup=main_menu())
+    collection = await service.get_collection(collection_id)
+    await message.answer(
+        await collection_text(service, collection),
+        reply_markup=collection_actions(
+            collection, True, collection["admin_id"] == message.from_user.id
+        ),
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("balance"))
+@router.message(F.text == "⚖️ Мой баланс")
+async def balance_start(message: Message, service: BudgetService) -> None:
+    await sync_user(service, message)
+    await choose_collection(message, service, "mybalance", "У вас пока нет активных сборов.")
+
+
+@router.callback_query(F.data.startswith("mybalance:"))
+async def my_balance(callback: CallbackQuery, service: BudgetService) -> None:
+    collection_id = int(callback.data.split(":")[1])
+    collection = await service.get_collection(collection_id)
+    if not await service.is_participant(collection_id, callback.from_user.id):
+        raise DomainError("Вы не участвуете в этом сборе")
+    participants = await service.list_participants(collection_id)
+    names = {row["id"]: user_label(row) for row in participants}
+    debts = await service.settlement(collection_id)
+    personal = [
+        debt for debt in debts if callback.from_user.id in (debt.debtor_id, debt.creditor_id)
+    ]
+    lines = [f"<b>⚖️ Ваш баланс · {escape(collection['title'])}</b>"]
+    if not personal:
+        lines.append("\n✅ У вас нет долгов и никто не должен вам.")
+    for debt in personal:
+        if debt.debtor_id == callback.from_user.id:
+            lines.append(
+                f"\nВы должны {names[debt.creditor_id]}: "
+                f"<b>{format_money(debt.amount, collection['currency'])}</b>"
+            )
+        else:
+            lines.append(
+                f"\n{names[debt.debtor_id]} должен вам: "
+                f"<b>{format_money(debt.amount, collection['currency'])}</b>"
+            )
+    await callback.answer()
+    await safe_edit(
+        callback.message,
+        "".join(lines),
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="К сбору", callback_data=f"open:{collection_id}")]
+            ]
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("members:"))
+async def members(callback: CallbackQuery, service: BudgetService) -> None:
+    collection_id = int(callback.data.split(":")[1])
+    if not await service.is_participant(collection_id, callback.from_user.id):
+        raise DomainError("Список доступен участникам сбора")
+    rows = await service.list_participants(collection_id)
+    lines = ["<b>👥 Участники</b>"]
+    for row in rows:
+        payment = f" · 💳 {escape(row['payment_details'])}" if row["payment_details"] else ""
+        crown = " 👑" if row["is_admin"] else ""
+        lines.append(f"• {user_label(row)}{crown}{payment}")
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Выйти из сбора", callback_data=f"leave:{collection_id}")],
+            [InlineKeyboardButton(text="К сбору", callback_data=f"open:{collection_id}")],
+        ]
+    )
+    await callback.answer()
+    await safe_edit(callback.message, "\n".join(lines), keyboard)
+
+
+@router.callback_query(F.data.startswith("leave:"))
+async def leave(callback: CallbackQuery, service: BudgetService) -> None:
+    collection_id = int(callback.data.split(":")[1])
+    await service.remove_participant(collection_id, callback.from_user.id, callback.from_user.id)
+    await callback.answer("Вы вышли из сбора", show_alert=True)
+    collection = await service.get_collection(collection_id)
+    await safe_edit(
+        callback.message,
+        f"Вы больше не участвуете в сборе <b>{escape(collection['title'])}</b>.",
+    )
+
+
+@router.message(F.text == "💳 Платежные данные")
+async def payment_start(message: Message, state: FSMContext, service: BudgetService) -> None:
+    await sync_user(service, message)
+    await state.set_state(PaymentDetails.details)
+    await message.answer(
+        "Отправьте платежные данные одним сообщением (например, номер телефона СБП или последние "
+        "цифры карты). Они будут видны участникам ваших сборов. Для удаления отправьте <b>—</b>.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(PaymentDetails.details)
+async def payment_save(message: Message, state: FSMContext, service: BudgetService) -> None:
+    details = "" if (message.text or "").strip() in ("-", "—") else (message.text or "")
+    await service.set_payment_details(message.from_user.id, details)
+    await state.clear()
+    await message.answer("✅ Платежные данные сохранены.", reply_markup=main_menu())
+
+
+@router.callback_query(F.data.startswith("manage:"))
+async def manage(callback: CallbackQuery, service: BudgetService) -> None:
+    collection_id = int(callback.data.split(":")[1])
+    collection = await service.get_collection(collection_id)
+    if collection["admin_id"] != callback.from_user.id:
+        raise DomainError("Недостаточно прав")
+    await callback.answer()
+    await safe_edit(
+        callback.message,
+        f"<b>⚙️ Управление · {escape(collection['title'])}</b>",
+        admin_actions(collection_id),
+    )
+
+
+@router.callback_query(F.data.startswith("archive:"))
+async def archive_prompt(callback: CallbackQuery) -> None:
+    collection_id = int(callback.data.split(":")[1])
+    await callback.answer()
+    await callback.message.answer(
+        "Завершить сбор? Он попадет в архив и будет доступен для восстановления 30 дней.",
+        reply_markup=confirmation("archive", collection_id),
+    )
+
+
+@router.callback_query(F.data.startswith("archiveyes:"))
+async def archive_confirm(callback: CallbackQuery, service: BudgetService) -> None:
+    collection_id = int(callback.data.split(":")[1])
+    await service.archive(collection_id, callback.from_user.id)
+    await callback.answer("Сбор перемещен в архив", show_alert=True)
+    await show_collection(callback.message, collection_id, callback.from_user.id, service)
+
+
+@router.callback_query(F.data.startswith("restore:"))
+async def restore(callback: CallbackQuery, service: BudgetService) -> None:
+    collection_id = int(callback.data.split(":")[1])
+    await service.restore(collection_id, callback.from_user.id)
+    await callback.answer("Сбор восстановлен", show_alert=True)
+    await show_collection(callback.message, collection_id, callback.from_user.id, service)
+
+
+@router.callback_query(F.data.startswith("transfer:"))
+async def transfer_prompt(callback: CallbackQuery, service: BudgetService) -> None:
+    collection_id = int(callback.data.split(":")[1])
+    collection = await service.get_collection(collection_id)
+    if collection["admin_id"] != callback.from_user.id:
+        raise DomainError("Недостаточно прав")
+    rows = await service.list_participants(collection_id)
+    await callback.answer()
+    await callback.message.answer(
+        "Кому передать роль администратора?",
+        reply_markup=people_keyboard(rows, f"transferdo:{collection_id}", callback.from_user.id),
+    )
+
+
+@router.callback_query(F.data.startswith("transferdo:"))
+async def transfer_do(callback: CallbackQuery, service: BudgetService) -> None:
+    _, collection_id, user_id = callback.data.split(":")
+    await service.transfer_admin(int(collection_id), callback.from_user.id, int(user_id))
+    await callback.answer("Роль передана", show_alert=True)
+    await show_collection(callback.message, int(collection_id), callback.from_user.id, service)
+
+
+@router.callback_query(F.data.startswith("remove:"))
+async def remove_prompt(callback: CallbackQuery, service: BudgetService) -> None:
+    collection_id = int(callback.data.split(":")[1])
+    collection = await service.get_collection(collection_id)
+    if collection["admin_id"] != callback.from_user.id:
+        raise DomainError("Недостаточно прав")
+    rows = await service.list_participants(collection_id)
+    await callback.answer()
+    await callback.message.answer(
+        "Кого удалить? Удалить можно только участника с нулевым балансом, которого еще нет в истории.",
+        reply_markup=people_keyboard(rows, f"removedo:{collection_id}", callback.from_user.id),
+    )
+
+
+@router.callback_query(F.data.startswith("removedo:"))
+async def remove_do(callback: CallbackQuery, service: BudgetService) -> None:
+    _, collection_id, user_id = callback.data.split(":")
+    await service.remove_participant(int(collection_id), callback.from_user.id, int(user_id))
+    await callback.answer("Участник удален", show_alert=True)
+    await show_collection(callback.message, int(collection_id), callback.from_user.id, service)
+
+
+async def quick_expense(message: Message, payload: str, service: BudgetService) -> None:
+    """Parse command arguments: 40 @ivan @maxim comment."""
+    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        await message.answer("Быстрая запись доступна только внутри общей Telegram-группы.")
+        return
+    tokens = payload.split()
+    try:
+        amount = parse_amount(tokens[0])
+    except ValueError as exc:
+        await message.reply(str(exc))
+        return
+    collections = await service.list_collections(
+        message.from_user.id, message.chat.id, include_archived=False
+    )
+    if len(collections) != 1:
+        await message.reply(
+            "Для быстрой записи в этой группе должен быть ровно один активный сбор, в котором вы участвуете. "
+            "Иначе используйте кнопку «Добавить затрату»."
+        )
+        return
+    usernames = list(
+        dict.fromkeys(
+            token[1:].lower() for token in tokens[1:] if re.fullmatch(r"@[A-Za-z0-9_]+", token)
+        )
+    )
+    comment_tokens = [token for token in tokens[1:] if not re.fullmatch(r"@[A-Za-z0-9_]+", token)]
+    if not usernames:
+        await message.reply(
+            "Отметьте хотя бы одного участника после суммы или используйте кнопочный сценарий."
+        )
+        return
+    participant_ids: list[int] = []
+    unknown: list[str] = []
+    for username in usernames:
+        user = await service.user_by_username(username)
+        if not user or not await service.is_participant(collections[0]["id"], user["id"]):
+            unknown.append(f"@{username}")
+        else:
+            participant_ids.append(user["id"])
+    if unknown:
+        await message.reply(
+            "Не нажали «Участвовать в сборе» или сменили username: "
+            + ", ".join(escape(item) for item in unknown)
+        )
+        return
+    transaction_id = await service.add_expense(
+        collections[0]["id"],
+        message.from_user.id,
+        amount,
+        participant_ids,
+        " ".join(comment_tokens),
+    )
+    await message.reply(
+        f"✅ Затрата #{transaction_id} добавлена в «{escape(collections[0]['title'])}»: "
+        f"<b>{format_money(amount, collections[0]['currency'])}</b> на "
+        f"{', '.join('@' + escape(name) for name in usernames)}.",
+        parse_mode="HTML",
+    )
+
+
+@router.error()
+async def domain_error_handler(event) -> bool:
+    exception = event.exception
+    if not isinstance(exception, DomainError):
+        return False
+    update = event.update
+    if update.callback_query:
+        await update.callback_query.answer(str(exception), show_alert=True)
+    elif update.message:
+        await update.message.answer(f"⚠️ {escape(str(exception))}", parse_mode="HTML")
+    return True
