@@ -71,7 +71,7 @@ def test_validate_init_data_rejects_duplicate_fields():
         validate_init_data(raw, TOKEN)
 
 
-def test_collection_invite_always_uses_safe_start_link():
+def test_collection_invite_uses_safe_fallback_or_enabled_main_app():
     settings = Settings(bot_token=TOKEN, main_app_enabled=False)
     buttons = [
         button for row in _collection_invite_markup(settings, 42).inline_keyboard for button in row
@@ -85,8 +85,8 @@ def test_collection_invite_always_uses_safe_start_link():
     enabled_buttons = [
         button for row in _collection_invite_markup(settings, 42).inline_keyboard for button in row
     ]
-    assert not any(button.url and "startapp" in button.url for button in enabled_buttons)
-    assert any(button.url and "start=app" in button.url for button in enabled_buttons)
+    assert any(button.url and "startapp=collection_42" in button.url for button in enabled_buttons)
+    assert not any(button.url and "start=app" in button.url for button in enabled_buttons)
 
 
 @pytest.mark.asyncio

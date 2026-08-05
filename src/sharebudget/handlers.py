@@ -33,6 +33,7 @@ from .keyboards import (
     transaction_actions,
     webapp_launch,
 )
+from .links import group_start_param
 from .money import format_money, parse_amount
 from .render import collection_text, history_text, transaction_text, user_label
 from .service import BudgetService, DomainError
@@ -111,9 +112,11 @@ async def collection_markup(
         ChatType.SUPERGROUP,
     ):
         bot_user = await message.bot.get_me()
-        # Main Mini App is not enabled for every bot installation. A regular
-        # /start deep link is supported universally and never produces BOT_INVALID.
-        app_url = f"https://t.me/{bot_user.username}?start=app"
+        app_url = (
+            f"https://t.me/{bot_user.username}?startapp=collection_{collection['id']}&mode=compact"
+            if bot_user.has_main_web_app
+            else f"https://t.me/{bot_user.username}?start=app"
+        )
     shared_group_screen = message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
     if shared_group_screen:
         return collection_actions(collection, False, False, None, app_url)
@@ -240,12 +243,15 @@ async def open_webapp(message: Message, settings: Settings) -> None:
         return
     if message.chat.type != ChatType.PRIVATE:
         bot_user = await message.bot.get_me()
-        app_url = f"https://t.me/{bot_user.username}?start=app"
-        text = (
-            "📱 Нажмите кнопку ниже. Telegram откроет личный чат, а затем покажет "
-            "защищённую кнопку входа в ShakeOnIt."
-        )
-        button_text = "📱 Перейти к приложению"
+        if bot_user.has_main_web_app:
+            chat_param = group_start_param(message.chat.id, settings.bot_token)
+            app_url = f"https://t.me/{bot_user.username}?startapp={chat_param}&mode=compact"
+            text = "📱 Откройте сборы этой группы прямо в ShakeOnIt."
+            button_text = "📱 Открыть приложение"
+        else:
+            app_url = f"https://t.me/{bot_user.username}?start=app"
+            text = "📱 Перейдите в личный чат и откройте защищённую кнопку ShakeOnIt."
+            button_text = "📱 Перейти к приложению"
         await message.answer(
             text,
             reply_markup=InlineKeyboardMarkup(
@@ -1049,7 +1055,11 @@ async def quick_expense_collection(
 @router.inline_query()
 async def inline_hint(inline_query: InlineQuery) -> None:
     bot_user = await inline_query.bot.get_me()
-    app_url = f"https://t.me/{bot_user.username}?start=app"
+    app_url = (
+        f"https://t.me/{bot_user.username}?startapp=home&mode=compact"
+        if bot_user.has_main_web_app
+        else f"https://t.me/{bot_user.username}?start=app"
+    )
     await inline_query.answer(
         results=[
             InlineQueryResultArticle(

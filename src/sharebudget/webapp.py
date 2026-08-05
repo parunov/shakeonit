@@ -155,11 +155,16 @@ async def _report(bot: Bot, chat_id: int, text: str, reply_markup=None) -> bool:
 
 def _collection_invite_markup(settings: Settings, collection_id: int) -> InlineKeyboardMarkup:
     username = settings.bot_username.lstrip("@")
+    app_url = (
+        f"https://t.me/{username}?startapp=collection_{collection_id}&mode=compact"
+        if settings.main_app_enabled
+        else f"https://t.me/{username}?start=app"
+    )
     rows = [
         [
             InlineKeyboardButton(
-                text="📱 Перейти к приложению",
-                url=f"https://t.me/{username}?start=app",
+                text="📱 Открыть сбор",
+                url=app_url,
             )
         ],
         [

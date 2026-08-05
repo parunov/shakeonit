@@ -421,8 +421,12 @@ app.addEventListener("click", async (event) => {
     if (action === "payment") return paymentSheet();
     if (action === "share-invite") {
       const collection = state.collection.collection;
-      const inviteUrl = `https://t.me/${state.bootstrap.bot_username}?start=collection_${collection.id}`;
-      const inviteText = `Присоединяйся к сбору «${collection.title}» в ShakeOnIt. Открой ссылку — бот добавит тебя автоматически.`;
+      const inviteUrl = state.bootstrap.main_app_enabled
+        ? `https://t.me/${state.bootstrap.bot_username}?startapp=collection_${collection.id}&mode=compact`
+        : `https://t.me/${state.bootstrap.bot_username}?start=collection_${collection.id}`;
+      const inviteText = state.bootstrap.main_app_enabled
+        ? `Присоединяйся к сбору «${collection.title}» в ShakeOnIt. Ссылка сразу откроет приложение.`
+        : `Присоединяйся к сбору «${collection.title}» в ShakeOnIt. Открой ссылку — бот добавит тебя автоматически.`;
       const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(inviteUrl)}&text=${encodeURIComponent(inviteText)}`;
       haptic();
       if (tg?.openTelegramLink) tg.openTelegramLink(shareUrl);
