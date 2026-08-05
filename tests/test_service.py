@@ -36,6 +36,33 @@ async def test_expense_and_repayment_update_balances(service):
     debts = await service.settlement(collection_id)
     assert [(d.debtor_id, d.creditor_id, d.amount) for d in debts] == [(3, 1, 3000)]
 
+    snapshot = await service.collection_snapshot(collection_id)
+    assert snapshot.total == 9000
+    assert snapshot.balances == {1: 3000, 2: 0, 3: -3000}
+    assert [(d.debtor_id, d.creditor_id, d.amount) for d in snapshot.debts] == [(3, 1, 3000)]
+
+
+@pytest.mark.asyncio
+async def test_visible_collections_include_group_catalog_and_user_collections(service):
+    own_group_collection = await service.create_collection(-100, "Берлин", "EUR", 1)
+    available_group_collection = await service.create_collection(-100, "Подарок", "EUR", 2)
+    own_other_group_collection = await service.create_collection(-200, "Варшава", "USD", 3)
+    await service.join(own_other_group_collection, 1)
+
+    group_rows = await service.list_visible_collections(1, -100)
+    assert [row["id"] for row in group_rows] == [
+        own_group_collection,
+        available_group_collection,
+        own_other_group_collection,
+    ]
+    assert [row["is_participant"] for row in group_rows] == [1, 0, 1]
+
+    private_rows = await service.list_visible_collections(1)
+    assert {row["id"] for row in private_rows} == {
+        own_group_collection,
+        own_other_group_collection,
+    }
+
 
 @pytest.mark.asyncio
 async def test_cancel_removes_effect_but_keeps_history(service):

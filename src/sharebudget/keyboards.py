@@ -14,7 +14,7 @@ from .money import CURRENCIES
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="➕ Создать сбор"), KeyboardButton(text="📋 Мои сборы")],
+            [KeyboardButton(text="➕ Создать сбор"), KeyboardButton(text="📋 Сборы")],
             [KeyboardButton(text="💸 Добавить затрату"), KeyboardButton(text="🤝 Вернуть долг")],
             [KeyboardButton(text="⚖️ Мой баланс"), KeyboardButton(text="💳 Платежные данные")],
             [KeyboardButton(text="🎓 Обучение"), KeyboardButton(text="❓ Помощь")],
@@ -36,6 +36,7 @@ def collections_keyboard(rows, action: str = "open") -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for row in rows:
         marker = "📦 " if row["status"] == "archived" else ""
+        marker += "✅ " if row["is_participant"] else "➕ "
         builder.button(
             text=f"{marker}{row['title']} · {row['currency']}",
             callback_data=f"{action}:{row['id']}",

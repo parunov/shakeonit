@@ -43,7 +43,7 @@ async def main() -> None:
         [
             BotCommand(command="menu", description="Главное меню"),
             BotCommand(command="new", description="Создать сбор в группе"),
-            BotCommand(command="collections", description="Мои сборы"),
+            BotCommand(command="collections", description="Сборы"),
             BotCommand(command="expense", description="Добавить затрату"),
             BotCommand(command="repay", description="Вернуть долг"),
             BotCommand(command="balance", description="Мой баланс"),

@@ -209,20 +209,30 @@ async def collection_currency(
 
 
 @router.message(Command("collections"))
+@router.message(F.text == "📋 Сборы")
 @router.message(F.text == "📋 Мои сборы")
-async def my_collections(message: Message, service: BudgetService) -> None:
+async def collections(message: Message, service: BudgetService) -> None:
     await sync_user(service, message)
-    rows = await service.list_collections(message.from_user.id)
+    chat_id = (
+        message.chat.id if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP) else None
+    )
+    rows = await service.list_visible_collections(message.from_user.id, chat_id)
     if not rows:
-        await message.answer("Вы пока не участвуете ни в одном сборе.")
+        await message.answer("Доступных сборов пока нет.")
         return
-    await message.answer("Ваши активные и архивные сборы:", reply_markup=collections_keyboard(rows))
+    title = (
+        "Активные сборы этой группы и сборы, в которых вы участвуете:\n"
+        "✅ участвуете · ➕ можно вступить · 📦 архив"
+        if chat_id is not None
+        else "Сборы, в которых вы участвуете:"
+    )
+    await message.answer(title, reply_markup=collections_keyboard(rows))
 
 
 @router.callback_query(F.data.startswith("open:"))
 async def open_collection(callback: CallbackQuery, service: BudgetService) -> None:
-    await sync_user(service, callback)
     await callback.answer()
+    await sync_user(service, callback)
     await show_collection(
         callback.message, int(callback.data.split(":")[1]), callback.from_user.id, service
     )
@@ -380,11 +390,11 @@ async def repay_collection(
     collection_id = int(callback.data.split(":")[1])
     if not await service.is_participant(collection_id, callback.from_user.id):
         raise DomainError("Сначала вступите в сбор")
-    debts = await service.settlement(collection_id)
-    creditor_ids = {debt.creditor_id for debt in debts if debt.debtor_id == callback.from_user.id}
-    rows = [
-        row for row in await service.list_participants(collection_id) if row["id"] in creditor_ids
-    ]
+    snapshot = await service.collection_snapshot(collection_id)
+    creditor_ids = {
+        debt.creditor_id for debt in snapshot.debts if debt.debtor_id == callback.from_user.id
+    }
+    rows = [row for row in snapshot.participants if row["id"] in creditor_ids]
     if not rows:
         await callback.answer("По текущему балансу у вас нет долгов", show_alert=True)
         return
@@ -435,6 +445,7 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
 
 @router.callback_query(F.data.startswith("history:"))
 async def history(callback: CallbackQuery, service: BudgetService) -> None:
+    await callback.answer()
     await sync_user(service, callback)
     _, collection_id_raw, offset_raw = callback.data.split(":")
     collection_id, offset = int(collection_id_raw), int(offset_raw)
@@ -443,11 +454,10 @@ async def history(callback: CallbackQuery, service: BudgetService) -> None:
     collection = await service.get_collection(collection_id)
     page = await service.history(collection_id, 11, offset)
     rows = page[:10]
-    participants = await service.list_participants(collection_id)
-    text = history_text(
-        collection, rows, await service.collection_total(collection_id), len(participants)
-    )
-    debts = await service.settlement(collection_id)
+    snapshot = await service.collection_snapshot(collection_id)
+    participants = snapshot.participants
+    text = history_text(collection, rows, snapshot.total, len(participants))
+    debts = snapshot.debts
     names = {row["id"]: user_label(row) for row in participants}
     text += "\n\n<b>Финальный список балансов</b>\n"
     text += (
@@ -459,7 +469,6 @@ async def history(callback: CallbackQuery, service: BudgetService) -> None:
         if debts
         else "✅ Все рассчитались"
     )
-    await callback.answer()
     await safe_edit(
         callback.message,
         text,
@@ -563,13 +572,15 @@ async def balance_start(message: Message, service: BudgetService) -> None:
 
 @router.callback_query(F.data.startswith("mybalance:"))
 async def my_balance(callback: CallbackQuery, service: BudgetService) -> None:
+    await callback.answer()
     collection_id = int(callback.data.split(":")[1])
     collection = await service.get_collection(collection_id)
     if not await service.is_participant(collection_id, callback.from_user.id):
         raise DomainError("Вы не участвуете в этом сборе")
-    participants = await service.list_participants(collection_id)
+    snapshot = await service.collection_snapshot(collection_id)
+    participants = snapshot.participants
     names = {row["id"]: user_label(row) for row in participants}
-    debts = await service.settlement(collection_id)
+    debts = snapshot.debts
     personal = [
         debt for debt in debts if callback.from_user.id in (debt.debtor_id, debt.creditor_id)
     ]
@@ -587,7 +598,6 @@ async def my_balance(callback: CallbackQuery, service: BudgetService) -> None:
                 f"\n{names[debt.debtor_id]} должен вам: "
                 f"<b>{format_money(debt.amount, collection['currency'])}</b>"
             )
-    await callback.answer()
     await safe_edit(
         callback.message,
         "".join(lines),

@@ -11,16 +11,17 @@ def user_label(row) -> str:
 
 
 async def collection_text(service, collection) -> str:
-    participants = await service.list_participants(collection["id"])
-    balances = await service.get_balances(collection["id"])
-    debts = await service.settlement(collection["id"])
+    snapshot = await service.collection_snapshot(collection["id"])
+    participants = snapshot.participants
+    balances = snapshot.balances
+    debts = snapshot.debts
     names = {row["id"]: user_label(row) for row in participants}
     currency = collection["currency"]
     status = "активен" if collection["status"] == "active" else "в архиве"
     lines = [
         f"<b>🧾 {escape(collection['title'])}</b>",
         f"Валюта: <b>{currency}</b> · Участников: <b>{len(participants)}</b> · {status}",
-        f"Всего затрат: <b>{format_money(await service.collection_total(collection['id']), currency)}</b>",
+        f"Всего затрат: <b>{format_money(snapshot.total, currency)}</b>",
         "",
         "<b>Нынешние балансы</b>",
     ]

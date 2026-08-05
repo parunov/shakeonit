@@ -74,11 +74,19 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.path) as connection:
             await connection.executescript(SCHEMA)
+            await connection.execute("PRAGMA journal_mode = WAL")
+            await connection.execute("PRAGMA synchronous = NORMAL")
             columns = await connection.execute_fetchall("PRAGMA table_info(participants)")
             if "active" not in {column[1] for column in columns}:
                 await connection.execute(
                     "ALTER TABLE participants ADD COLUMN active INTEGER NOT NULL DEFAULT 1"
                 )
+            await connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_participants_user_active
+                ON participants(user_id, active, collection_id)
+                """
+            )
             await connection.commit()
 
     @asynccontextmanager
@@ -86,6 +94,8 @@ class Database:
         connection = await aiosqlite.connect(self.path)
         connection.row_factory = aiosqlite.Row
         await connection.execute("PRAGMA foreign_keys = ON")
+        await connection.execute("PRAGMA busy_timeout = 5000")
+        await connection.execute("PRAGMA synchronous = NORMAL")
         try:
             yield connection
         finally:

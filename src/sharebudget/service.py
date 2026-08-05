@@ -19,6 +19,14 @@ class Debt:
     amount: int
 
 
+@dataclass(frozen=True)
+class CollectionSnapshot:
+    participants: list
+    balances: dict[int, int]
+    debts: list[Debt]
+    total: int
+
+
 async def _fetchone(connection, query: str, params=()):
     cursor = await connection.execute(query, params)
     return await cursor.fetchone()
@@ -89,7 +97,8 @@ class BudgetService:
         query = f"""
             SELECT c.*,
                 (SELECT COUNT(*) FROM participants p2
-                 WHERE p2.collection_id=c.id AND p2.active=1) participants_count
+                 WHERE p2.collection_id=c.id AND p2.active=1) participants_count,
+                1 is_participant
             FROM collections c JOIN participants p ON p.collection_id=c.id
             WHERE p.user_id=? AND p.active=1 AND c.status IN {statuses}
         """
@@ -98,6 +107,37 @@ class BudgetService:
             query += " AND c.chat_id=?"
             params.append(chat_id)
         query += " ORDER BY c.status, c.created_at DESC"
+        async with self.db.connect() as connection:
+            return await connection.execute_fetchall(query, params)
+
+    async def list_visible_collections(self, user_id: int, chat_id: int | None = None):
+        query = """
+            SELECT c.*,
+                (SELECT COUNT(*) FROM participants p2
+                 WHERE p2.collection_id=c.id AND p2.active=1) participants_count,
+                EXISTS(
+                    SELECT 1 FROM participants mine
+                    WHERE mine.collection_id=c.id AND mine.user_id=? AND mine.active=1
+                ) is_participant
+            FROM collections c
+            WHERE c.status IN ('active','archived')
+              AND (
+                EXISTS(
+                    SELECT 1 FROM participants mine
+                    WHERE mine.collection_id=c.id AND mine.user_id=? AND mine.active=1
+                )
+        """
+        params: list[int] = [user_id, user_id]
+        if chat_id is not None:
+            query += " OR (c.chat_id=? AND c.status='active')"
+            params.append(chat_id)
+        query += ")"
+        if chat_id is not None:
+            query += " ORDER BY (c.chat_id=? AND c.status='active') DESC, "
+            params.append(chat_id)
+        else:
+            query += " ORDER BY "
+        query += "is_participant DESC, c.status, c.created_at DESC"
         async with self.db.connect() as connection:
             return await connection.execute_fetchall(query, params)
 
@@ -149,6 +189,56 @@ class BudgetService:
                 """,
                 (collection_id,),
             )
+
+    async def collection_snapshot(self, collection_id: int) -> CollectionSnapshot:
+        async with self.db.connect() as connection:
+            participants = await connection.execute_fetchall(
+                """
+                SELECT u.id,u.username,u.full_name,u.payment_details,p.joined_at,
+                       c.admin_id=u.id AS is_admin
+                FROM participants p JOIN users u ON u.id=p.user_id
+                JOIN collections c ON c.id=p.collection_id
+                WHERE p.collection_id=? AND p.active=1
+                ORDER BY is_admin DESC,u.full_name
+                """,
+                (collection_id,),
+            )
+            ledger = await connection.execute_fetchall(
+                """
+                WITH ledger(user_id, delta) AS (
+                    SELECT creator_id, amount FROM transactions
+                    WHERE collection_id=? AND kind='expense' AND status='active'
+                    UNION ALL
+                    SELECT s.user_id, -s.amount FROM expense_shares s
+                    JOIN transactions t ON t.id=s.transaction_id
+                    WHERE t.collection_id=? AND t.status='active'
+                    UNION ALL
+                    SELECT creator_id, amount FROM transactions
+                    WHERE collection_id=? AND kind='repayment' AND status='active'
+                    UNION ALL
+                    SELECT counterparty_id, -amount FROM transactions
+                    WHERE collection_id=? AND kind='repayment' AND status='active'
+                )
+                SELECT user_id, SUM(delta) balance FROM ledger GROUP BY user_id
+                """,
+                (collection_id, collection_id, collection_id, collection_id),
+            )
+            total_row = await _fetchone(
+                connection,
+                """
+                SELECT COALESCE(SUM(amount),0) total FROM transactions
+                WHERE collection_id=? AND kind='expense' AND status='active'
+                """,
+                (collection_id,),
+            )
+        balances = {row["id"]: 0 for row in participants}
+        balances.update({row["user_id"]: row["balance"] for row in ledger})
+        return CollectionSnapshot(
+            participants=participants,
+            balances=balances,
+            debts=simplify_balances(balances),
+            total=total_row["total"],
+        )
 
     async def add_expense(
         self,
@@ -219,47 +309,10 @@ class BudgetService:
             return int(cursor.lastrowid)
 
     async def get_balances(self, collection_id: int) -> dict[int, int]:
-        participants = await self.list_participants(collection_id)
-        balances = {row["id"]: 0 for row in participants}
-        async with self.db.connect() as connection:
-            expenses = await connection.execute_fetchall(
-                """
-                SELECT t.creator_id,t.amount FROM transactions t
-                WHERE t.collection_id=? AND t.kind='expense' AND t.status='active'
-                """,
-                (collection_id,),
-            )
-            shares = await connection.execute_fetchall(
-                """
-                SELECT s.user_id,s.amount FROM expense_shares s
-                JOIN transactions t ON t.id=s.transaction_id
-                WHERE t.collection_id=? AND t.status='active'
-                """,
-                (collection_id,),
-            )
-            repayments = await connection.execute_fetchall(
-                """
-                SELECT creator_id,counterparty_id,amount FROM transactions
-                WHERE collection_id=? AND kind='repayment' AND status='active'
-                """,
-                (collection_id,),
-            )
-        for row in expenses:
-            balances.setdefault(row["creator_id"], 0)
-            balances[row["creator_id"]] += row["amount"]
-        for row in shares:
-            balances.setdefault(row["user_id"], 0)
-            balances[row["user_id"]] -= row["amount"]
-        for row in repayments:
-            balances.setdefault(row["creator_id"], 0)
-            balances.setdefault(row["counterparty_id"], 0)
-            balances[row["creator_id"]] += row["amount"]
-            balances[row["counterparty_id"]] -= row["amount"]
-        return balances
+        return (await self.collection_snapshot(collection_id)).balances
 
     async def settlement(self, collection_id: int) -> list[Debt]:
-        balances = await self.get_balances(collection_id)
-        return simplify_balances(balances)
+        return (await self.collection_snapshot(collection_id)).debts
 
     async def history(self, collection_id: int, limit: int = 50, offset: int = 0):
         await self._collection(collection_id)
