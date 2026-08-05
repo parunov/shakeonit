@@ -12,7 +12,12 @@ from urllib.parse import parse_qsl
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import KeyboardButton, KeyboardButtonRequestChat
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    KeyboardButtonRequestChat,
+)
 from aiohttp import web
 
 from .config import Settings
@@ -127,13 +132,14 @@ async def _require_member(service: BudgetService, collection_id: int, user_id: i
     return collection
 
 
-async def _report(bot: Bot, chat_id: int, text: str) -> bool:
+async def _report(bot: Bot, chat_id: int, text: str, reply_markup=None) -> bool:
     try:
         await bot.send_message(
             chat_id,
             text,
             parse_mode="HTML",
             disable_notification=True,
+            reply_markup=reply_markup,
         )
         return True
     except TelegramAPIError:
@@ -189,6 +195,19 @@ async def bootstrap(request: web.Request) -> web.Response:
     rows = await service.list_visible_collections(user_id)
     chats = await service.list_user_collection_chats(user_id)
     user = await service.get_user(user_id)
+    invitation = None
+    start_param = request[AUTH_KEY].get("start_param", "")
+    if start_param.startswith("collection_"):
+        try:
+            target_id = int(start_param.removeprefix("collection_"))
+        except ValueError:
+            target_id = 0
+        target = await service.get_collection(target_id) if target_id else None
+        if target and target["status"] == "active":
+            invitation = {
+                "collection": _collection(target),
+                "is_participant": await service.is_participant(target_id, user_id),
+            }
     return web.json_response(
         {
             "ok": True,
@@ -207,6 +226,7 @@ async def bootstrap(request: web.Request) -> web.Response:
                 for row in chats
             ],
             "currencies": list(CURRENCIES),
+            "invitation": invitation,
         }
     )
 
@@ -217,6 +237,9 @@ async def collection_details(request: web.Request) -> web.Response:
     collection = await _require_member(service, collection_id, user["id"])
     snapshot = await service.collection_snapshot(collection_id)
     history = await service.history(collection_id, 100)
+    shares = await service.expense_shares_for_transactions(
+        row["id"] for row in history if row["kind"] == "expense"
+    )
     names = {row["id"]: row["full_name"] for row in snapshot.participants}
     return web.json_response(
         {
@@ -249,8 +272,11 @@ async def collection_details(request: web.Request) -> web.Response:
                     "amount": row["amount"],
                     "comment": row["comment"],
                     "status": row["status"],
+                    "confirmation_status": row["confirmation_status"],
+                    "confirmed_at": row["confirmed_at"],
                     "created_at": row["created_at"],
                     "shared_with": row["shared_with"],
+                    "shares": shares.get(row["id"], []),
                 }
                 for row in history
             ],
@@ -330,13 +356,90 @@ async def add_repayment(request: web.Request) -> web.Response:
         collection_id, user["id"], creditor_id, amount, comment
     )
     creditor = await _member(service, collection_id, creditor_id)
+    confirm_markup = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтвердить получение",
+                    callback_data=f"repayconfirm:{transaction_id}",
+                )
+            ]
+        ]
+    )
     sent = await _report(
         bot,
         collection["chat_id"],
-        f"🤝 {_name(user)} вернул долг {escape(creditor['full_name'])}: "
-        f"<b>{format_money(amount, collection['currency'])}</b>",
+        f"⏳ {_name(user)} сообщил о возврате долга {escape(creditor['full_name'])}: "
+        f"<b>{format_money(amount, collection['currency'])}</b>. Баланс изменится после "
+        "подтверждения получателем.",
+        confirm_markup,
     )
+    try:
+        await bot.send_message(
+            creditor_id,
+            f"🤝 <b>Подтвердите получение</b>\n\nВозврат #{transaction_id}: "
+            f"<b>{format_money(amount, collection['currency'])}</b>\n"
+            f"Сбор: {escape(collection['title'])}",
+            parse_mode="HTML",
+            reply_markup=confirm_markup,
+        )
+    except TelegramAPIError:
+        LOGGER.info("Creditor %s has no private chat with bot", creditor_id)
     return web.json_response({"ok": True, "transaction_id": transaction_id, "report_sent": sent})
+
+
+async def confirm_repayment(request: web.Request) -> web.Response:
+    service, bot, user = _context(request)
+    transaction_id = int(request.match_info["transaction_id"])
+    transaction = await service.transaction(transaction_id)
+    if not transaction:
+        raise ApiError("Возврат долга не найден", 404)
+    collection = await _require_member(service, transaction["collection_id"], user["id"])
+    await service.confirm_repayment(transaction_id, user["id"])
+    sent = await _report(
+        bot,
+        collection["chat_id"],
+        f"✅ {_name(user)} подтвердил получение возврата #{transaction_id}: "
+        f"<b>{format_money(transaction['amount'], collection['currency'])}</b>. "
+        "Балансы пересчитаны.",
+    )
+    return web.json_response({"ok": True, "report_sent": sent})
+
+
+async def join_collection(request: web.Request) -> web.Response:
+    service, bot, user = _context(request)
+    collection_id = int(request.match_info["collection_id"])
+    collection = await service.get_collection(collection_id)
+    if not collection or collection["status"] != "active":
+        raise ApiError("Активный сбор не найден", 404)
+    await service.join(collection_id, user["id"])
+    sent = await _report(
+        bot,
+        collection["chat_id"],
+        f"🙋 {_name(user)} участвует в сборе <b>«{escape(collection['title'])}»</b>.",
+    )
+    return web.json_response({"ok": True, "report_sent": sent})
+
+
+async def global_history(request: web.Request) -> web.Response:
+    service, _, user = _context(request)
+    transactions, events = await service.global_history(user["id"])
+    shares = await service.expense_shares_for_transactions(
+        row["id"] for row in transactions if row["kind"] == "expense"
+    )
+    return web.json_response(
+        {
+            "ok": True,
+            "transactions": [
+                {
+                    **dict(row),
+                    "shares": shares.get(row["id"], []),
+                }
+                for row in transactions
+            ],
+            "events": [dict(row) for row in events],
+        }
+    )
 
 
 async def edit_transaction(request: web.Request) -> web.Response:
@@ -498,11 +601,13 @@ def setup_webapp_routes(
     application.router.add_get("/app/", app_index)
     application.router.add_get("/app/static/{filename}", app_asset)
     application.router.add_get("/api/bootstrap", bootstrap)
+    application.router.add_get("/api/history", global_history)
     application.router.add_get("/api/collections/{collection_id}", collection_details)
     application.router.add_post("/api/collections", create_collection)
     application.router.add_post("/api/chats/prepare", prepare_chat_request)
     application.router.add_post("/api/collections/{collection_id}/expenses", add_expense)
     application.router.add_post("/api/collections/{collection_id}/repayments", add_repayment)
+    application.router.add_post("/api/collections/{collection_id}/join", join_collection)
     application.router.add_post("/api/collections/{collection_id}/leave", leave_collection)
     application.router.add_post("/api/collections/{collection_id}/archive", archive_collection)
     application.router.add_post("/api/collections/{collection_id}/restore", restore_collection)
@@ -510,4 +615,5 @@ def setup_webapp_routes(
     application.router.add_post("/api/collections/{collection_id}/remove", remove_member)
     application.router.add_patch("/api/transactions/{transaction_id}", edit_transaction)
     application.router.add_post("/api/transactions/{transaction_id}/cancel", cancel_transaction)
+    application.router.add_post("/api/transactions/{transaction_id}/confirm", confirm_repayment)
     application.router.add_patch("/api/me/payment", save_payment)

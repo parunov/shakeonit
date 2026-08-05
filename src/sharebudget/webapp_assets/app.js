@@ -191,6 +191,36 @@ function renderProfile() {
   updateNav();
 }
 
+async function renderHistory() {
+  state.nav = "history";
+  state.collection = null;
+  title.textContent = "История";
+  tg?.BackButton?.hide();
+  app.innerHTML = `<section class="loading-card"><div class="spinner"></div><p>Собираем всю историю…</p></section>`;
+  updateNav();
+  const data = await api("/api/history");
+  const eventLabels = {
+    created: "создал сбор", joined: "вступил в сбор", left: "вышел из сбора",
+    member_removed: "удалил участника", admin_transferred: "передал роль администратора",
+    archived: "завершил сбор", restored: "восстановил сбор",
+  };
+  const transactions = data.transactions.map((item) => {
+    const status = item.status === "cancelled" ? '<span class="pill cancelled">отменено</span>' : item.kind === "repayment" && item.confirmation_status === "pending" ? '<span class="pill pending">ожидает</span>' : item.kind === "repayment" ? '<span class="pill">подтверждено</span>' : "";
+    const shares = item.kind === "expense" && item.shares.length ? `<div class="share-breakdown">${item.shares.map((share) => `<div class="row-note">${e(share.full_name)} — ${money(share.amount, item.currency)}</div>`).join("")}</div>` : "";
+    return `<article class="history-row"><div class="row-between"><div><div class="row-title">${item.kind === "expense" ? "💸" : "🤝"} ${e(item.collection_title)}</div><div class="row-note">${e(item.creator_name)} · ${shortDate(item.created_at)}</div></div><div class="amount">${money(item.amount, item.currency)}</div></div><div class="row-note">${e(item.comment || (item.kind === "expense" ? "Затрата" : `Возврат → ${item.counterparty_name}`))} ${status}</div>${shares}</article>`;
+  }).join("");
+  const events = data.events.map((item) => `<article class="history-row"><div class="row-title">${e(item.collection_title)}</div><div class="row-note">${shortDate(item.created_at)} · ${e(item.actor_name)} ${e(eventLabels[item.kind] || item.kind)}${item.target_name && item.target_name !== item.actor_name ? ` · ${e(item.target_name)}` : ""}</div></article>`).join("");
+  app.innerHTML = `<section class="hero"><div class="hero-label">ЛЕНТА ДЕЙСТВИЙ</div><div class="hero-value">${data.transactions.length}</div><div class="hero-meta">операций во всех ваших сборах</div></section><div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}<div class="section-head"><h2>История сборов</h2></div>${events ? `<div class="card">${events}</div>` : empty("🧾", "Событий пока нет")}`;
+}
+
+function renderInvitation() {
+  const invitation = state.bootstrap.invitation;
+  state.nav = "collections";
+  title.textContent = invitation.collection.title;
+  updateNav();
+  app.innerHTML = `<section class="hero"><div class="hero-label">ПРИГЛАШЕНИЕ В СБОР</div><div class="hero-value">${e(invitation.collection.title)}</div><div class="hero-meta">Валюта · ${e(invitation.collection.currency)}</div></section><div class="status-banner">Нажмите кнопку — Telegram ID будет безопасно получен из Mini App, без логина и пароля.</div><button class="primary-button" type="button" data-action="join-invitation" data-id="${invitation.collection.id}">🙋 Участвовать в сборе</button>`;
+}
+
 function updateNav() {
   nav.querySelectorAll("button").forEach((button) => button.classList.toggle("active", button.dataset.nav === state.nav));
 }
@@ -247,9 +277,14 @@ function renderCollectionPanel(data, isAdmin) {
   if (state.collectionTab === "history") {
     if (!data.history.length) return empty("📜", "История пока пуста");
     return `<div class="card">${data.history.map((item) => {
-      const canEdit = item.status === "active" && collection.status === "active" && (isAdmin || item.creator_id === state.bootstrap.user.id);
+      const isConfirmedRepayment = item.kind === "repayment" && item.confirmation_status === "confirmed";
+      const canEdit = item.status === "active" && !isConfirmedRepayment && collection.status === "active" && (isAdmin || item.creator_id === state.bootstrap.user.id);
+      const canCancel = item.status === "active" && collection.status === "active" && (isAdmin || (item.creator_id === state.bootstrap.user.id && !isConfirmedRepayment));
+      const canConfirm = item.kind === "repayment" && item.status === "active" && item.confirmation_status === "pending" && item.counterparty_id === state.bootstrap.user.id;
       const subject = item.kind === "expense" ? (item.comment || "Затрата") : `Возврат → ${item.counterparty_name}`;
-      return `<article class="history-row"><div class="row-between"><div><div class="row-title">${item.kind === "expense" ? "💸" : "🤝"} ${e(subject)}</div><div class="row-note">${e(item.creator_name)} · ${shortDate(item.created_at)}</div></div><div class="amount">${money(item.amount, collection.currency)}</div></div><div class="row-note">${item.kind === "expense" ? `На: ${e(item.shared_with || "—")}` : "Фактический перевод"} ${item.status === "cancelled" ? '<span class="pill cancelled">отменено</span>' : ""}</div>${canEdit ? `<div class="transaction-actions"><button class="mini-button" type="button" data-action="edit-transaction" data-id="${item.id}">Изменить</button><button class="mini-button danger" type="button" data-action="cancel-transaction" data-id="${item.id}">Отменить</button></div>` : ""}</article>`;
+      const status = item.status === "cancelled" ? '<span class="pill cancelled">отменено</span>' : item.kind === "repayment" && item.confirmation_status === "pending" ? '<span class="pill pending">ожидает подтверждения</span>' : item.kind === "repayment" ? '<span class="pill">подтверждено</span>' : "";
+      const shares = item.kind === "expense" ? `<div class="share-breakdown">${item.shares.map((share) => `<div class="row-note">${e(share.full_name)} — ${money(share.amount, collection.currency)}</div>`).join("")}</div>` : "";
+      return `<article class="history-row"><div class="row-between"><div><div class="row-title">${item.kind === "expense" ? "💸" : "🤝"} ${e(subject)}</div><div class="row-note">${e(item.creator_name)} · ${shortDate(item.created_at)}</div></div><div class="amount">${money(item.amount, collection.currency)}</div></div><div class="row-note">${item.kind === "expense" ? "Распределение по людям" : "Фактический перевод"} ${status}</div>${shares}${canConfirm ? `<div class="transaction-actions"><button class="mini-button" type="button" data-action="confirm-repayment" data-id="${item.id}">✅ Подтвердить получение</button></div>` : ""}${canEdit || canCancel ? `<div class="transaction-actions">${canEdit ? `<button class="mini-button" type="button" data-action="edit-transaction" data-id="${item.id}">Изменить</button>` : ""}${canCancel ? `<button class="mini-button danger" type="button" data-action="cancel-transaction" data-id="${item.id}">Отменить</button>` : ""}</div>` : ""}</article>`;
     }).join("")}</div>`;
   }
   if (state.collectionTab === "members") {
@@ -275,7 +310,11 @@ function repaySheet() {
     toast("По текущему балансу у вас нет долгов");
     return;
   }
-  showSheet(`<h2>Вернуть долг</h2><p class="sheet-intro">Запишите только уже выполненный перевод.</p><form id="repay-form"><label class="field"><span>Получатель</span><select name="creditor_id">${debts.map((debt) => `<option value="${debt.creditor_id}">${e(debt.creditor_name)} · до ${money(debt.amount, data.collection.currency)}</option>`).join("")}</select></label><label class="field"><span>Переведено · ${e(data.collection.currency)}</span><input name="amount" inputmode="decimal" placeholder="0,00" required></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" placeholder="Необязательно"></label><div class="sheet-actions"><button class="primary-button" type="submit">Записать возврат</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+  const cards = debts.map((debt, index) => {
+    const member = data.participants.find((item) => item.id === debt.creditor_id);
+    return `<div class="payment-card" data-payment="${debt.creditor_id}" ${index ? "hidden" : ""}><b>💳 Данные для перевода</b><br>${e(member?.payment_details || "Получатель пока не добавил платежные данные")}</div>`;
+  }).join("");
+  showSheet(`<h2>Вернуть долг</h2><p class="sheet-intro">После записи получатель должен подтвердить деньги. До этого баланс не изменится.</p><form id="repay-form"><label class="field"><span>Получатель</span><select name="creditor_id" data-action="repay-creditor">${debts.map((debt) => `<option value="${debt.creditor_id}">${e(debt.creditor_name)} · до ${money(debt.amount, data.collection.currency)}</option>`).join("")}</select></label>${cards}<label class="field"><span>Переведено · ${e(data.collection.currency)}</span><input name="amount" inputmode="decimal" placeholder="0,00" required></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" placeholder="Необязательно"></label><div class="sheet-actions"><button class="primary-button" type="submit">Отправить на подтверждение</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
 
 function editSheet(transactionId) {
@@ -311,6 +350,13 @@ app.addEventListener("click", async (event) => {
   const action = target.dataset.action;
   try {
     if (action === "open-collection") return await openCollection(target.dataset.id);
+    if (action === "join-invitation") {
+      setBusy(target, true);
+      const result = await api(`/api/collections/${target.dataset.id}/join`, { method: "POST", body: "{}" });
+      reportToast(result, "Вы участвуете в сборе");
+      await reloadBootstrap();
+      return await openCollection(target.dataset.id, "overview", true);
+    }
     if (action === "create") return createSheet();
     if (action === "expense") return expenseSheet();
     if (action === "repay") return repaySheet();
@@ -323,6 +369,13 @@ app.addEventListener("click", async (event) => {
       setBusy(target, true);
       const result = await api(`/api/transactions/${target.dataset.id}/cancel`, { method: "POST", body: "{}" });
       reportToast(result, "Транзакция отменена");
+      await refreshCurrent("history");
+    }
+    if (action === "confirm-repayment") {
+      if (!await confirmAction("Подтвердить, что деньги получены?")) return;
+      setBusy(target, true);
+      const result = await api(`/api/transactions/${target.dataset.id}/confirm`, { method: "POST", body: "{}" });
+      reportToast(result, "Получение подтверждено");
       await refreshCurrent("history");
     }
     if (action === "leave" || action === "archive" || action === "restore") {
@@ -373,6 +426,13 @@ sheet.addEventListener("click", async (event) => {
       toast(error.message, true);
     }
   }
+});
+
+sheet.addEventListener("change", (event) => {
+  if (event.target.dataset.action !== "repay-creditor") return;
+  sheet.querySelectorAll("[data-payment]").forEach((node) => {
+    node.hidden = node.dataset.payment !== event.target.value;
+  });
 });
 
 sheet.addEventListener("submit", async (event) => {
@@ -429,6 +489,7 @@ nav.addEventListener("click", async (event) => {
   try {
     if (button.dataset.nav === "collections") renderCollections();
     if (button.dataset.nav === "balance") await renderBalance();
+    if (button.dataset.nav === "history") await renderHistory();
     if (button.dataset.nav === "profile") renderProfile();
   } catch (error) { toast(error.message, true); }
 });
@@ -449,7 +510,13 @@ async function init() {
   }
   try {
     await reloadBootstrap();
-    renderCollections();
+    if (state.bootstrap.invitation?.is_participant) {
+      await openCollection(state.bootstrap.invitation.collection.id);
+    } else if (state.bootstrap.invitation) {
+      renderInvitation();
+    } else {
+      renderCollections();
+    }
   } catch (error) {
     nav.hidden = true;
     app.innerHTML = `<section class="auth-error"><span class="empty-icon">↻</span><h2>Не удалось открыть приложение</h2><p class="row-note">${e(error.message)}</p><div class="sheet-actions"><button class="primary-button" type="button" id="retry">Попробовать снова</button></div></section>`;

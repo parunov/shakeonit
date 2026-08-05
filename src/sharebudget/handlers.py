@@ -5,7 +5,7 @@ from html import escape
 
 from aiogram import F, Router
 from aiogram.enums import ChatType, ParseMode
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
@@ -47,7 +47,7 @@ HELP_TEXT = """<b>❓ Помощь</b>
 
 <b>Затрата</b> — один участник заплатил, а сумма делится поровну между выбранными людьми. Плательщика тоже можно выбрать.
 
-<b>Вернуть долг</b> — фактический перевод от одного участника другому. Он сразу уменьшает долг.
+<b>Вернуть долг</b> — фактический перевод от одного участника другому. Баланс изменится, когда получатель подтвердит деньги.
 
 На экране сбора всегда показаны чистые балансы и оптимальный список переводов. Отмена транзакции сохраняет ее в истории, но исключает из расчета.
 
@@ -108,17 +108,23 @@ async def collection_markup(
     is_admin: bool,
 ) -> InlineKeyboardMarkup:
     start_url = None
+    app_url = None
     if collection["status"] == "active" and message.chat.type in (
         ChatType.GROUP,
         ChatType.SUPERGROUP,
     ):
         start_url = await create_start_link(message.bot, payload=f"collection_{collection['id']}")
+        bot_user = await message.bot.get_me()
+        app_url = (
+            f"https://t.me/{bot_user.username}?startapp=collection_{collection['id']}&mode=compact"
+        )
     shared_group_screen = message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
     return collection_actions(
         collection,
         is_member or shared_group_screen,
         is_admin or shared_group_screen,
         start_url,
+        app_url,
     )
 
 
@@ -220,11 +226,17 @@ async def open_webapp(message: Message, settings: Settings) -> None:
         await message.answer("ℹ️ Приложение пока не настроено.")
         return
     if message.chat.type != ChatType.PRIVATE:
+        bot_user = await message.bot.get_me()
+        app_url = f"https://t.me/{bot_user.username}?startapp&mode=compact"
         start_url = await create_start_link(message.bot, payload="app")
         await message.answer(
-            "📱 Приложение открывается в личном чате с ботом.",
+            "📱 Откройте ShakeOnIt прямо из группы. Если Telegram ещё не активировал "
+            "Mini App, сначала нажмите «Подключиться».",
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="Открыть личный чат", url=start_url)]]
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📱 Открыть приложение", url=app_url)],
+                    [InlineKeyboardButton(text="🚀 Подключиться", url=start_url)],
+                ]
             ),
         )
         return
@@ -505,11 +517,24 @@ async def repay_collection(
 
 
 @router.callback_query(AddRepayment.creditor, F.data.startswith("creditor:"))
-async def repay_creditor(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(creditor_id=int(callback.data.split(":")[1]))
+async def repay_creditor(
+    callback: CallbackQuery, state: FSMContext, service: BudgetService
+) -> None:
+    creditor_id = int(callback.data.split(":")[1])
+    await state.update_data(creditor_id=creditor_id)
     await state.set_state(AddRepayment.amount)
     await callback.answer("✅ Получатель выбран")
-    await callback.message.answer("Введите фактически переведенную сумму:")
+    creditor = await service.get_user(creditor_id)
+    details = creditor["payment_details"].strip() if creditor else ""
+    payment_text = (
+        f"<b>💳 Данные для перевода · {escape(creditor['full_name'])}</b>\n{escape(details)}"
+        if details
+        else f"<b>💳 {escape(creditor['full_name'])}</b>\nПлатежные данные пока не добавлены."
+    )
+    await callback.message.answer(
+        f"{payment_text}\n\nВведите фактически переведенную сумму:",
+        parse_mode=ParseMode.HTML,
+    )
 
 
 @router.message(AddRepayment.amount)
@@ -526,17 +551,64 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
     collection = await service.get_collection(data["collection_id"])
     await state.clear()
     await message.answer(
-        f"✅ Возврат #{transaction_id} на сумму "
-        f"<b>{format_money(amount, collection['currency'])}</b> записан.",
+        f"⏳ Возврат #{transaction_id} на сумму "
+        f"<b>{format_money(amount, collection['currency'])}</b> отправлен получателю на "
+        "подтверждение. До подтверждения баланс не изменится.",
         parse_mode="HTML",
         reply_markup=main_menu(),
     )
+    confirm_markup = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтвердить получение",
+                    callback_data=f"repayconfirm:{transaction_id}",
+                )
+            ]
+        ]
+    )
+    try:
+        await message.bot.send_message(
+            data["creditor_id"],
+            f"🤝 <b>Подтвердите получение</b>\n\nВозврат #{transaction_id}: "
+            f"<b>{format_money(amount, collection['currency'])}</b>\n"
+            f"Сбор: {escape(collection['title'])}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=confirm_markup,
+        )
+    except TelegramAPIError:
+        await message.answer(
+            "ℹ️ Не удалось отправить личное уведомление получателю. Он сможет подтвердить "
+            "возврат в истории сбора."
+        )
     await message.answer(
         await collection_text(service, collection),
         reply_markup=await collection_markup(
             message, collection, True, collection["admin_id"] == message.from_user.id
         ),
         parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("repayconfirm:"))
+async def repayment_confirm(callback: CallbackQuery, service: BudgetService) -> None:
+    transaction_id = int(callback.data.split(":")[1])
+    collection_id = await service.confirm_repayment(transaction_id, callback.from_user.id)
+    await callback.answer("Получение подтверждено. Балансы пересчитаны.", show_alert=True)
+    collection = await service.get_collection(collection_id)
+    await safe_edit(
+        callback.message,
+        f"✅ <b>Получение подтверждено</b>\n\nВозврат #{transaction_id} учтён в балансах.",
+    )
+    await callback.message.answer(
+        await collection_text(service, collection),
+        reply_markup=await collection_markup(
+            callback.message,
+            collection,
+            True,
+            collection["admin_id"] == callback.from_user.id,
+        ),
+        parse_mode=ParseMode.HTML,
     )
 
 

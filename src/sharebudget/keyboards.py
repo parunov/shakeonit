@@ -65,10 +65,13 @@ def collection_actions(
     is_member: bool,
     is_admin: bool,
     start_url: str | None = None,
+    app_url: str | None = None,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     collection_id = collection["id"]
     if collection["status"] == "active":
+        if app_url:
+            builder.button(text="📱 Открыть приложение", url=app_url)
         if start_url:
             builder.button(text="🚀 Начать и участвовать", url=start_url)
         builder.button(text="🙋 Участвовать в сборе", callback_data=f"join:{collection_id}")
@@ -138,11 +141,29 @@ def history_keyboard(collection_id: int, rows, offset: int, can_next: bool):
 def transaction_actions(transaction, collection, actor_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if (
+        transaction["kind"] == "repayment"
+        and transaction["status"] == "active"
+        and transaction["confirmation_status"] == "pending"
+        and actor_id == transaction["counterparty_id"]
+    ):
+        builder.button(
+            text="✅ Подтвердить получение",
+            callback_data=f"repayconfirm:{transaction['id']}",
+        )
+    if (
         transaction["status"] == "active"
         and collection["status"] == "active"
         and actor_id in (transaction["creator_id"], collection["admin_id"])
+        and not (
+            transaction["kind"] == "repayment"
+            and transaction["confirmation_status"] == "confirmed"
+            and actor_id != collection["admin_id"]
+        )
     ):
-        builder.button(text="✏️ Изменить", callback_data=f"txedit:{transaction['id']}")
+        if not (
+            transaction["kind"] == "repayment" and transaction["confirmation_status"] == "confirmed"
+        ):
+            builder.button(text="✏️ Изменить", callback_data=f"txedit:{transaction['id']}")
         builder.button(text="❌ Отменить", callback_data=f"txcancel:{transaction['id']}")
     builder.button(text="← В историю", callback_data=f"history:{collection['id']}:0")
     builder.adjust(2, 1)

@@ -100,6 +100,10 @@ class BudgetService:
                 "INSERT INTO participants(collection_id,user_id) VALUES (?,?)",
                 (collection_id, admin_id),
             )
+            await connection.execute(
+                "INSERT INTO collection_events(collection_id,kind,actor_id) VALUES (?,'created',?)",
+                (collection_id, admin_id),
+            )
             await connection.commit()
             return int(collection_id)
 
@@ -247,6 +251,11 @@ class BudgetService:
     async def join(self, collection_id: int, user_id: int) -> None:
         collection = await self._active_collection(collection_id)
         async with self.db.connect() as connection:
+            existing = await _fetchone(
+                connection,
+                "SELECT active FROM participants WHERE collection_id=? AND user_id=?",
+                (collection_id, user_id),
+            )
             await connection.execute(
                 """
                 INSERT INTO participants(collection_id,user_id,active) VALUES (?,?,1)
@@ -254,6 +263,12 @@ class BudgetService:
                 """,
                 (collection["id"], user_id),
             )
+            if not existing or not existing["active"]:
+                await connection.execute(
+                    "INSERT INTO collection_events(collection_id,kind,actor_id,target_user_id) "
+                    "VALUES (?,'joined',?,?)",
+                    (collection_id, user_id, user_id),
+                )
             await connection.commit()
 
     async def list_participants(self, collection_id: int):
@@ -294,9 +309,11 @@ class BudgetService:
                     UNION ALL
                     SELECT creator_id, amount FROM transactions
                     WHERE collection_id=? AND kind='repayment' AND status='active'
+                      AND confirmation_status='confirmed'
                     UNION ALL
                     SELECT counterparty_id, -amount FROM transactions
                     WHERE collection_id=? AND kind='repayment' AND status='active'
+                      AND confirmation_status='confirmed'
                 )
                 SELECT user_id, SUM(delta) balance FROM ledger GROUP BY user_id
                 """,
@@ -312,6 +329,8 @@ class BudgetService:
             )
         balances = {row["id"]: 0 for row in participants}
         balances.update({row["user_id"]: row["balance"] for row in ledger})
+        if sum(balances.values()) != 0:
+            raise RuntimeError(f"Нарушена целостность балансов сбора #{collection_id}")
         return CollectionSnapshot(
             participants=participants,
             balances=balances,
@@ -328,7 +347,11 @@ class BudgetService:
         comment: str,
     ) -> int:
         await self._require_member_active(collection_id, creator_id)
+        if amount <= 0:
+            raise DomainError("Сумма должна быть больше нуля")
         shares = split_amount(amount, list(participant_ids))
+        if sum(shares.values()) != amount:
+            raise RuntimeError("Нарушена целостность распределения затраты")
         await self._require_members(collection_id, shares)
         if len(comment.strip()) > 200:
             raise DomainError("Комментарий не должен быть длиннее 200 символов")
@@ -359,33 +382,86 @@ class BudgetService:
     ) -> int:
         await self._require_member_active(collection_id, debtor_id)
         await self._require_members(collection_id, [creditor_id])
+        if amount <= 0:
+            raise DomainError("Сумма должна быть больше нуля")
         if debtor_id == creditor_id:
             raise DomainError("Нельзя вернуть долг самому себе")
-        direct_debt = next(
-            (
-                debt
-                for debt in await self.settlement(collection_id)
-                if debt.debtor_id == debtor_id and debt.creditor_id == creditor_id
-            ),
-            None,
-        )
-        if direct_debt is None:
-            raise DomainError("По текущему балансу вы не должны этому участнику")
-        if amount > direct_debt.amount:
-            raise DomainError("Сумма возврата больше текущего долга этому участнику")
         if len(comment.strip()) > 200:
             raise DomainError("Комментарий не должен быть длиннее 200 символов")
         async with self.db.connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            direct_debt = next(
+                (
+                    debt
+                    for debt in await self.settlement(collection_id)
+                    if debt.debtor_id == debtor_id and debt.creditor_id == creditor_id
+                ),
+                None,
+            )
+            if direct_debt is None:
+                await connection.rollback()
+                raise DomainError("По текущему балансу вы не должны этому участнику")
+            pending_row = await _fetchone(
+                connection,
+                """
+                SELECT COALESCE(SUM(amount),0) amount FROM transactions
+                WHERE collection_id=? AND kind='repayment' AND creator_id=?
+                  AND counterparty_id=? AND status='active'
+                  AND confirmation_status='pending'
+                """,
+                (collection_id, debtor_id, creditor_id),
+            )
+            available = direct_debt.amount - pending_row["amount"]
+            if amount > available:
+                await connection.rollback()
+                raise DomainError("Сумма возврата больше текущего долга этому участнику")
             cursor = await connection.execute(
                 """
                 INSERT INTO transactions(
-                    collection_id,kind,creator_id,counterparty_id,amount,comment
-                ) VALUES (?,'repayment',?,?,?,?)
+                    collection_id,kind,creator_id,counterparty_id,amount,comment,
+                    confirmation_status
+                ) VALUES (?,'repayment',?,?,?,?, 'pending')
                 """,
                 (collection_id, debtor_id, creditor_id, amount, comment.strip()),
             )
             await connection.commit()
             return int(cursor.lastrowid)
+
+    async def confirm_repayment(self, transaction_id: int, actor_id: int) -> int:
+        transaction = await self.transaction(transaction_id)
+        if not transaction or transaction["kind"] != "repayment":
+            raise DomainError("Возврат долга не найден")
+        if transaction["status"] != "active":
+            raise DomainError("Возврат долга отменён")
+        if transaction["confirmation_status"] == "confirmed":
+            raise DomainError("Получение уже подтверждено")
+        if transaction["counterparty_id"] != actor_id:
+            raise DomainError("Подтвердить получение может только получатель")
+        await self._require_member_active(transaction["collection_id"], actor_id)
+        direct_debt = next(
+            (
+                debt
+                for debt in await self.settlement(transaction["collection_id"])
+                if debt.debtor_id == transaction["creator_id"]
+                and debt.creditor_id == transaction["counterparty_id"]
+            ),
+            None,
+        )
+        if direct_debt is None or transaction["amount"] > direct_debt.amount:
+            raise DomainError("Баланс изменился: этот возврат больше нельзя подтвердить")
+        async with self.db.connect() as connection:
+            cursor = await connection.execute(
+                """
+                UPDATE transactions SET confirmation_status='confirmed',confirmed_by=?,
+                    confirmed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND status='active' AND confirmation_status='pending'
+                """,
+                (actor_id, transaction_id),
+            )
+            if cursor.rowcount != 1:
+                raise DomainError("Получение уже подтверждено или возврат отменён")
+            await connection.commit()
+        return transaction["collection_id"]
 
     async def get_balances(self, collection_id: int) -> dict[int, int]:
         return (await self.collection_snapshot(collection_id)).balances
@@ -412,6 +488,57 @@ class BudgetService:
                 (collection_id, limit, offset),
             )
 
+    async def expense_shares_for_transactions(self, transaction_ids: Iterable[int]):
+        ids = list(dict.fromkeys(int(item) for item in transaction_ids))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        async with self.db.connect() as connection:
+            rows = await connection.execute_fetchall(
+                f"""
+                SELECT s.transaction_id,s.user_id,s.amount,u.full_name
+                FROM expense_shares s JOIN users u ON u.id=s.user_id
+                WHERE s.transaction_id IN ({placeholders})
+                ORDER BY s.transaction_id,u.full_name,u.id
+                """,
+                ids,
+            )
+        result: dict[int, list[dict]] = {}
+        for row in rows:
+            result.setdefault(row["transaction_id"], []).append(dict(row))
+        return result
+
+    async def global_history(self, user_id: int, limit: int = 200):
+        async with self.db.connect() as connection:
+            transactions = await connection.execute_fetchall(
+                """
+                SELECT t.*,c.title collection_title,c.currency,
+                       creator.full_name creator_name,
+                       counterparty.full_name counterparty_name
+                FROM transactions t
+                JOIN collections c ON c.id=t.collection_id
+                JOIN participants p ON p.collection_id=c.id AND p.user_id=?
+                JOIN users creator ON creator.id=t.creator_id
+                LEFT JOIN users counterparty ON counterparty.id=t.counterparty_id
+                ORDER BY t.created_at DESC,t.id DESC LIMIT ?
+                """,
+                (user_id, limit),
+            )
+            events = await connection.execute_fetchall(
+                """
+                SELECT e.*,c.title collection_title,c.currency,
+                       actor.full_name actor_name,target.full_name target_name
+                FROM collection_events e
+                JOIN collections c ON c.id=e.collection_id
+                JOIN participants p ON p.collection_id=c.id AND p.user_id=?
+                JOIN users actor ON actor.id=e.actor_id
+                LEFT JOIN users target ON target.id=e.target_user_id
+                ORDER BY e.created_at DESC,e.id DESC LIMIT ?
+                """,
+                (user_id, limit),
+            )
+        return transactions, events
+
     async def transaction(self, transaction_id: int):
         async with self.db.connect() as connection:
             return await _fetchone(
@@ -425,6 +552,12 @@ class BudgetService:
         collection = await self._collection(transaction["collection_id"])
         if actor_id not in (transaction["creator_id"], collection["admin_id"]):
             raise DomainError("Можно отменять только свои транзакции")
+        if (
+            transaction["kind"] == "repayment"
+            and transaction["confirmation_status"] == "confirmed"
+            and actor_id != collection["admin_id"]
+        ):
+            raise DomainError("Подтверждённый возврат может отменить только администратор сбора")
         if collection["status"] != "active":
             raise DomainError("Архивный сбор нельзя изменять")
         async with self.db.connect() as connection:
@@ -448,8 +581,41 @@ class BudgetService:
         collection = await self._active_collection(transaction["collection_id"])
         if actor_id not in (transaction["creator_id"], collection["admin_id"]):
             raise DomainError("Можно редактировать только свои транзакции")
+        if amount <= 0:
+            raise DomainError("Сумма должна быть больше нуля")
+        if transaction["kind"] == "repayment" and transaction["confirmation_status"] == "confirmed":
+            raise DomainError("Подтверждённый возврат нельзя редактировать")
         if len(comment.strip()) > 200:
             raise DomainError("Комментарий не должен быть длиннее 200 символов")
+        if transaction["kind"] == "repayment":
+            direct_debt = next(
+                (
+                    debt
+                    for debt in await self.settlement(transaction["collection_id"])
+                    if debt.debtor_id == transaction["creator_id"]
+                    and debt.creditor_id == transaction["counterparty_id"]
+                ),
+                None,
+            )
+            async with self.db.connect() as connection:
+                other_pending = await _fetchone(
+                    connection,
+                    """
+                    SELECT COALESCE(SUM(amount),0) amount FROM transactions
+                    WHERE collection_id=? AND kind='repayment' AND creator_id=?
+                      AND counterparty_id=? AND status='active'
+                      AND confirmation_status='pending' AND id<>?
+                    """,
+                    (
+                        transaction["collection_id"],
+                        transaction["creator_id"],
+                        transaction["counterparty_id"],
+                        transaction_id,
+                    ),
+                )
+            available = (direct_debt.amount if direct_debt else 0) - other_pending["amount"]
+            if amount > available:
+                raise DomainError("Сумма возврата больше текущего долга этому участнику")
         async with self.db.connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
             await connection.execute(
@@ -462,6 +628,8 @@ class BudgetService:
                     (transaction_id,),
                 )
                 shares = split_amount(amount, [row["user_id"] for row in rows])
+                if sum(shares.values()) != amount:
+                    raise RuntimeError("Нарушена целостность распределения затраты")
                 await connection.executemany(
                     "UPDATE expense_shares SET amount=? WHERE transaction_id=? AND user_id=?",
                     [(share, transaction_id, user_id) for user_id, share in shares.items()],
@@ -477,6 +645,10 @@ class BudgetService:
                 "UPDATE collections SET status='archived',archived_at=CURRENT_TIMESTAMP WHERE id=?",
                 (collection_id,),
             )
+            await connection.execute(
+                "INSERT INTO collection_events(collection_id,kind,actor_id) VALUES (?,'archived',?)",
+                (collection_id, actor_id),
+            )
             await connection.commit()
 
     async def restore(self, collection_id: int, actor_id: int) -> None:
@@ -491,6 +663,10 @@ class BudgetService:
             await connection.execute(
                 "UPDATE collections SET status='active',archived_at=NULL WHERE id=?",
                 (collection_id,),
+            )
+            await connection.execute(
+                "INSERT INTO collection_events(collection_id,kind,actor_id) VALUES (?,'restored',?)",
+                (collection_id, actor_id),
             )
             await connection.commit()
 
@@ -512,6 +688,11 @@ class BudgetService:
             await connection.execute(
                 "UPDATE collections SET admin_id=? WHERE id=?", (new_admin_id, collection_id)
             )
+            await connection.execute(
+                "INSERT INTO collection_events(collection_id,kind,actor_id,target_user_id) "
+                "VALUES (?,'admin_transferred',?,?)",
+                (collection_id, actor_id, new_admin_id),
+            )
             await connection.commit()
 
     async def remove_participant(self, collection_id: int, actor_id: int, user_id: int) -> None:
@@ -527,6 +708,16 @@ class BudgetService:
             await connection.execute(
                 "UPDATE participants SET active=0 WHERE collection_id=? AND user_id=?",
                 (collection_id, user_id),
+            )
+            await connection.execute(
+                "INSERT INTO collection_events(collection_id,kind,actor_id,target_user_id) "
+                "VALUES (?,?,?,?)",
+                (
+                    collection_id,
+                    "left" if actor_id == user_id else "member_removed",
+                    actor_id,
+                    user_id,
+                ),
             )
             await connection.commit()
 

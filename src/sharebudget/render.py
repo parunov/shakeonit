@@ -70,7 +70,12 @@ def history_text(collection, rows, total: int, participants_count: int) -> str:
     if not repayments:
         lines.append("— пока нет")
     for row in repayments:
-        marker = "❌ отменен · " if row["status"] == "cancelled" else ""
+        if row["status"] == "cancelled":
+            marker = "❌ отменен · "
+        elif row["confirmation_status"] == "pending":
+            marker = "⏳ ожидает подтверждения · "
+        else:
+            marker = "✅ подтвержден · "
         lines.append(
             f"{marker}{row['created_at'][:16]} · {escape(row['creator_name'])} → "
             f"{escape(row['counterparty_name'])} · "
@@ -92,9 +97,19 @@ async def transaction_text(service, transaction) -> str:
         f"Сумма: <b>{format_money(row['amount'], collection['currency'])}</b>",
     ]
     if row["kind"] == "expense":
-        lines.append(f"Распределено на: {escape(row['shared_with'] or '—')}")
+        shares = (await service.expense_shares_for_transactions([row["id"]])).get(row["id"], [])
+        lines.append("<b>Распределение:</b>")
+        lines.extend(
+            f"• {escape(share['full_name'])} — "
+            f"{format_money(share['amount'], collection['currency'])}"
+            for share in shares
+        )
     else:
         lines.append(f"Получатель: {escape(row['counterparty_name'])}")
+        if row["confirmation_status"] == "pending" and row["status"] == "active":
+            lines.append("Статус: <b>⏳ ожидает подтверждения получателем</b>")
+        elif row["confirmation_status"] == "confirmed":
+            lines.append("Статус: <b>✅ получение подтверждено</b>")
     if row["comment"]:
         lines.append(f"Комментарий: {escape(row['comment'])}")
     if row["status"] == "cancelled":

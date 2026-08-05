@@ -14,10 +14,12 @@ def test_active_collection_always_has_onboarding_and_join_buttons():
             is_member=True,
             is_admin=False,
             start_url="https://t.me/ShakeOnIt_bot?start=collection_42",
+            app_url="https://t.me/ShakeOnIt_bot?startapp=collection_42&mode=compact",
         )
     )
 
     assert any(button.url and "start=collection_42" in button.url for button in buttons)
+    assert any(button.url and "startapp=collection_42" in button.url for button in buttons)
     assert any(button.callback_data == "join:42" for button in buttons)
 
 

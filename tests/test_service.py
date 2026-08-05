@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from sharebudget.db import Database
+from sharebudget.money import split_amount
 from sharebudget.service import BudgetService, DomainError, simplify_balances
 
 
@@ -60,7 +61,9 @@ async def test_expense_and_repayment_update_balances(service):
     assert expense_id > 0
     assert await service.get_balances(collection_id) == {1: 6000, 2: -3000, 3: -3000}
 
-    await service.add_repayment(collection_id, 2, 1, 3000)
+    repayment_id = await service.add_repayment(collection_id, 2, 1, 3000)
+    assert await service.get_balances(collection_id) == {1: 6000, 2: -3000, 3: -3000}
+    await service.confirm_repayment(repayment_id, 1)
     assert await service.get_balances(collection_id) == {1: 3000, 2: 0, 3: -3000}
     debts = await service.settlement(collection_id)
     assert [(d.debtor_id, d.creditor_id, d.amount) for d in debts] == [(3, 1, 3000)]
@@ -132,7 +135,8 @@ async def test_cannot_leave_with_balance(service):
 async def test_leave_keeps_transaction_history(service):
     collection_id = await make_collection(service)
     await service.add_expense(collection_id, 1, 1000, [1, 2], "Такси")
-    await service.add_repayment(collection_id, 2, 1, 500)
+    repayment_id = await service.add_repayment(collection_id, 2, 1, 500)
+    await service.confirm_repayment(repayment_id, 1)
     await service.remove_participant(collection_id, 2, 2)
     assert [row["id"] for row in await service.list_participants(collection_id)] == [1, 3]
     assert len(await service.history(collection_id)) == 2
@@ -144,6 +148,70 @@ async def test_repayment_cannot_exceed_current_debt(service):
     await service.add_expense(collection_id, 1, 1000, [1, 2], "Такси")
     with pytest.raises(DomainError):
         await service.add_repayment(collection_id, 2, 1, 501)
+
+
+@pytest.mark.asyncio
+async def test_only_receiver_can_confirm_and_pending_does_not_change_balance(service):
+    collection_id = await make_collection(service)
+    await service.add_expense(collection_id, 1, 1001, [1, 2, 3], "Ужин")
+    repayment_id = await service.add_repayment(collection_id, 2, 1, 334)
+
+    assert await service.get_balances(collection_id) == {1: 667, 2: -334, 3: -333}
+    with pytest.raises(DomainError, match="только получатель"):
+        await service.confirm_repayment(repayment_id, 2)
+
+    await service.confirm_repayment(repayment_id, 1)
+    assert await service.get_balances(collection_id) == {1: 333, 2: 0, 3: -333}
+    transaction = await service.transaction(repayment_id)
+    assert transaction["confirmation_status"] == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_pending_repayments_cannot_overbook_debt(service):
+    collection_id = await make_collection(service)
+    await service.add_expense(collection_id, 1, 1000, [1, 2], "Такси")
+    await service.add_repayment(collection_id, 2, 1, 300)
+    with pytest.raises(DomainError, match="больше текущего долга"):
+        await service.add_repayment(collection_id, 2, 1, 201)
+
+
+@pytest.mark.asyncio
+async def test_expense_share_breakdown_is_exact(service):
+    collection_id = await make_collection(service)
+    transaction_id = await service.add_expense(collection_id, 1, 1001, [3, 1, 2], "Билеты")
+    shares = (await service.expense_shares_for_transactions([transaction_id]))[transaction_id]
+    assert sum(row["amount"] for row in shares) == 1001
+    assert sorted(row["amount"] for row in shares) == [333, 334, 334]
+    assert sum((await service.get_balances(collection_id)).values()) == 0
+
+
+@pytest.mark.asyncio
+async def test_payer_can_exclude_self_without_losing_paid_amount(service):
+    collection_id = await make_collection(service)
+    await service.add_expense(collection_id, 1, 1001, [2, 3], "Билеты друзьям")
+
+    assert await service.get_balances(collection_id) == {1: 1001, 2: -501, 3: -500}
+    assert sum((await service.get_balances(collection_id)).values()) == 0
+
+
+def test_split_amount_is_exact_for_all_small_rounding_cases():
+    for amount in range(1, 250):
+        for participant_count in range(1, 8):
+            shares = split_amount(amount, range(1, participant_count + 1))
+            assert sum(shares.values()) == amount
+            assert max(shares.values()) - min(shares.values()) <= 1
+
+
+@pytest.mark.asyncio
+async def test_global_history_contains_transactions_and_collection_events(service):
+    collection_id = await make_collection(service)
+    await service.add_expense(collection_id, 1, 1200, [1, 2, 3], "Музей")
+
+    transactions, events = await service.global_history(2)
+
+    assert transactions[0]["collection_title"] == "Берлин"
+    assert transactions[0]["amount"] == 1200
+    assert {row["kind"] for row in events} >= {"created", "joined"}
 
 
 def test_simplify_balances_is_deterministic_and_exact():

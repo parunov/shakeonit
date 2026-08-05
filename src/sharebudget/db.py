@@ -57,6 +57,9 @@ CREATE TABLE IF NOT EXISTS transactions (
     amount INTEGER NOT NULL CHECK (amount > 0),
     comment TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cancelled')),
+    confirmation_status TEXT NOT NULL DEFAULT 'not_required',
+    confirmed_by INTEGER REFERENCES users(id),
+    confirmed_at TEXT,
     cancelled_by INTEGER REFERENCES users(id),
     cancelled_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -72,6 +75,19 @@ CREATE TABLE IF NOT EXISTS expense_shares (
     amount INTEGER NOT NULL CHECK (amount >= 0),
     PRIMARY KEY (transaction_id, user_id)
 );
+
+CREATE TABLE IF NOT EXISTS collection_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    actor_id INTEGER NOT NULL REFERENCES users(id),
+    target_user_id INTEGER REFERENCES users(id),
+    details TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_collection_events_collection
+ON collection_events(collection_id, created_at);
 """
 
 
@@ -101,6 +117,42 @@ class Database:
                 await connection.execute(
                     "ALTER TABLE users ADD COLUMN private_started INTEGER NOT NULL DEFAULT 0"
                 )
+            transaction_columns = await connection.execute_fetchall(
+                "PRAGMA table_info(transactions)"
+            )
+            transaction_column_names = {column[1] for column in transaction_columns}
+            if "confirmation_status" not in transaction_column_names:
+                await connection.execute(
+                    "ALTER TABLE transactions ADD COLUMN confirmation_status TEXT "
+                    "NOT NULL DEFAULT 'not_required'"
+                )
+                await connection.execute(
+                    "UPDATE transactions SET confirmation_status='confirmed' WHERE kind='repayment'"
+                )
+            if "confirmed_by" not in transaction_column_names:
+                await connection.execute(
+                    "ALTER TABLE transactions ADD COLUMN confirmed_by INTEGER REFERENCES users(id)"
+                )
+                await connection.execute(
+                    "UPDATE transactions SET confirmed_by=counterparty_id "
+                    "WHERE kind='repayment' AND confirmation_status='confirmed'"
+                )
+            if "confirmed_at" not in transaction_column_names:
+                await connection.execute("ALTER TABLE transactions ADD COLUMN confirmed_at TEXT")
+                await connection.execute(
+                    "UPDATE transactions SET confirmed_at=created_at "
+                    "WHERE kind='repayment' AND confirmation_status='confirmed'"
+                )
+            await connection.execute(
+                """
+                INSERT INTO collection_events(collection_id,kind,actor_id,created_at)
+                SELECT c.id,'created',c.admin_id,c.created_at FROM collections c
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM collection_events e
+                    WHERE e.collection_id=c.id AND e.kind='created'
+                )
+                """
+            )
             await connection.commit()
 
     @asynccontextmanager
