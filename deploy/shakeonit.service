@@ -1,0 +1,25 @@
+[Unit]
+Description=ShakeOnIt Telegram bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=shakeonit
+Group=shakeonit
+WorkingDirectory=/opt/shakeonit
+EnvironmentFile=/opt/shakeonit/.env
+ExecStart=/opt/shakeonit/.venv/bin/sharebudget
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/shakeonit/data
+
+[Install]
+WantedBy=multi-user.target

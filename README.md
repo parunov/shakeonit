@@ -42,6 +42,38 @@
 
 SQLite-база автоматически создается в `data/sharebudget.db`. Для резервной копии при остановленном боте достаточно скопировать этот файл.
 
+## Запуск на VPS через systemd
+
+Бот работает через Telegram long polling: VPS сам создает исходящее HTTPS-соединение. Входящий порт, домен, TLS-сертификат и webhook не нужны; Privacy Mode можно оставить включенным.
+
+Проект должен находиться в `/opt/shakeonit`. На Debian или Ubuntu выполните:
+
+```bash
+cd /opt/shakeonit
+sudo bash deploy/install.sh
+sudoedit /opt/shakeonit/.env
+```
+
+В `.env` замените только тестовое значение `BOT_TOKEN` на токен, полученный у BotFather. Файл исключен из Git и устанавливается с правами `0640`, поэтому токен не попадет в GitHub.
+
+После сохранения токена запустите сервис:
+
+```bash
+sudo systemctl restart shakeonit
+sudo systemctl status shakeonit --no-pager
+sudo journalctl -u shakeonit -n 100 --no-pager
+```
+
+Сервис запускается от отдельного системного пользователя `shakeonit`, автоматически стартует после перезагрузки VPS и перезапускается при временной ошибке.
+
+После получения обновлений из GitHub установите актуальную версию проекта и перезапустите бота:
+
+```bash
+cd /opt/shakeonit
+sudo /opt/shakeonit/.venv/bin/python -m pip install --editable /opt/shakeonit
+sudo systemctl restart shakeonit
+```
+
 ## Как пользоваться
 
 Добавьте бота в группу, вызовите `/start` и нажмите «Создать сбор». Инициатор автоматически становится администратором и первым участником. Остальные нажимают «Участвовать в сборе».
