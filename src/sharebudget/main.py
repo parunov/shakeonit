@@ -114,7 +114,6 @@ async def main() -> None:
     await bot.set_my_commands(
         [
             BotCommand(command="new", description="Создать сбор в группе"),
-            BotCommand(command="expense", description="Добавить затрату"),
             BotCommand(command="app", description="Открыть приложение"),
         ]
     )

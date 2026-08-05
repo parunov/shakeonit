@@ -17,6 +17,7 @@ from aiogram.types import (
     InlineQueryResultArticle,
     InputTextMessageContent,
     Message,
+    WebAppInfo,
 )
 
 from .config import Settings
@@ -150,6 +151,7 @@ async def start(
     settings: Settings,
 ) -> None:
     await sync_user(service, message)
+    private_menu = main_menu(settings.webapp_url if message.chat.type == ChatType.PRIVATE else None)
     if command.args == "app" and message.chat.type == ChatType.PRIVATE and settings.webapp_url:
         await message.answer(
             "✅ <b>ShakeOnIt готов</b>\n\nОткройте приложение — вход уже подтвержден Telegram.",
@@ -163,7 +165,7 @@ async def start(
         if not collection or collection["status"] != "active":
             await message.answer(
                 "ℹ️ Сбор из приглашения не найден или уже завершен.",
-                reply_markup=main_menu(),
+                reply_markup=private_menu,
             )
             return
         was_member = await service.is_participant(collection["id"], message.from_user.id)
@@ -180,7 +182,7 @@ async def start(
                 f"«{escape(collection['title'])}». Бот запомнил ваш Telegram ID.\n\n"
                 "🔔 Личные уведомления по этому сбору включены."
             ),
-            reply_markup=main_menu(),
+            reply_markup=private_menu,
             parse_mode=ParseMode.HTML,
         )
         await message.answer(
@@ -206,7 +208,7 @@ async def start(
         "📱 Все сборы, балансы, возвраты и история находятся в приложении.\n"
         "⚡ Для быстрой затраты в группе используйте: "
         "<code>/expense 40 @ivan @maxim билеты</code>.",
-        reply_markup=main_menu(),
+        reply_markup=private_menu,
         parse_mode=ParseMode.HTML,
     )
     if settings.webapp_url and message.chat.type == ChatType.PRIVATE:
@@ -218,10 +220,17 @@ async def start(
 
 @router.message(Command("menu"))
 @router.message(F.text == "🏠 Главное меню")
-async def menu(message: Message, state: FSMContext, service: BudgetService) -> None:
+async def menu(
+    message: Message, state: FSMContext, service: BudgetService, settings: Settings
+) -> None:
     await sync_user(service, message)
     await state.clear()
-    await message.answer("Что хотите сделать?", reply_markup=main_menu())
+    await message.answer(
+        "Что хотите сделать?",
+        reply_markup=main_menu(
+            settings.webapp_url if message.chat.type == ChatType.PRIVATE else None
+        ),
+    )
 
 
 @router.message(Command("cancel"))
@@ -321,9 +330,40 @@ async def remember_group_when_bot_is_added(
 
 @router.message(Command("new"))
 @router.message(F.text == "➕ Создать сбор")
-async def new_collection(message: Message, state: FSMContext, service: BudgetService) -> None:
+async def new_collection(
+    message: Message,
+    state: FSMContext,
+    service: BudgetService,
+    settings: Settings,
+) -> None:
     await sync_user(service, message)
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if settings.webapp_url:
+            bot_user = await message.bot.get_me()
+            separator = "&" if "?" in settings.webapp_url else "?"
+            create_url = f"{settings.webapp_url}{separator}intent=create"
+            await message.answer(
+                "➕ <b>Новый сбор</b>\n\nОткройте форму создания. Если нужной группы "
+                "ещё нет в списке, приложение поможет добавить туда бота.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="➕ Открыть форму создания",
+                                web_app=WebAppInfo(url=create_url),
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text="👥 Добавить бота в группу",
+                                url=f"https://t.me/{bot_user.username}?startgroup=shakeonit",
+                            )
+                        ],
+                    ]
+                ),
+            )
+            return
         await message.answer(
             "Создавать сбор нужно в общей Telegram-группе. Добавьте туда бота и повторите команду."
         )

@@ -12,14 +12,29 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from .money import CURRENCIES
 
 
-def main_menu() -> ReplyKeyboardMarkup:
+def _webapp_url(url: str, intent: str | None = None) -> str:
+    if not intent:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}intent={intent}"
+
+
+def main_menu(webapp_url: str | None = None) -> ReplyKeyboardMarkup:
+    create = KeyboardButton(text="➕ Создать сбор")
+    app = KeyboardButton(text="📱 Открыть приложение")
+    if webapp_url:
+        create = KeyboardButton(
+            text="➕ Создать сбор",
+            web_app=WebAppInfo(url=_webapp_url(webapp_url, "create")),
+        )
+        app = KeyboardButton(
+            text="📱 Открыть приложение",
+            web_app=WebAppInfo(url=webapp_url),
+        )
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="➕ Создать сбор"), KeyboardButton(text="💸 Добавить трату")],
-            [KeyboardButton(text="📱 Открыть приложение")],
-        ],
+        keyboard=[[create], [app]],
         resize_keyboard=True,
-        input_field_placeholder="Быстрая трата или приложение",
+        input_field_placeholder="Создать сбор или открыть приложение",
     )
 
 

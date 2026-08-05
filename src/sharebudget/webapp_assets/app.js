@@ -16,6 +16,7 @@ const state = {
   details: new Map(),
   nav: "collections",
   busy: false,
+  launchIntent: new URLSearchParams(window.location.search).get("intent"),
 };
 
 const e = (value) => String(value ?? "")
@@ -264,6 +265,11 @@ function continueAfterWelcome() {
     return openCollection(state.bootstrap.invitation.collection.id);
   }
   if (state.bootstrap.invitation) return renderInvitation();
+  if (state.launchIntent === "create") {
+    state.launchIntent = null;
+    renderCollections();
+    return createSheet();
+  }
   return renderCollections();
 }
 
