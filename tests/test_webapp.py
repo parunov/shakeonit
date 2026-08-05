@@ -71,20 +71,22 @@ def test_validate_init_data_rejects_duplicate_fields():
         validate_init_data(raw, TOKEN)
 
 
-def test_invalid_startapp_link_is_not_rendered_without_main_app():
+def test_collection_invite_always_uses_safe_start_link():
     settings = Settings(bot_token=TOKEN, main_app_enabled=False)
     buttons = [
         button for row in _collection_invite_markup(settings, 42).inline_keyboard for button in row
     ]
 
     assert not any(button.url and "startapp" in button.url for button in buttons)
+    assert any(button.url and "start=app" in button.url for button in buttons)
     assert any(button.callback_data == "join:42" for button in buttons)
 
     settings.main_app_enabled = True
     enabled_buttons = [
         button for row in _collection_invite_markup(settings, 42).inline_keyboard for button in row
     ]
-    assert any(button.url and "startapp=collection_42" in button.url for button in enabled_buttons)
+    assert not any(button.url and "startapp" in button.url for button in enabled_buttons)
+    assert any(button.url and "start=app" in button.url for button in enabled_buttons)
 
 
 @pytest.mark.asyncio
@@ -161,3 +163,36 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         invitation_payload = await invitation.json()
         assert invitation_payload["invitation"]["collection"]["id"] == collection_id
         assert invitation_payload["invitation"]["is_participant"] is False
+
+
+@pytest.mark.asyncio
+async def test_collection_api_survives_cancel_after_member_left(tmp_path):
+    database = Database(tmp_path / "former-member.db")
+    await database.initialize()
+    service = BudgetService(database)
+    await service.upsert_user(1, "owner", "Организатор")
+    await service.upsert_user(2, "former", "Бывший участник")
+    collection_id = await service.create_collection(-100500, "Поездка", "EUR", 1)
+    await service.join(collection_id, 2)
+    expense_id = await service.add_expense(collection_id, 1, 1000, [1, 2], "Такси")
+    repayment_id = await service.add_repayment(collection_id, 2, 1, 500)
+    await service.confirm_repayment(repayment_id, 1)
+    await service.remove_participant(collection_id, 2, 2)
+    await service.cancel_transaction(expense_id, 1)
+
+    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    application = web.Application()
+    setup_webapp_routes(application, object(), service, settings)
+    owner_auth = signed_init_data(user={"id": 1, "first_name": "Организатор"})
+
+    async with TestClient(TestServer(application)) as client:
+        response = await client.get(
+            f"/api/collections/{collection_id}",
+            headers={"X-Telegram-Init-Data": owner_auth},
+        )
+        payload = await response.json()
+
+    assert response.status == 200
+    former = next(member for member in payload["participants"] if member["id"] == 2)
+    assert former["active"] is False
+    assert payload["debts"][0]["creditor_name"] == "Бывший участник"

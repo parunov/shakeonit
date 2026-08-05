@@ -15,14 +15,11 @@ from .money import CURRENCIES
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="➕ Создать сбор"), KeyboardButton(text="📋 Сборы")],
-            [KeyboardButton(text="💸 Добавить затрату"), KeyboardButton(text="🤝 Вернуть долг")],
-            [KeyboardButton(text="⚖️ Мой баланс"), KeyboardButton(text="💳 Платежные данные")],
-            [KeyboardButton(text="📱 Приложение")],
-            [KeyboardButton(text="🎓 Обучение"), KeyboardButton(text="❓ Помощь")],
+            [KeyboardButton(text="➕ Создать сбор"), KeyboardButton(text="💸 Добавить трату")],
+            [KeyboardButton(text="📱 Открыть приложение")],
         ],
         resize_keyboard=True,
-        input_field_placeholder="Выберите действие",
+        input_field_placeholder="Быстрая трата или приложение",
     )
 
 

@@ -157,6 +157,24 @@ async def test_leave_keeps_transaction_history(service):
 
 
 @pytest.mark.asyncio
+async def test_cancel_after_member_left_keeps_former_member_in_balances(service):
+    collection_id = await make_collection(service)
+    expense_id = await service.add_expense(collection_id, 1, 1000, [1, 2], "Такси")
+    repayment_id = await service.add_repayment(collection_id, 2, 1, 500)
+    await service.confirm_repayment(repayment_id, 1)
+    await service.remove_participant(collection_id, 2, 2)
+
+    await service.cancel_transaction(expense_id, 1)
+    snapshot = await service.collection_snapshot(collection_id)
+
+    former = next(row for row in snapshot.participants if row["id"] == 2)
+    assert former["active"] == 0
+    assert snapshot.balances == {1: -500, 2: 500, 3: 0}
+    assert snapshot.debts[0].debtor_id == 1
+    assert snapshot.debts[0].creditor_id == 2
+
+
+@pytest.mark.asyncio
 async def test_repayment_cannot_exceed_current_debt(service):
     collection_id = await make_collection(service)
     await service.add_expense(collection_id, 1, 1000, [1, 2], "Такси")

@@ -20,7 +20,8 @@ async def collection_text(service, collection) -> str:
     status = "активен" if collection["status"] == "active" else "в архиве"
     lines = [
         f"<b>🧾 {escape(collection['title'])}</b>",
-        f"Валюта: <b>{currency}</b> · Участников: <b>{len(participants)}</b> · {status}",
+        f"Валюта: <b>{currency}</b> · Участников: "
+        f"<b>{sum(bool(row['active']) for row in participants)}</b> · {status}",
         f"Всего затрат: <b>{format_money(snapshot.total, currency)}</b>",
         "",
         "<b>Нынешние балансы</b>",
@@ -33,7 +34,8 @@ async def collection_text(service, collection) -> str:
             state = f"должен {format_money(-balance, currency)}"
         else:
             state = "расчет закрыт"
-        lines.append(f"• {names[row['id']]} — {state}")
+        former = " · вышел из сбора" if not row["active"] else ""
+        lines.append(f"• {names[row['id']]}{former} — {state}")
     lines.extend(["", "<b>Кто кому переводит</b>"])
     if debts:
         lines.extend(

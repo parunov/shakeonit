@@ -290,6 +290,7 @@ function renderCollection() {
   const me = state.bootstrap.user.id;
   const isAdmin = collection.admin_id === me;
   const myBalance = data.balances.find((item) => item.user_id === me)?.amount || 0;
+  const activeParticipants = data.participants.filter((member) => member.active !== false);
   const tabs = [
     ["overview", "Обзор"], ["history", "История"], ["members", "Люди"],
     ...(isAdmin ? [["admin", "Управление"]] : []),
@@ -298,7 +299,7 @@ function renderCollection() {
     <section class="hero">
       <div class="hero-label">ВСЕГО ЗАТРАТ · ${e(collection.currency)}</div>
       <div class="hero-value">${money(data.total, collection.currency)}</div>
-      <div class="hero-meta">${data.participants.length} участников · ${collection.status === "active" ? "активен" : "в архиве"}</div>
+      <div class="hero-meta">${activeParticipants.length} участников · ${collection.status === "active" ? "активен" : "в архиве"}</div>
     </section>
     ${collection.status === "active" ? `<div class="quick-actions"><button class="action-button" type="button" data-action="expense">💸 Добавить затрату</button><button class="action-button" type="button" data-action="repay">🤝 Вернуть долг</button></div>` : `<div class="status-banner">📦 Сбор находится в архиве. Балансы и история доступны без изменений.</div>`}
     <div class="status-banner">${myBalance > 0 ? `Вам должны <b>${money(myBalance, collection.currency)}</b>` : myBalance < 0 ? `Вы должны <b>${money(-myBalance, collection.currency)}</b>` : "✅ Ваш расчёт закрыт"}</div>
@@ -311,7 +312,7 @@ function renderCollectionPanel(data, isAdmin) {
   if (state.collectionTab === "overview") {
     const balances = data.participants.map((member) => {
       const amount = data.balances.find((item) => item.user_id === member.id)?.amount || 0;
-      return `<div class="balance-row"><div class="row-between"><div><div class="row-title">${e(member.full_name)}${member.id === state.bootstrap.user.id ? " · вы" : ""}</div><div class="row-note">${amount > 0 ? "должны участники" : amount < 0 ? "должен участникам" : "расчёт закрыт"}</div></div><div class="amount ${amount > 0 ? "positive" : amount < 0 ? "negative" : ""}">${amount > 0 ? "+" : amount < 0 ? "−" : ""}${money(Math.abs(amount), collection.currency)}</div></div></div>`;
+      return `<div class="balance-row"><div class="row-between"><div><div class="row-title">${e(member.full_name)}${member.id === state.bootstrap.user.id ? " · вы" : ""}${member.active === false ? " · вышел" : ""}</div><div class="row-note">${amount > 0 ? "должны участники" : amount < 0 ? "должен участникам" : "расчёт закрыт"}</div></div><div class="amount ${amount > 0 ? "positive" : amount < 0 ? "negative" : ""}">${amount > 0 ? "+" : amount < 0 ? "−" : ""}${money(Math.abs(amount), collection.currency)}</div></div></div>`;
     }).join("");
     const debts = data.debts.map((debt) => `<div class="debt-row"><div class="row-title">${e(debt.debtor_name)} → ${e(debt.creditor_name)}</div><div class="row-note">Перевести ${money(debt.amount, collection.currency)}</div></div>`).join("");
     return `<div class="section-head"><h2>Балансы</h2></div><div class="card">${balances}</div><div class="section-head"><h2>Кто кому</h2></div><div class="card">${debts || `<div class="debt-row">✅ Никто никому не должен</div>`}</div>`;
@@ -331,8 +332,9 @@ function renderCollectionPanel(data, isAdmin) {
   }
   if (state.collectionTab === "members") {
     const invite = collection.status === "active" ? `<button class="invite-button" type="button" data-action="share-invite">👥<span><b>Пригласить друзей</b><small>Выбрать человека или Telegram-группу</small></span><i>›</i></button>` : "";
-    const members = data.participants.map((member) => `<div class="member-row"><div class="row-between"><div><div class="row-title">${e(member.full_name)} ${member.is_admin ? "👑" : ""}</div><div class="row-note">${member.username ? `@${e(member.username)}` : `ID ${member.id}`}${member.payment_details ? `<br>💳 ${e(member.payment_details)}` : ""}</div></div></div></div>`).join("");
-    return `${invite}<div class="section-head"><h2>Участники · ${data.participants.length}</h2></div><div class="card">${members}</div>${collection.status === "active" && !isAdmin ? '<div class="sheet-actions"><button class="danger-button" type="button" data-action="leave">Выйти из сбора</button></div>' : ""}`;
+    const activeParticipants = data.participants.filter((member) => member.active !== false);
+    const members = activeParticipants.map((member) => `<div class="member-row"><div class="row-between"><div><div class="row-title">${e(member.full_name)} ${member.is_admin ? "👑" : ""}</div><div class="row-note">${member.username ? `@${e(member.username)}` : `ID ${member.id}`}${member.payment_details ? `<br>💳 ${e(member.payment_details)}` : ""}</div></div></div></div>`).join("");
+    return `${invite}<div class="section-head"><h2>Участники · ${activeParticipants.length}</h2></div><div class="card">${members}</div>${collection.status === "active" && !isAdmin ? '<div class="sheet-actions"><button class="danger-button" type="button" data-action="leave">Выйти из сбора</button></div>' : ""}`;
   }
   return `<div class="card member-row"><div class="row-title">Администратор сбора</div><div class="row-note">Передача роли и удаление участников доступны только при соблюдении балансов.</div></div><div class="sheet-actions">${collection.status === "active" ? '<button class="secondary-button" type="button" data-action="transfer">Передать администратора</button><button class="secondary-button" type="button" data-action="remove-member">Удалить участника</button><button class="danger-button" type="button" data-action="archive">Завершить и архивировать</button>' : '<button class="primary-button" type="button" data-action="restore">Восстановить сбор</button>'}</div>`;
 }
@@ -347,7 +349,8 @@ function createSheet() {
 
 function expenseSheet() {
   const data = state.collection;
-  showSheet(`<h2>Добавить затрату</h2><p class="sheet-intro">Сумма будет поровну распределена между отмеченными людьми.</p><form id="expense-form"><label class="field"><span>Сумма · ${e(data.collection.currency)}</span><input name="amount" inputmode="decimal" placeholder="0,00" required></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" placeholder="Например, билеты"></label><div class="row-between"><span class="row-title">На кого делим</span><button class="text-button" type="button" data-action="select-all">Выбрать всех</button></div><div class="check-list">${data.participants.map((member) => `<label class="check-row"><input type="checkbox" name="participant" value="${member.id}"><span>${e(member.full_name)}${member.id === state.bootstrap.user.id ? " · вы" : ""}</span></label>`).join("")}</div><div class="sheet-actions"><button class="primary-button" type="submit">Добавить затрату</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+  const activeParticipants = data.participants.filter((member) => member.active !== false);
+  showSheet(`<h2>Добавить затрату</h2><p class="sheet-intro">Сумма будет поровну распределена между отмеченными людьми.</p><form id="expense-form"><label class="field"><span>Сумма · ${e(data.collection.currency)}</span><input name="amount" inputmode="decimal" placeholder="0,00" required></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" placeholder="Например, билеты"></label><div class="row-between"><span class="row-title">На кого делим</span><button class="text-button" type="button" data-action="select-all">Выбрать всех</button></div><div class="check-list">${activeParticipants.map((member) => `<label class="check-row"><input type="checkbox" name="participant" value="${member.id}"><span>${e(member.full_name)}${member.id === state.bootstrap.user.id ? " · вы" : ""}</span></label>`).join("")}</div><div class="sheet-actions"><button class="primary-button" type="submit">Добавить затрату</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
 
 function repaySheet() {
@@ -374,7 +377,7 @@ function paymentSheet() {
 }
 
 function memberActionSheet(type) {
-  const candidates = state.collection.participants.filter((member) => member.id !== state.bootstrap.user.id);
+  const candidates = state.collection.participants.filter((member) => member.active !== false && member.id !== state.bootstrap.user.id);
   const titleText = type === "transfer" ? "Передать администратора" : "Удалить участника";
   showSheet(`<h2>${titleText}</h2><p class="sheet-intro">${type === "transfer" ? "Новый администратор получит все права управления сбором." : "Удалить можно участника с нулевым балансом."}</p><form id="member-action-form" data-type="${type}"><label class="field"><span>Участник</span><select name="user_id">${candidates.map((member) => `<option value="${member.id}">${e(member.full_name)}</option>`).join("")}</select></label><div class="sheet-actions"><button class="${type === "transfer" ? "primary-button" : "danger-button"}" type="submit">${titleText}</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
@@ -418,12 +421,8 @@ app.addEventListener("click", async (event) => {
     if (action === "payment") return paymentSheet();
     if (action === "share-invite") {
       const collection = state.collection.collection;
-      const inviteUrl = state.bootstrap.main_app_enabled
-        ? `https://t.me/${state.bootstrap.bot_username}?startapp=collection_${collection.id}&mode=compact`
-        : `https://t.me/${state.bootstrap.bot_username}?start=collection_${collection.id}`;
-      const inviteText = state.bootstrap.main_app_enabled
-        ? `Присоединяйся к сбору «${collection.title}» в ShakeOnIt. Нажми «Участвовать» — без регистрации.`
-        : `Присоединяйся к сбору «${collection.title}» в ShakeOnIt. Открой ссылку — бот добавит тебя автоматически.`;
+      const inviteUrl = `https://t.me/${state.bootstrap.bot_username}?start=collection_${collection.id}`;
+      const inviteText = `Присоединяйся к сбору «${collection.title}» в ShakeOnIt. Открой ссылку — бот добавит тебя автоматически.`;
       const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(inviteUrl)}&text=${encodeURIComponent(inviteText)}`;
       haptic();
       if (tg?.openTelegramLink) tg.openTelegramLink(shareUrl);

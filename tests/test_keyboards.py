@@ -14,12 +14,12 @@ def test_active_collection_always_has_onboarding_and_join_buttons():
             is_member=True,
             is_admin=False,
             start_url="https://t.me/ShakeOnIt_bot?start=collection_42",
-            app_url="https://t.me/ShakeOnIt_bot?startapp=collection_42&mode=compact",
+            app_url="https://t.me/ShakeOnIt_bot?start=app",
         )
     )
 
     assert any(button.url and "start=collection_42" in button.url for button in buttons)
-    assert any(button.url and "startapp=collection_42" in button.url for button in buttons)
+    assert any(button.url and "start=app" in button.url for button in buttons)
     assert any(button.callback_data == "join:42" for button in buttons)
 
 
@@ -43,16 +43,9 @@ def test_main_menu_and_launch_button_expose_mini_app():
     menu_labels = [button.text for row in main_menu().keyboard for button in row]
     launch = _buttons(webapp_launch("https://example.com/app"))[0]
 
-    assert "📱 Приложение" in menu_labels
     assert menu_labels == [
         "➕ Создать сбор",
-        "📋 Сборы",
-        "💸 Добавить затрату",
-        "🤝 Вернуть долг",
-        "⚖️ Мой баланс",
-        "💳 Платежные данные",
-        "📱 Приложение",
-        "🎓 Обучение",
-        "❓ Помощь",
+        "💸 Добавить трату",
+        "📱 Открыть приложение",
     ]
     assert launch.web_app.url == "https://example.com/app"

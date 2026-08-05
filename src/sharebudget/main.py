@@ -113,14 +113,9 @@ async def main() -> None:
     dispatcher.include_router(router)
     await bot.set_my_commands(
         [
-            BotCommand(command="menu", description="Главное меню"),
             BotCommand(command="new", description="Создать сбор в группе"),
-            BotCommand(command="collections", description="Сборы"),
             BotCommand(command="expense", description="Добавить затрату"),
-            BotCommand(command="repay", description="Вернуть долг"),
-            BotCommand(command="balance", description="Мой баланс"),
-            BotCommand(command="help", description="Помощь"),
-            BotCommand(command="cancel", description="Отменить текущее действие"),
+            BotCommand(command="app", description="Открыть приложение"),
         ]
     )
     if settings.webapp_url:

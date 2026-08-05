@@ -83,6 +83,7 @@ def _participant(row) -> dict:
         "full_name": row["full_name"],
         "payment_details": row["payment_details"],
         "is_admin": bool(row["is_admin"]),
+        "active": bool(row["active"]),
     }
 
 
@@ -154,24 +155,20 @@ async def _report(bot: Bot, chat_id: int, text: str, reply_markup=None) -> bool:
 
 def _collection_invite_markup(settings: Settings, collection_id: int) -> InlineKeyboardMarkup:
     username = settings.bot_username.lstrip("@")
-    rows = []
-    if settings.main_app_enabled:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="📱 Открыть сбор",
-                    url=f"https://t.me/{username}?startapp=collection_{collection_id}&mode=compact",
-                )
-            ]
-        )
-    rows.append(
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="📱 Перейти к приложению",
+                url=f"https://t.me/{username}?start=app",
+            )
+        ],
         [
             InlineKeyboardButton(
                 text="🙋 Участвовать в сборе",
                 callback_data=f"join:{collection_id}",
             )
-        ]
-    )
+        ],
+    ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

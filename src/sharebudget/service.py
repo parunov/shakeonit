@@ -300,11 +300,11 @@ class BudgetService:
         async with self.db.connect() as connection:
             participants = await connection.execute_fetchall(
                 """
-                SELECT u.id,u.username,u.full_name,u.payment_details,p.joined_at,
+                SELECT u.id,u.username,u.full_name,u.payment_details,p.joined_at,p.active,
                        c.admin_id=u.id AS is_admin
                 FROM participants p JOIN users u ON u.id=p.user_id
                 JOIN collections c ON c.id=p.collection_id
-                WHERE p.collection_id=? AND p.active=1
+                WHERE p.collection_id=?
                 ORDER BY is_admin DESC,u.full_name
                 """,
                 (collection_id,),
@@ -339,8 +339,11 @@ class BudgetService:
                 """,
                 (collection_id,),
             )
-        balances = {row["id"]: 0 for row in participants}
-        balances.update({row["user_id"]: row["balance"] for row in ledger})
+        ledger_balances = {row["user_id"]: row["balance"] for row in ledger}
+        participants = [
+            row for row in participants if row["active"] or ledger_balances.get(row["id"], 0)
+        ]
+        balances = {row["id"]: ledger_balances.get(row["id"], 0) for row in participants}
         if sum(balances.values()) != 0:
             raise RuntimeError(f"Нарушена целостность балансов сбора #{collection_id}")
         return CollectionSnapshot(

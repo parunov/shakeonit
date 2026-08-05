@@ -33,7 +33,6 @@ from .keyboards import (
     transaction_actions,
     webapp_launch,
 )
-from .links import group_start_param
 from .money import format_money, parse_amount
 from .render import collection_text, history_text, transaction_text, user_label
 from .service import BudgetService, DomainError
@@ -112,11 +111,9 @@ async def collection_markup(
         ChatType.SUPERGROUP,
     ):
         bot_user = await message.bot.get_me()
-        if bot_user.has_main_web_app:
-            app_url = (
-                f"https://t.me/{bot_user.username}?startapp=collection_{collection['id']}"
-                "&mode=compact"
-            )
+        # Main Mini App is not enabled for every bot installation. A regular
+        # /start deep link is supported universally and never produces BOT_INVALID.
+        app_url = f"https://t.me/{bot_user.username}?start=app"
     shared_group_screen = message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
     if shared_group_screen:
         return collection_actions(collection, False, False, None, app_url)
@@ -187,6 +184,11 @@ async def start(
             ),
             parse_mode=ParseMode.HTML,
         )
+        if settings.webapp_url:
+            await message.answer(
+                "📱 Откройте сбор в приложении:",
+                reply_markup=webapp_launch(settings.webapp_url),
+            )
         return
     await message.answer(
         "👋 <b>Добро пожаловать в ShakeOnIt</b>\n\n"
@@ -230,25 +232,20 @@ async def tutorial(message: Message) -> None:
     await message.answer(TUTORIAL_TEXT, parse_mode=ParseMode.HTML, reply_markup=main_menu())
 
 
-@router.message(F.text == "📱 Приложение")
+@router.message(Command("app"))
+@router.message(F.text.in_({"📱 Приложение", "📱 Открыть приложение"}))
 async def open_webapp(message: Message, settings: Settings) -> None:
     if not settings.webapp_url:
         await message.answer("ℹ️ Приложение пока не настроено.")
         return
     if message.chat.type != ChatType.PRIVATE:
         bot_user = await message.bot.get_me()
-        if bot_user.has_main_web_app:
-            chat_param = group_start_param(message.chat.id, settings.bot_token)
-            app_url = f"https://t.me/{bot_user.username}?startapp={chat_param}&mode=compact"
-            text = "📱 Откройте сборы этой группы прямо в ShakeOnIt."
-            button_text = "📱 Открыть приложение"
-        else:
-            app_url = f"https://t.me/{bot_user.username}?start=app"
-            text = (
-                "⚠️ Прямой запуск из группы ещё не активирован в BotFather. "
-                "Пока приложение откроется через личный чат."
-            )
-            button_text = "📱 Открыть приложение"
+        app_url = f"https://t.me/{bot_user.username}?start=app"
+        text = (
+            "📱 Нажмите кнопку ниже. Telegram откроет личный чат, а затем покажет "
+            "защищённую кнопку входа в ShakeOnIt."
+        )
+        button_text = "📱 Перейти к приложению"
         await message.answer(
             text,
             reply_markup=InlineKeyboardMarkup(
@@ -423,7 +420,7 @@ async def choose_collection(message: Message, service, action: str, empty_text: 
 
 
 @router.message(Command("expense"))
-@router.message(F.text == "💸 Добавить затрату")
+@router.message(F.text.in_({"💸 Добавить затрату", "💸 Добавить трату"}))
 async def expense_start(message: Message, state: FSMContext, service: BudgetService) -> None:
     await sync_user(service, message)
     await state.clear()
@@ -669,7 +666,8 @@ async def history(callback: CallbackQuery, service: BudgetService) -> None:
     rows = page[:10]
     snapshot = await service.collection_snapshot(collection_id)
     participants = snapshot.participants
-    text = history_text(collection, rows, snapshot.total, len(participants))
+    active_count = sum(bool(row["active"]) for row in participants)
+    text = history_text(collection, rows, snapshot.total, active_count)
     debts = snapshot.debts
     names = {row["id"]: user_label(row) for row in participants}
     text += "\n\n<b>Финальный список балансов</b>\n"
@@ -1051,11 +1049,7 @@ async def quick_expense_collection(
 @router.inline_query()
 async def inline_hint(inline_query: InlineQuery) -> None:
     bot_user = await inline_query.bot.get_me()
-    app_url = (
-        f"https://t.me/{bot_user.username}?startapp&mode=compact"
-        if bot_user.has_main_web_app
-        else f"https://t.me/{bot_user.username}?start=app"
-    )
+    app_url = f"https://t.me/{bot_user.username}?start=app"
     await inline_query.answer(
         results=[
             InlineQueryResultArticle(
