@@ -44,10 +44,17 @@ def collections_keyboard(rows, action: str = "open") -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def collection_actions(collection, is_member: bool, is_admin: bool) -> InlineKeyboardMarkup:
+def collection_actions(
+    collection,
+    is_member: bool,
+    is_admin: bool,
+    start_url: str | None = None,
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     collection_id = collection["id"]
-    if not is_member and collection["status"] == "active":
+    if collection["status"] == "active":
+        if start_url:
+            builder.button(text="🚀 Начать работу с ботом", url=start_url)
         builder.button(text="🙋 Участвовать в сборе", callback_data=f"join:{collection_id}")
     if is_member:
         builder.button(text="💸 Добавить затрату", callback_data=f"expense:{collection_id}")

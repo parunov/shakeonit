@@ -6,9 +6,10 @@ from html import escape
 from aiogram import F, Router
 from aiogram.enums import ChatType, ParseMode
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.utils.deep_linking import create_start_link
 
 from .keyboards import (
     admin_actions,
@@ -45,10 +46,11 @@ TUTORIAL_TEXT = """<b>🎓 Как пользоваться ShareBudget</b>
 
 1. Добавьте бота в Telegram-группу и нажмите «Создать сбор».
 2. Назовите событие и выберите BYN, RUB, EUR или USD.
-3. Друзья нажимают «Участвовать в сборе» — только после этого их можно выбрать в затрате.
-4. Тот, кто заплатил, нажимает «Добавить затрату», вводит сумму, отмечает людей и пишет короткое описание.
-5. Когда кто-то действительно переводит деньги, используйте «Вернуть долг».
-6. Экран сбора сразу покажет, кто кому и сколько должен. В «Истории» видны все действия.
+3. Новые пользователи сначала нажимают «Начать работу с ботом» и запускают личный чат.
+4. Затем друзья нажимают «Участвовать в сборе» — только после этого их можно выбрать в затрате.
+5. Тот, кто заплатил, нажимает «Добавить затрату», вводит сумму, отмечает людей и пишет короткое описание.
+6. Когда кто-то действительно переводит деньги, используйте «Вернуть долг».
+7. Экран сбора сразу покажет, кто кому и сколько должен. В «Истории» видны все действия.
 
 Быстрая запись при включенном Privacy Mode: <code>/expense@имя_бота 40 @ivan @maxim билеты</code>. Она работает, если в группе один активный сбор, а отмеченные пользователи нажали «Участвовать в сборе».
 
@@ -68,23 +70,66 @@ async def safe_edit(message: Message, text: str, reply_markup=None) -> None:
             raise
 
 
+async def collection_markup(
+    message: Message,
+    collection,
+    is_member: bool,
+    is_admin: bool,
+) -> InlineKeyboardMarkup:
+    start_url = None
+    if collection["status"] == "active" and message.chat.type in (
+        ChatType.GROUP,
+        ChatType.SUPERGROUP,
+    ):
+        start_url = await create_start_link(message.bot, payload=f"collection_{collection['id']}")
+    return collection_actions(collection, is_member, is_admin, start_url)
+
+
 async def show_collection(message: Message, collection_id: int, actor_id: int, service):
     collection = await service.get_collection(collection_id)
     if not collection:
         raise DomainError("Сбор не найден")
     is_member = await service.is_participant(collection_id, actor_id)
     text = await collection_text(service, collection)
-    keyboard = collection_actions(collection, is_member, collection["admin_id"] == actor_id)
+    keyboard = await collection_markup(
+        message, collection, is_member, collection["admin_id"] == actor_id
+    )
     await safe_edit(message, text, keyboard)
 
 
 @router.message(CommandStart())
-async def start(message: Message, service: BudgetService) -> None:
+async def start(message: Message, command: CommandObject, service: BudgetService) -> None:
     await sync_user(service, message)
     await message.answer(
         "👋 <b>ShareBudget</b> помогает честно делить общие траты и фиксировать возвраты долгов.\n\n"
         "Начните с короткого обучения или создайте сбор в группе с друзьями.",
         reply_markup=main_menu(),
+        parse_mode=ParseMode.HTML,
+    )
+    match = re.fullmatch(r"collection_(\d+)", command.args or "")
+    if not match or message.chat.type != ChatType.PRIVATE:
+        return
+    collection = await service.get_collection(int(match.group(1)))
+    if not collection or collection["status"] != "active":
+        await message.answer("Сбор из приглашения не найден или уже завершен.")
+        return
+    is_member = await service.is_participant(collection["id"], message.from_user.id)
+    if is_member:
+        text = await collection_text(service, collection)
+    else:
+        text = (
+            f"<b>🙋 Приглашение в сбор «{escape(collection['title'])}»</b>\n\n"
+            f"Валюта: <b>{collection['currency']}</b>.\n"
+            "Нажмите «Участвовать в сборе», чтобы зарегистрироваться участником."
+        )
+    await message.answer(
+        text,
+        reply_markup=await collection_markup(
+            message,
+            collection,
+            is_member,
+            collection["admin_id"] == message.from_user.id,
+        ),
         parse_mode=ParseMode.HTML,
     )
 
@@ -158,7 +203,7 @@ async def collection_currency(
     collection = await service.get_collection(collection_id)
     await callback.message.answer(
         await collection_text(service, collection),
-        reply_markup=collection_actions(collection, True, True),
+        reply_markup=await collection_markup(callback.message, collection, True, True),
         parse_mode=ParseMode.HTML,
     )
 
@@ -312,8 +357,8 @@ async def expense_comment(message: Message, state: FSMContext, service: BudgetSe
     )
     await message.answer(
         await collection_text(service, collection),
-        reply_markup=collection_actions(
-            collection, True, collection["admin_id"] == message.from_user.id
+        reply_markup=await collection_markup(
+            message, collection, True, collection["admin_id"] == message.from_user.id
         ),
         parse_mode="HTML",
     )
@@ -381,8 +426,8 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
     )
     await message.answer(
         await collection_text(service, collection),
-        reply_markup=collection_actions(
-            collection, True, collection["admin_id"] == message.from_user.id
+        reply_markup=await collection_markup(
+            message, collection, True, collection["admin_id"] == message.from_user.id
         ),
         parse_mode="HTML",
     )
@@ -502,8 +547,8 @@ async def transaction_edit_comment(
     collection = await service.get_collection(collection_id)
     await message.answer(
         await collection_text(service, collection),
-        reply_markup=collection_actions(
-            collection, True, collection["admin_id"] == message.from_user.id
+        reply_markup=await collection_markup(
+            message, collection, True, collection["admin_id"] == message.from_user.id
         ),
         parse_mode="HTML",
     )
