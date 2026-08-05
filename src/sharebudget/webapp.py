@@ -21,6 +21,7 @@ from aiogram.types import (
 from aiohttp import web
 
 from .config import Settings
+from .links import parse_group_start_param
 from .money import CURRENCIES, format_money, parse_amount
 from .service import BudgetService, DomainError
 
@@ -30,6 +31,7 @@ BOT_KEY = web.AppKey("bot", Bot)
 SERVICE_KEY = web.AppKey("service", BudgetService)
 SETTINGS_KEY = web.AppKey("settings", Settings)
 AUTH_KEY = web.RequestKey("telegram_auth", dict)
+NEW_USER_KEY = web.RequestKey("new_user", bool)
 
 
 class ApiError(Exception):
@@ -93,6 +95,7 @@ def _collection(row) -> dict:
         "status": row["status"],
         "created_at": row["created_at"],
         "participants_count": values.get("participants_count"),
+        "is_participant": bool(values.get("is_participant", True)),
     }
 
 
@@ -147,6 +150,26 @@ async def _report(bot: Bot, chat_id: int, text: str, reply_markup=None) -> bool:
         return False
 
 
+def _collection_invite_markup(settings: Settings, collection_id: int) -> InlineKeyboardMarkup:
+    username = settings.bot_username.lstrip("@")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📱 Открыть сбор",
+                    url=f"https://t.me/{username}?startapp=collection_{collection_id}&mode=compact",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🙋 Участвовать в сборе",
+                    callback_data=f"join:{collection_id}",
+                )
+            ],
+        ]
+    )
+
+
 def _name(user: dict) -> str:
     full_name = " ".join(part for part in (user.get("first_name"), user.get("last_name")) if part)
     return escape(full_name)
@@ -168,7 +191,7 @@ async def api_middleware(request: web.Request, handler):
         full_name = " ".join(
             part for part in (user.get("first_name"), user.get("last_name")) if part
         )
-        await request.app[SERVICE_KEY].upsert_user(
+        request[NEW_USER_KEY] = await request.app[SERVICE_KEY].upsert_user(
             user["id"], user.get("username"), full_name, private_started=True
         )
         return await handler(request)
@@ -192,11 +215,12 @@ def _context(request: web.Request) -> tuple[BudgetService, Bot, dict]:
 async def bootstrap(request: web.Request) -> web.Response:
     service, _, telegram_user = _context(request)
     user_id = telegram_user["id"]
-    rows = await service.list_visible_collections(user_id)
+    start_param = request[AUTH_KEY].get("start_param", "")
+    context_chat_id = parse_group_start_param(start_param, request.app[SETTINGS_KEY].bot_token)
+    rows = await service.list_visible_collections(user_id, context_chat_id)
     chats = await service.list_user_collection_chats(user_id)
     user = await service.get_user(user_id)
     invitation = None
-    start_param = request[AUTH_KEY].get("start_param", "")
     if start_param.startswith("collection_"):
         try:
             target_id = int(start_param.removeprefix("collection_"))
@@ -227,6 +251,9 @@ async def bootstrap(request: web.Request) -> web.Response:
             ],
             "currencies": list(CURRENCIES),
             "invitation": invitation,
+            "is_new_user": request.get(NEW_USER_KEY, False),
+            "context_chat_id": context_chat_id,
+            "bot_username": request.app[SETTINGS_KEY].bot_username.lstrip("@"),
         }
     )
 
@@ -298,7 +325,8 @@ async def create_collection(request: web.Request) -> web.Response:
         bot,
         chat_id,
         f"🧾 {_name(user)} создал сбор <b>«{escape(collection['title'])}»</b> · "
-        f"{collection['currency']}",
+        f"{collection['currency']}\n\nНажмите «Участвовать» — регистрация займет один шаг.",
+        _collection_invite_markup(request.app[SETTINGS_KEY], collection_id),
     )
     return web.json_response({"ok": True, "collection_id": collection_id, "report_sent": sent})
 

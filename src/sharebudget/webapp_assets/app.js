@@ -112,11 +112,11 @@ function empty(icon, text) {
 function collectionCards(rows) {
   if (!rows.length) return empty("🌿", "Сборов пока нет. Создайте первый в Telegram-группе.");
   return `<div class="card-list">${rows.map((item) => `
-    <button class="card collection-card" type="button" data-action="open-collection" data-id="${item.id}">
+    <button class="card collection-card" type="button" data-action="${item.is_participant === false ? "preview-collection" : "open-collection"}" data-id="${item.id}">
       <span class="collection-icon">${item.status === "archived" ? "📦" : "🧾"}</span>
       <span>
         <span class="card-title">${e(item.title)}</span>
-        <span class="card-subtitle">${e(item.currency)} · ${item.participants_count ?? "—"} участников${item.status === "archived" ? " · архив" : ""}</span>
+        <span class="card-subtitle">${e(item.currency)} · ${item.participants_count ?? "—"} участников${item.status === "archived" ? " · архив" : item.is_participant === false ? " · можно участвовать" : ""}</span>
       </span>
       <span class="chevron">›</span>
     </button>`).join("")}</div>`;
@@ -125,15 +125,15 @@ function collectionCards(rows) {
 function renderCollections() {
   state.nav = "collections";
   state.collection = null;
-  title.textContent = "Сборы";
+  title.textContent = state.bootstrap.context_chat_id ? "Сборы группы" : "Сборы";
   tg?.BackButton?.hide();
   const active = state.bootstrap.collections.filter((item) => item.status === "active");
   const archived = state.bootstrap.collections.filter((item) => item.status === "archived");
   app.innerHTML = `
     <section class="hero">
-      <div class="hero-label">АКТИВНЫЕ СБОРЫ</div>
+      <div class="hero-label">${state.bootstrap.context_chat_id ? "ЭТА TELEGRAM-ГРУППА" : "АКТИВНЫЕ СБОРЫ"}</div>
       <div class="hero-value">${active.length}</div>
-      <div class="hero-meta">Все расчёты синхронизированы с ботом</div>
+      <div class="hero-meta">${state.bootstrap.context_chat_id ? "Можно открыть сбор или участвовать в один шаг" : "Все расчёты синхронизированы"}</div>
     </section>
     <div class="section-head"><h2>Текущие</h2><button class="text-button" type="button" data-action="create">+ Новый</button></div>
     ${collectionCards(active)}
@@ -221,6 +221,34 @@ function renderInvitation() {
   app.innerHTML = `<section class="hero"><div class="hero-label">ПРИГЛАШЕНИЕ В СБОР</div><div class="hero-value">${e(invitation.collection.title)}</div><div class="hero-meta">Валюта · ${e(invitation.collection.currency)}</div></section><div class="status-banner">Нажмите кнопку — Telegram ID будет безопасно получен из Mini App, без логина и пароля.</div><button class="primary-button" type="button" data-action="join-invitation" data-id="${invitation.collection.id}">🙋 Участвовать в сборе</button>`;
 }
 
+function renderWelcome() {
+  const firstName = state.bootstrap.user.full_name.split(/\s+/)[0];
+  title.textContent = "Добро пожаловать";
+  nav.hidden = true;
+  app.innerHTML = `
+    <section class="welcome-card">
+      <div class="welcome-mark">S</div>
+      <div class="hero-label">SHAKEONIT</div>
+      <h2>${e(firstName)}, общие расходы — без неловких подсчётов</h2>
+      <p>Telegram уже подтвердил ваш профиль. Никаких логинов, паролей и отдельной регистрации.</p>
+      <div class="welcome-points">
+        <div><span>🧾</span><b>Все сборы рядом</b><small>Расходы, долги и история в одном месте</small></div>
+        <div><span>⚡</span><b>Операции за секунды</b><small>Добавляйте траты и сразу видьте результат</small></div>
+        <div><span>🔒</span><b>Только Telegram</b><small>Privacy Mode остается включённым</small></div>
+      </div>
+      <button class="primary-button" type="button" data-action="welcome-continue">Начать</button>
+    </section>`;
+}
+
+function continueAfterWelcome() {
+  nav.hidden = false;
+  if (state.bootstrap.invitation?.is_participant) {
+    return openCollection(state.bootstrap.invitation.collection.id);
+  }
+  if (state.bootstrap.invitation) return renderInvitation();
+  return renderCollections();
+}
+
 function updateNav() {
   nav.querySelectorAll("button").forEach((button) => button.classList.toggle("active", button.dataset.nav === state.nav));
 }
@@ -288,7 +316,9 @@ function renderCollectionPanel(data, isAdmin) {
     }).join("")}</div>`;
   }
   if (state.collectionTab === "members") {
-    return `<div class="card">${data.participants.map((member) => `<div class="member-row"><div class="row-between"><div><div class="row-title">${e(member.full_name)} ${member.is_admin ? "👑" : ""}</div><div class="row-note">${member.username ? `@${e(member.username)}` : `ID ${member.id}`}${member.payment_details ? `<br>💳 ${e(member.payment_details)}` : ""}</div></div></div></div>`).join("")}</div>${collection.status === "active" && !isAdmin ? '<div class="sheet-actions"><button class="danger-button" type="button" data-action="leave">Выйти из сбора</button></div>' : ""}`;
+    const invite = collection.status === "active" ? `<button class="invite-button" type="button" data-action="share-invite">👥<span><b>Пригласить друзей</b><small>Выбрать человека или Telegram-группу</small></span><i>›</i></button>` : "";
+    const members = data.participants.map((member) => `<div class="member-row"><div class="row-between"><div><div class="row-title">${e(member.full_name)} ${member.is_admin ? "👑" : ""}</div><div class="row-note">${member.username ? `@${e(member.username)}` : `ID ${member.id}`}${member.payment_details ? `<br>💳 ${e(member.payment_details)}` : ""}</div></div></div></div>`).join("");
+    return `${invite}<div class="section-head"><h2>Участники · ${data.participants.length}</h2></div><div class="card">${members}</div>${collection.status === "active" && !isAdmin ? '<div class="sheet-actions"><button class="danger-button" type="button" data-action="leave">Выйти из сбора</button></div>' : ""}`;
   }
   return `<div class="card member-row"><div class="row-title">Администратор сбора</div><div class="row-note">Передача роли и удаление участников доступны только при соблюдении балансов.</div></div><div class="sheet-actions">${collection.status === "active" ? '<button class="secondary-button" type="button" data-action="transfer">Передать администратора</button><button class="secondary-button" type="button" data-action="remove-member">Удалить участника</button><button class="danger-button" type="button" data-action="archive">Завершить и архивировать</button>' : '<button class="primary-button" type="button" data-action="restore">Восстановить сбор</button>'}</div>`;
 }
@@ -350,6 +380,12 @@ app.addEventListener("click", async (event) => {
   const action = target.dataset.action;
   try {
     if (action === "open-collection") return await openCollection(target.dataset.id);
+    if (action === "preview-collection") {
+      const collection = state.bootstrap.collections.find((item) => item.id === Number(target.dataset.id));
+      state.bootstrap.invitation = { collection, is_participant: false };
+      return renderInvitation();
+    }
+    if (action === "welcome-continue") return continueAfterWelcome();
     if (action === "join-invitation") {
       setBusy(target, true);
       const result = await api(`/api/collections/${target.dataset.id}/join`, { method: "POST", body: "{}" });
@@ -363,6 +399,16 @@ app.addEventListener("click", async (event) => {
     if (action === "tab") { state.collectionTab = target.dataset.tab; renderCollection(); return; }
     if (action === "edit-transaction") return editSheet(target.dataset.id);
     if (action === "payment") return paymentSheet();
+    if (action === "share-invite") {
+      const collection = state.collection.collection;
+      const inviteUrl = `https://t.me/${state.bootstrap.bot_username}?startapp=collection_${collection.id}&mode=compact`;
+      const inviteText = `Присоединяйся к сбору «${collection.title}» в ShakeOnIt. Нажми «Участвовать» — без регистрации.`;
+      const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(inviteUrl)}&text=${encodeURIComponent(inviteText)}`;
+      haptic();
+      if (tg?.openTelegramLink) tg.openTelegramLink(shareUrl);
+      else window.location.href = shareUrl;
+      return;
+    }
     if (action === "transfer" || action === "remove-member") return memberActionSheet(action === "transfer" ? "transfer" : "remove");
     if (action === "cancel-transaction") {
       if (!await confirmAction("Отменить транзакцию? Она останется в истории.")) return;
@@ -510,12 +556,10 @@ async function init() {
   }
   try {
     await reloadBootstrap();
-    if (state.bootstrap.invitation?.is_participant) {
-      await openCollection(state.bootstrap.invitation.collection.id);
-    } else if (state.bootstrap.invitation) {
-      renderInvitation();
+    if (state.bootstrap.is_new_user) {
+      renderWelcome();
     } else {
-      renderCollections();
+      await continueAfterWelcome();
     }
   } catch (error) {
     nav.hidden = true;

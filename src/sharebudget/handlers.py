@@ -14,11 +14,9 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineQuery,
     InlineQueryResultArticle,
-    InlineQueryResultsButton,
     InputTextMessageContent,
     Message,
 )
-from aiogram.utils.deep_linking import create_start_link
 
 from .config import Settings
 from .keyboards import (
@@ -34,6 +32,7 @@ from .keyboards import (
     transaction_actions,
     webapp_launch,
 )
+from .links import group_start_param
 from .money import format_money, parse_amount
 from .render import collection_text, history_text, transaction_text, user_label
 from .service import BudgetService, DomainError
@@ -59,25 +58,24 @@ TUTORIAL_TEXT = """<b>🎓 Как пользоваться ShareBudget</b>
 
 1. Добавьте бота в Telegram-группу и нажмите «Создать сбор».
 2. Назовите событие и выберите BYN, RUB, EUR или USD.
-3. Новый пользователь нажимает «Начать и участвовать», а затем штатную кнопку Start в личном чате. Бот подключит его к сбору автоматически.
+3. Новый пользователь нажимает «Участвовать в сборе» прямо в группе. Telegram ID регистрируется автоматически, без личного чата и отдельного входа.
 4. После подключения участника можно выбрать при добавлении затраты.
 5. Тот, кто заплатил, нажимает «Добавить затрату», вводит сумму, отмечает людей и пишет короткое описание.
 6. Когда кто-то действительно переводит деньги, используйте «Вернуть долг».
 7. Экран сбора сразу покажет, кто кому и сколько должен. В «Истории» видны все действия.
-8. Кнопка «📱 Приложение» открывает все эти операции в одном интерфейсе.
+8. Основная работа проходит в Mini App: оно открывается прямо из группы и показывает сборы этой группы.
 
-Быстрая запись при включенном Privacy Mode: <code>/expense@имя_бота 40 @ivan @maxim билеты</code>. Она работает, если в группе один активный сбор, а отмеченные пользователи нажали «Участвовать в сборе».
+Быстрая запись при включенном Privacy Mode: <code>/expense@имя_бота 40 @ivan @maxim билеты</code>. Если сборов несколько, бот предложит выбрать нужный. Отмеченные пользователи должны участвовать в сборе.
 
 Администратор может отменять и редактировать любые транзакции, удалять неиспользованных участников, передавать роль и завершать сбор. Восстановить сбор из архива можно 30 дней."""
 
-MENTION_HINT = """💡 <b>Как пользоваться ShakeOnIt</b>
+MENTION_HINT = """⚡ <b>Быстрая затрата в ShakeOnIt</b>
 
-• Нажмите «🚀 Начать и участвовать» в сообщении нужного сбора.
-• Для затраты используйте кнопку «💸 Добавить затрату».
-• Быстрый формат: <code>/expense@ShakeOnIt_bot 40 @ivan @maxim билеты</code>.
-• Текущие долги всегда доступны в разделе «📋 Сборы».
+Отправьте в группе:
+<code>/expense@ShakeOnIt_bot 40 @ivan @maxim билеты</code>
 
-Privacy Mode можно оставить включенным."""
+Остальные действия — сборы, балансы, возвраты и история — удобнее выполнять в Mini App.
+Privacy Mode остается включённым."""
 
 
 async def sync_user(service: BudgetService, event: Message | CallbackQuery) -> None:
@@ -107,23 +105,23 @@ async def collection_markup(
     is_member: bool,
     is_admin: bool,
 ) -> InlineKeyboardMarkup:
-    start_url = None
     app_url = None
     if collection["status"] == "active" and message.chat.type in (
         ChatType.GROUP,
         ChatType.SUPERGROUP,
     ):
-        start_url = await create_start_link(message.bot, payload=f"collection_{collection['id']}")
         bot_user = await message.bot.get_me()
         app_url = (
             f"https://t.me/{bot_user.username}?startapp=collection_{collection['id']}&mode=compact"
         )
     shared_group_screen = message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+    if shared_group_screen:
+        return collection_actions(collection, False, False, None, app_url)
     return collection_actions(
         collection,
-        is_member or shared_group_screen,
-        is_admin or shared_group_screen,
-        start_url,
+        is_member,
+        is_admin,
+        None,
         app_url,
     )
 
@@ -188,9 +186,13 @@ async def start(
         )
         return
     await message.answer(
-        "👋 <b>ShareBudget готов к работе</b>\n\n"
-        "Ваш Telegram ID зарегистрирован. Выберите действие в меню или откройте сбор в группе.",
-        reply_markup=main_menu(),
+        "👋 <b>Добро пожаловать в ShakeOnIt</b>\n\n"
+        "Здесь не нужны логин, пароль или отдельная регистрация — Telegram уже безопасно "
+        "подтвердил ваш профиль.\n\n"
+        "📱 Все сборы, балансы, возвраты и история находятся в приложении.\n"
+        "⚡ Для быстрой затраты в группе используйте: "
+        "<code>/expense 40 @ivan @maxim билеты</code>.",
+        reply_markup=webapp_launch(settings.webapp_url) if settings.webapp_url else main_menu(),
         parse_mode=ParseMode.HTML,
     )
 
@@ -227,15 +229,13 @@ async def open_webapp(message: Message, settings: Settings) -> None:
         return
     if message.chat.type != ChatType.PRIVATE:
         bot_user = await message.bot.get_me()
-        app_url = f"https://t.me/{bot_user.username}?startapp&mode=compact"
-        start_url = await create_start_link(message.bot, payload="app")
+        chat_param = group_start_param(message.chat.id, settings.bot_token)
+        app_url = f"https://t.me/{bot_user.username}?startapp={chat_param}&mode=compact"
         await message.answer(
-            "📱 Откройте ShakeOnIt прямо из группы. Если Telegram ещё не активировал "
-            "Mini App, сначала нажмите «Подключиться».",
+            "📱 Откройте сборы этой группы прямо в ShakeOnIt.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text="📱 Открыть приложение", url=app_url)],
-                    [InlineKeyboardButton(text="🚀 Подключиться", url=start_url)],
                 ]
             ),
         )
@@ -299,13 +299,9 @@ async def collection_currency(
     )
     await state.clear()
     await callback.answer("Сбор создан")
-    await callback.message.edit_text(
-        f"✅ Сбор <b>{escape(data['title'])}</b> создан. Вы уже участвуете в нем.",
-        parse_mode=ParseMode.HTML,
-    )
     collection = await service.get_collection(collection_id)
-    await callback.message.answer(
-        await collection_text(service, collection),
+    await callback.message.edit_text(
+        "✅ <b>Сбор создан</b>\n\n" + await collection_text(service, collection),
         reply_markup=await collection_markup(callback.message, collection, True, True),
         parse_mode=ParseMode.HTML,
     )
@@ -345,14 +341,14 @@ async def open_collection(callback: CallbackQuery, service: BudgetService) -> No
 async def join_collection(callback: CallbackQuery, service: BudgetService) -> None:
     await sync_user(service, callback)
     collection_id = int(callback.data.split(":")[1])
-    if not await service.has_started_private_chat(callback.from_user.id):
-        await callback.answer(
-            "🚀 Сначала нажмите «Начать и участвовать» — это займет один шаг.",
-            show_alert=True,
-        )
-        return
+    was_member = await service.is_participant(collection_id, callback.from_user.id)
     await service.join(collection_id, callback.from_user.id)
-    await callback.answer("✅ Готово! Вы участвуете в сборе.", show_alert=True)
+    await callback.answer(
+        "✅ Вы уже участвуете в сборе."
+        if was_member
+        else "🎉 Готово! Вы участвуете — без регистрации и переходов.",
+        show_alert=True,
+    )
     await show_collection(callback.message, collection_id, callback.from_user.id, service)
 
 
@@ -385,7 +381,7 @@ async def expense_start(message: Message, state: FSMContext, service: BudgetServ
     await state.clear()
     command = re.fullmatch(r"/expense(?:@[A-Za-z0-9_]+)?(?:\s+(.+))?", (message.text or "").strip())
     if command and command.group(1):
-        await quick_expense(message, command.group(1), service)
+        await quick_expense(message, command.group(1), service, state)
         return
     await choose_collection(
         message, service, "expense", "Нет активных сборов для добавления затраты."
@@ -914,7 +910,14 @@ async def remove_do(callback: CallbackQuery, service: BudgetService) -> None:
     await show_collection(callback.message, int(collection_id), callback.from_user.id, service)
 
 
-async def quick_expense(message: Message, payload: str, service: BudgetService) -> None:
+async def quick_expense(
+    message: Message,
+    payload: str,
+    service: BudgetService,
+    state: FSMContext,
+    collection_id: int | None = None,
+    actor_id: int | None = None,
+) -> None:
     """Parse command arguments: 40 @ivan @maxim comment."""
     if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         await message.answer("Быстрая запись доступна только внутри общей Telegram-группы.")
@@ -925,15 +928,20 @@ async def quick_expense(message: Message, payload: str, service: BudgetService) 
     except ValueError as exc:
         await message.reply(str(exc))
         return
-    collections = await service.list_collections(
-        message.from_user.id, message.chat.id, include_archived=False
-    )
-    if len(collections) != 1:
+    actor_id = actor_id or message.from_user.id
+    collections = await service.list_collections(actor_id, message.chat.id, include_archived=False)
+    if not collections:
+        await message.reply("Сначала нажмите «Участвовать в сборе» под сообщением нужного сбора.")
+        return
+    if collection_id is None and len(collections) > 1:
+        await state.set_state(AddExpense.collection)
+        await state.update_data(quick_payload=payload)
         await message.reply(
-            "Для быстрой записи в этой группе должен быть ровно один активный сбор, в котором вы участвуете. "
-            "Иначе используйте кнопку «Добавить затрату»."
+            "В какой сбор добавить затрату?",
+            reply_markup=collections_keyboard(collections, "quickexpense"),
         )
         return
+    collection = next((row for row in collections if row["id"] == collection_id), collections[0])
     usernames = list(
         dict.fromkeys(
             token[1:].lower() for token in tokens[1:] if re.fullmatch(r"@[A-Za-z0-9_]+", token)
@@ -949,7 +957,7 @@ async def quick_expense(message: Message, payload: str, service: BudgetService) 
     unknown: list[str] = []
     for username in usernames:
         user = await service.user_by_username(username)
-        if not user or not await service.is_participant(collections[0]["id"], user["id"]):
+        if not user or not await service.is_participant(collection["id"], user["id"]):
             unknown.append(f"@{username}")
         else:
             participant_ids.append(user["id"])
@@ -960,23 +968,42 @@ async def quick_expense(message: Message, payload: str, service: BudgetService) 
         )
         return
     transaction_id = await service.add_expense(
-        collections[0]["id"],
-        message.from_user.id,
+        collection["id"],
+        actor_id,
         amount,
         participant_ids,
         " ".join(comment_tokens),
     )
     await message.reply(
-        f"✅ Затрата #{transaction_id} добавлена в «{escape(collections[0]['title'])}»: "
-        f"<b>{format_money(amount, collections[0]['currency'])}</b> на "
+        f"✅ Затрата #{transaction_id} добавлена в «{escape(collection['title'])}»: "
+        f"<b>{format_money(amount, collection['currency'])}</b> на "
         f"{', '.join('@' + escape(name) for name in usernames)}.",
         parse_mode="HTML",
+    )
+    await state.clear()
+
+
+@router.callback_query(AddExpense.collection, F.data.startswith("quickexpense:"))
+async def quick_expense_collection(
+    callback: CallbackQuery, state: FSMContext, service: BudgetService
+) -> None:
+    await sync_user(service, callback)
+    data = await state.get_data()
+    await callback.answer("⚡ Добавляю затрату…")
+    await quick_expense(
+        callback.message,
+        data["quick_payload"],
+        service,
+        state,
+        int(callback.data.split(":")[1]),
+        callback.from_user.id,
     )
 
 
 @router.inline_query()
 async def inline_hint(inline_query: InlineQuery) -> None:
-    start_url = await create_start_link(inline_query.bot, payload="inline_start")
+    bot_user = await inline_query.bot.get_me()
+    app_url = f"https://t.me/{bot_user.username}?startapp&mode=compact"
     await inline_query.answer(
         results=[
             InlineQueryResultArticle(
@@ -988,14 +1015,12 @@ async def inline_hint(inline_query: InlineQuery) -> None:
                     parse_mode=ParseMode.HTML,
                 ),
                 reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[[InlineKeyboardButton(text="🚀 Открыть бота", url=start_url)]]
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="📱 Открыть ShakeOnIt", url=app_url)]
+                    ]
                 ),
             )
         ],
-        button=InlineQueryResultsButton(
-            text="🚀 Начать работу с ботом",
-            start_parameter="inline_start",
-        ),
         cache_time=1,
         is_personal=True,
     )

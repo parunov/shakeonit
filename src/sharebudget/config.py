@@ -16,5 +16,6 @@ class Settings(BaseSettings):
     webhook_key_path: Path | None = None
     webapp_url: str | None = None
     webapp_auth_max_age: int = 86400
+    bot_username: str = "ShakeOnIt_bot"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")

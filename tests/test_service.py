@@ -35,6 +35,12 @@ async def test_private_chat_authorization_is_explicit_and_monotonic(service):
 
 
 @pytest.mark.asyncio
+async def test_user_is_authorized_on_first_telegram_interaction(service):
+    assert await service.upsert_user(99, "new_user", "Новый участник") is True
+    assert await service.upsert_user(99, "new_user", "Новый участник") is False
+
+
+@pytest.mark.asyncio
 async def test_shared_group_becomes_available_for_mini_app_collection(service):
     await service.upsert_user(1, "anna", "Анна", private_started=True)
     await service.register_user_chat(1, -100123, "Друзья")

@@ -42,8 +42,9 @@ class BudgetService:
         username: str | None,
         full_name: str,
         private_started: bool = False,
-    ) -> None:
+    ) -> bool:
         async with self.db.connect() as connection:
+            existing = await _fetchone(connection, "SELECT 1 FROM users WHERE id=?", (user_id,))
             await connection.execute(
                 """
                 INSERT INTO users(id, username, full_name, private_started) VALUES (?, ?, ?, ?)
@@ -60,6 +61,7 @@ class BudgetService:
                 ),
             )
             await connection.commit()
+            return existing is None
 
     async def has_started_private_chat(self, user_id: int) -> bool:
         async with self.db.connect() as connection:

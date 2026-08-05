@@ -10,13 +10,16 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from sharebudget.config import Settings
 from sharebudget.db import Database
+from sharebudget.links import group_start_param
 from sharebudget.service import BudgetService
 from sharebudget.webapp import ApiError, setup_webapp_routes, validate_init_data
 
 TOKEN = "123456:test-token"
 
 
-def signed_init_data(*, auth_date: int | None = None, user: dict | None = None) -> str:
+def signed_init_data(
+    *, auth_date: int | None = None, user: dict | None = None, start_param: str | None = None
+) -> str:
     data = {
         "auth_date": str(auth_date or int(time.time())),
         "query_id": "AAEAAAE",
@@ -27,6 +30,8 @@ def signed_init_data(*, auth_date: int | None = None, user: dict | None = None) 
             separators=(",", ":"),
         ),
     }
+    if start_param:
+        data["start_param"] = start_param
     check_string = "\n".join(f"{key}={value}" for key, value in sorted(data.items()))
     secret = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
     data["hash"] = hmac.new(secret, check_string.encode(), hashlib.sha256).hexdigest()
@@ -66,6 +71,8 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
     database = Database(tmp_path / "miniapp.db")
     await database.initialize()
     service = BudgetService(database)
+    await service.upsert_user(1, "owner", "Организатор")
+    collection_id = await service.create_collection(-100500, "Поездка", "EUR", 1)
     settings = Settings(bot_token=TOKEN, database_path=database.path)
     application = web.Application()
     setup_webapp_routes(application, object(), service, settings)
@@ -89,3 +96,37 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         payload = await authorized.json()
         assert authorized.status == 200
         assert payload["user"]["id"] == 42
+        assert payload["is_new_user"] is True
+
+        group_context = await client.get(
+            "/api/bootstrap",
+            headers={
+                "X-Telegram-Init-Data": signed_init_data(
+                    start_param=group_start_param(-100500, TOKEN)
+                )
+            },
+        )
+        group_payload = await group_context.json()
+        assert group_payload["context_chat_id"] == -100500
+        assert group_payload["collections"][0]["id"] == collection_id
+        assert group_payload["collections"][0]["is_participant"] is False
+
+        forged_context = await client.get(
+            "/api/bootstrap",
+            headers={
+                "X-Telegram-Init-Data": signed_init_data(start_param="chat_n100500_deadbeef0000")
+            },
+        )
+        forged_payload = await forged_context.json()
+        assert forged_payload["context_chat_id"] is None
+        assert forged_payload["collections"] == []
+
+        invitation = await client.get(
+            "/api/bootstrap",
+            headers={
+                "X-Telegram-Init-Data": signed_init_data(start_param=f"collection_{collection_id}")
+            },
+        )
+        invitation_payload = await invitation.json()
+        assert invitation_payload["invitation"]["collection"]["id"] == collection_id
+        assert invitation_payload["invitation"]["is_participant"] is False
