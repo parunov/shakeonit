@@ -157,6 +157,7 @@ button:disabled { opacity: .5; cursor: default; }
   outline: none; color: var(--text); background: var(--bg);
 }
 .field textarea { min-height: 82px; resize: vertical; }
+.compact-field { margin-bottom: 0; }
 .field input:focus, .field textarea:focus, .field select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 13%, transparent); }
 .check-list { display: grid; gap: 8px; margin: 12px 0 18px; }
 .check-row { display: flex; align-items: center; gap: 11px; padding: 12px; border-radius: 14px; background: var(--bg); }

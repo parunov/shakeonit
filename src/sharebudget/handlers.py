@@ -4,12 +4,13 @@ import re
 from html import escape
 
 from aiogram import F, Router
-from aiogram.enums import ChatType, ParseMode
+from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
+    ChatMemberUpdated,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InlineQuery,
@@ -111,9 +112,11 @@ async def collection_markup(
         ChatType.SUPERGROUP,
     ):
         bot_user = await message.bot.get_me()
-        app_url = (
-            f"https://t.me/{bot_user.username}?startapp=collection_{collection['id']}&mode=compact"
-        )
+        if bot_user.has_main_web_app:
+            app_url = (
+                f"https://t.me/{bot_user.username}?startapp=collection_{collection['id']}"
+                "&mode=compact"
+            )
     shared_group_screen = message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
     if shared_group_screen:
         return collection_actions(collection, False, False, None, app_url)
@@ -192,9 +195,14 @@ async def start(
         "📱 Все сборы, балансы, возвраты и история находятся в приложении.\n"
         "⚡ Для быстрой затраты в группе используйте: "
         "<code>/expense 40 @ivan @maxim билеты</code>.",
-        reply_markup=webapp_launch(settings.webapp_url) if settings.webapp_url else main_menu(),
+        reply_markup=main_menu(),
         parse_mode=ParseMode.HTML,
     )
+    if settings.webapp_url and message.chat.type == ChatType.PRIVATE:
+        await message.answer(
+            "📱 Или откройте полный интерфейс ShakeOnIt:",
+            reply_markup=webapp_launch(settings.webapp_url),
+        )
 
 
 @router.message(Command("menu"))
@@ -229,13 +237,23 @@ async def open_webapp(message: Message, settings: Settings) -> None:
         return
     if message.chat.type != ChatType.PRIVATE:
         bot_user = await message.bot.get_me()
-        chat_param = group_start_param(message.chat.id, settings.bot_token)
-        app_url = f"https://t.me/{bot_user.username}?startapp={chat_param}&mode=compact"
+        if bot_user.has_main_web_app:
+            chat_param = group_start_param(message.chat.id, settings.bot_token)
+            app_url = f"https://t.me/{bot_user.username}?startapp={chat_param}&mode=compact"
+            text = "📱 Откройте сборы этой группы прямо в ShakeOnIt."
+            button_text = "📱 Открыть приложение"
+        else:
+            app_url = f"https://t.me/{bot_user.username}?start=app"
+            text = (
+                "⚠️ Прямой запуск из группы ещё не активирован в BotFather. "
+                "Пока приложение откроется через личный чат."
+            )
+            button_text = "📱 Открыть приложение"
         await message.answer(
-            "📱 Откройте сборы этой группы прямо в ShakeOnIt.",
+            text,
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="📱 Открыть приложение", url=app_url)],
+                    [InlineKeyboardButton(text=button_text, url=app_url)],
                 ]
             ),
         )
@@ -258,6 +276,36 @@ async def remember_shared_chat(message: Message, service: BudgetService) -> None
     )
     await message.answer(
         f"✅ Группа «{escape(shared.title or 'Telegram-группа')}» добавлена в приложение.",
+        reply_markup=main_menu(),
+    )
+
+
+@router.my_chat_member()
+async def remember_group_when_bot_is_added(
+    event: ChatMemberUpdated, service: BudgetService
+) -> None:
+    if event.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return
+    if event.new_chat_member.status not in (
+        ChatMemberStatus.MEMBER,
+        ChatMemberStatus.ADMINISTRATOR,
+    ):
+        return
+    await service.upsert_user(
+        event.from_user.id,
+        event.from_user.username,
+        event.from_user.full_name,
+        private_started=False,
+    )
+    await service.register_user_chat(
+        event.from_user.id,
+        event.chat.id,
+        event.chat.title or "Telegram-группа",
+    )
+    await event.bot.send_message(
+        event.chat.id,
+        "👋 <b>ShakeOnIt добавлен</b>\n\nГруппа готова. Откройте Mini App или "
+        "используйте /new, чтобы создать первый сбор.",
         reply_markup=main_menu(),
     )
 
@@ -1003,7 +1051,11 @@ async def quick_expense_collection(
 @router.inline_query()
 async def inline_hint(inline_query: InlineQuery) -> None:
     bot_user = await inline_query.bot.get_me()
-    app_url = f"https://t.me/{bot_user.username}?startapp&mode=compact"
+    app_url = (
+        f"https://t.me/{bot_user.username}?startapp&mode=compact"
+        if bot_user.has_main_web_app
+        else f"https://t.me/{bot_user.username}?start=app"
+    )
     await inline_query.answer(
         results=[
             InlineQueryResultArticle(

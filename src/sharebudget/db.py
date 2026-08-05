@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT,
     full_name TEXT NOT NULL,
     payment_details TEXT NOT NULL DEFAULT '',
+    preferred_currency TEXT NOT NULL DEFAULT 'BYN',
     private_started INTEGER NOT NULL DEFAULT 0 CHECK (private_started IN (0, 1)),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -113,9 +114,14 @@ class Database:
                 """
             )
             user_columns = await connection.execute_fetchall("PRAGMA table_info(users)")
-            if "private_started" not in {column[1] for column in user_columns}:
+            user_column_names = {column[1] for column in user_columns}
+            if "private_started" not in user_column_names:
                 await connection.execute(
                     "ALTER TABLE users ADD COLUMN private_started INTEGER NOT NULL DEFAULT 0"
+                )
+            if "preferred_currency" not in user_column_names:
+                await connection.execute(
+                    "ALTER TABLE users ADD COLUMN preferred_currency TEXT NOT NULL DEFAULT 'BYN'"
                 )
             transaction_columns = await connection.execute_fetchall(
                 "PRAGMA table_info(transactions)"

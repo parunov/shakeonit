@@ -17,5 +17,6 @@ class Settings(BaseSettings):
     webapp_url: str | None = None
     webapp_auth_max_age: int = 86400
     bot_username: str = "ShakeOnIt_bot"
+    main_app_enabled: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")

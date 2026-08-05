@@ -44,5 +44,15 @@ def test_main_menu_and_launch_button_expose_mini_app():
     launch = _buttons(webapp_launch("https://example.com/app"))[0]
 
     assert "📱 Приложение" in menu_labels
-    assert menu_labels == ["📱 Приложение", "💸 Добавить затрату", "❓ Помощь"]
+    assert menu_labels == [
+        "➕ Создать сбор",
+        "📋 Сборы",
+        "💸 Добавить затрату",
+        "🤝 Вернуть долг",
+        "⚖️ Мой баланс",
+        "💳 Платежные данные",
+        "📱 Приложение",
+        "🎓 Обучение",
+        "❓ Помощь",
+    ]
     assert launch.web_app.url == "https://example.com/app"

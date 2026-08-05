@@ -107,6 +107,8 @@ async def main() -> None:
         logging.getLogger(__name__).info("Permanently closed %s expired archives", expired)
 
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot_user = await bot.get_me()
+    settings.main_app_enabled = bool(bot_user.has_main_web_app)
     dispatcher = Dispatcher(service=service, settings=settings)
     dispatcher.include_router(router)
     await bot.set_my_commands(

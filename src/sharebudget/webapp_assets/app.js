@@ -150,6 +150,12 @@ async function renderBalance() {
   updateNav();
   const rows = state.bootstrap.collections.filter((item) => item.status === "active");
   const details = await Promise.all(rows.map((item) => loadDetails(item.id)));
+  let exchange = null;
+  try {
+    exchange = await api("/api/rates");
+  } catch (error) {
+    toast("Курсы валют временно недоступны — показываю исходные суммы", true);
+  }
   const totals = new Map();
   const cards = details.map((data) => {
     const mine = data.balances.find((item) => item.user_id === state.bootstrap.user.id)?.amount || 0;
@@ -161,12 +167,15 @@ async function renderBalance() {
         <span class="amount ${mine > 0 ? "positive" : mine < 0 ? "negative" : ""}">${money(Math.abs(mine), data.collection.currency)}</span>
       </button>`;
   });
-  const netLabel = [...totals.entries()].map(([currency, amount]) => `${amount >= 0 ? "+" : "−"}${money(Math.abs(amount), currency)}`).join(" · ") || "0";
+  const preferred = state.bootstrap.user.preferred_currency;
+  const convertedTotal = exchange ? Math.round([...totals.entries()].reduce((sum, [currency, amount]) => sum + amount * exchange.rates[currency] / exchange.rates[preferred], 0)) : null;
+  const originalLabel = [...totals.entries()].map(([currency, amount]) => `${amount >= 0 ? "+" : "−"}${money(Math.abs(amount), currency)}`).join(" · ") || "0";
+  const netLabel = convertedTotal === null ? originalLabel : `${convertedTotal >= 0 ? "+" : "−"}${money(Math.abs(convertedTotal), preferred)}`;
   app.innerHTML = `
     <section class="hero">
-      <div class="hero-label">ЧИСТЫЙ БАЛАНС</div>
+      <div class="hero-label">ОБЩИЙ БАЛАНС · ${e(preferred)}</div>
       <div class="hero-value">${netLabel}</div>
-      <div class="hero-meta">По активным сборам · отдельно по каждой валюте</div>
+      <div class="hero-meta">${exchange ? `≈ по официальному курсу НБРБ · ${e(originalLabel)}` : "По активным сборам · без конвертации"}</div>
     </section>
     <div class="section-head"><h2>По сборам</h2></div>
     ${cards.length ? `<div class="card-list">${cards.join("")}</div>` : empty("✅", "Активных долгов нет")}`;
@@ -181,6 +190,11 @@ function renderProfile() {
   app.innerHTML = `
     <section class="card member-row">
       <div class="row-between"><div><div class="row-title">${e(user.full_name)}</div><div class="row-note">${user.username ? `@${e(user.username)}` : `Telegram ID ${user.id}`}</div></div><span class="pill">Подключён</span></div>
+    </section>
+    <div class="section-head"><h2>Общая валюта баланса</h2></div>
+    <section class="card member-row">
+      <div class="row-note">Используется только для общего итога. Суммы внутри сборов не меняются.</div>
+      <label class="field compact-field"><span>Показывать общий баланс в</span><select id="preferred-currency">${state.bootstrap.currencies.map((currency) => `<option ${currency === user.preferred_currency ? "selected" : ""}>${currency}</option>`).join("")}</select></label>
     </section>
     <div class="section-head"><h2>Платежные данные</h2><button class="text-button" type="button" data-action="payment">Изменить</button></div>
     <section class="card member-row">
@@ -324,8 +338,11 @@ function renderCollectionPanel(data, isAdmin) {
 }
 
 function createSheet() {
-  const chats = state.bootstrap.chats;
-  showSheet(`<h2>Новый сбор</h2><p class="sheet-intro">Выберите Telegram-группу или добавьте новую — бот должен уже состоять в ней.</p>${chats.length ? `<form id="create-form"><label class="field"><span>Группа</span><select name="chat_id" required>${chats.map((chat) => `<option value="${chat.chat_id}">${e(chat.label)}</option>`).join("")}</select></label><label class="field"><span>Название</span><input name="title" minlength="2" maxlength="80" placeholder="Например, Поездка в Варшаву" required></label><label class="field"><span>Валюта</span><select name="currency">${state.bootstrap.currencies.map((currency) => `<option>${currency}</option>`).join("")}</select></label><div class="sheet-actions"><button class="primary-button" type="submit">Создать сбор</button><button class="secondary-button" type="button" data-action="choose-group">Выбрать другую группу</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>` : `${empty("👥", "Выберите группу, в которую уже добавлен бот.")}<div class="sheet-actions"><button class="primary-button" type="button" data-action="choose-group">Выбрать Telegram-группу</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div>`}`);
+  const chats = [...state.bootstrap.chats];
+  if (state.bootstrap.context_chat_id && !chats.some((chat) => chat.chat_id === state.bootstrap.context_chat_id)) {
+    chats.unshift({ chat_id: state.bootstrap.context_chat_id, label: "Текущая Telegram-группа" });
+  }
+  showSheet(`<h2>Новый сбор</h2><p class="sheet-intro">Сбор создаётся в Telegram-группе, где уже есть ShakeOnIt.</p>${chats.length ? `<form id="create-form"><label class="field"><span>Группа</span><select name="chat_id" required>${chats.map((chat) => `<option value="${chat.chat_id}">${e(chat.label)}</option>`).join("")}</select></label><label class="field"><span>Название</span><input name="title" minlength="2" maxlength="80" placeholder="Например, Поездка в Варшаву" required></label><label class="field"><span>Валюта</span><select name="currency">${state.bootstrap.currencies.map((currency) => `<option>${currency}</option>`).join("")}</select></label><div class="sheet-actions"><button class="primary-button" type="submit">Создать сбор</button><button class="secondary-button" type="button" data-action="choose-group">Выбрать другую группу</button><button class="secondary-button" type="button" data-action="add-bot-group">Добавить бота в новую группу</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>` : `${empty("👥", "Сначала добавьте ShakeOnIt в нужную группу. Мы запомним её автоматически.")}<div class="sheet-actions"><button class="primary-button" type="button" data-action="add-bot-group">Добавить бота в группу</button><button class="secondary-button" type="button" data-action="choose-group">Выбрать уже добавленную группу</button><button class="secondary-button" type="button" data-action="refresh-groups">Обновить список групп</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div>`}`);
 }
 
 function expenseSheet() {
@@ -401,8 +418,12 @@ app.addEventListener("click", async (event) => {
     if (action === "payment") return paymentSheet();
     if (action === "share-invite") {
       const collection = state.collection.collection;
-      const inviteUrl = `https://t.me/${state.bootstrap.bot_username}?startapp=collection_${collection.id}&mode=compact`;
-      const inviteText = `Присоединяйся к сбору «${collection.title}» в ShakeOnIt. Нажми «Участвовать» — без регистрации.`;
+      const inviteUrl = state.bootstrap.main_app_enabled
+        ? `https://t.me/${state.bootstrap.bot_username}?startapp=collection_${collection.id}&mode=compact`
+        : `https://t.me/${state.bootstrap.bot_username}?start=collection_${collection.id}`;
+      const inviteText = state.bootstrap.main_app_enabled
+        ? `Присоединяйся к сбору «${collection.title}» в ShakeOnIt. Нажми «Участвовать» — без регистрации.`
+        : `Присоединяйся к сбору «${collection.title}» в ShakeOnIt. Открой ссылку — бот добавит тебя автоматически.`;
       const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(inviteUrl)}&text=${encodeURIComponent(inviteText)}`;
       haptic();
       if (tg?.openTelegramLink) tg.openTelegramLink(shareUrl);
@@ -442,6 +463,24 @@ app.addEventListener("click", async (event) => {
   }
 });
 
+app.addEventListener("change", async (event) => {
+  if (event.target.id !== "preferred-currency" || state.busy) return;
+  try {
+    state.busy = true;
+    await api("/api/me/currency", {
+      method: "PATCH",
+      body: JSON.stringify({ currency: event.target.value }),
+    });
+    await reloadBootstrap();
+    haptic();
+    toast(`Общий баланс будет показан в ${event.target.value}`);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    state.busy = false;
+  }
+});
+
 sheet.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-action]");
   if (!target || state.busy) return;
@@ -449,6 +488,25 @@ sheet.addEventListener("click", async (event) => {
   if (target.dataset.action === "select-all") {
     sheet.querySelectorAll('input[name="participant"]').forEach((input) => { input.checked = true; });
     haptic();
+  }
+  if (target.dataset.action === "add-bot-group") {
+    const url = `https://t.me/${state.bootstrap.bot_username}?startgroup=shakeonit`;
+    if (tg?.openTelegramLink) tg.openTelegramLink(url);
+    else window.location.href = url;
+    return;
+  }
+  if (target.dataset.action === "refresh-groups") {
+    try {
+      setBusy(target, true);
+      await reloadBootstrap();
+      createSheet();
+      toast("Список групп обновлён");
+    } catch (error) {
+      toast(error.message, true);
+    } finally {
+      setBusy(target, false);
+    }
+    return;
   }
   if (target.dataset.action === "choose-group") {
     if (!tg?.isVersionAtLeast?.("9.6") || !tg?.requestChat) {

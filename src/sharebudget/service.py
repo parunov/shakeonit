@@ -84,6 +84,16 @@ class BudgetService:
             )
             await connection.commit()
 
+    async def set_preferred_currency(self, user_id: int, currency: str) -> None:
+        if currency not in CURRENCIES:
+            raise DomainError("Неподдерживаемая валюта")
+        async with self.db.connect() as connection:
+            await connection.execute(
+                "UPDATE users SET preferred_currency=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (currency, user_id),
+            )
+            await connection.commit()
+
     async def create_collection(
         self, chat_id: int, title: str, currency: str, admin_id: int
     ) -> int:

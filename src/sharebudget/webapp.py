@@ -18,7 +18,7 @@ from aiogram.types import (
     KeyboardButton,
     KeyboardButtonRequestChat,
 )
-from aiohttp import web
+from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
 from .config import Settings
 from .links import parse_group_start_param
@@ -32,6 +32,8 @@ SERVICE_KEY = web.AppKey("service", BudgetService)
 SETTINGS_KEY = web.AppKey("settings", Settings)
 AUTH_KEY = web.RequestKey("telegram_auth", dict)
 NEW_USER_KEY = web.RequestKey("new_user", bool)
+FX_CACHE_KEY = web.AppKey("fx_cache", dict)
+NBRB_RATES_URL = "https://api.nbrb.by/exrates/rates?periodicity=0"
 
 
 class ApiError(Exception):
@@ -152,22 +154,25 @@ async def _report(bot: Bot, chat_id: int, text: str, reply_markup=None) -> bool:
 
 def _collection_invite_markup(settings: Settings, collection_id: int) -> InlineKeyboardMarkup:
     username = settings.bot_username.lstrip("@")
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+    rows = []
+    if settings.main_app_enabled:
+        rows.append(
             [
                 InlineKeyboardButton(
                     text="📱 Открыть сбор",
                     url=f"https://t.me/{username}?startapp=collection_{collection_id}&mode=compact",
                 )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🙋 Участвовать в сборе",
-                    callback_data=f"join:{collection_id}",
-                )
-            ],
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🙋 Участвовать в сборе",
+                callback_data=f"join:{collection_id}",
+            )
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _name(user: dict) -> str:
@@ -240,6 +245,7 @@ async def bootstrap(request: web.Request) -> web.Response:
                 "full_name": user["full_name"],
                 "username": user["username"],
                 "payment_details": user["payment_details"],
+                "preferred_currency": user["preferred_currency"],
             },
             "collections": [_collection(row) for row in rows],
             "chats": [
@@ -254,6 +260,7 @@ async def bootstrap(request: web.Request) -> web.Response:
             "is_new_user": request.get(NEW_USER_KEY, False),
             "context_chat_id": context_chat_id,
             "bot_username": request.app[SETTINGS_KEY].bot_username.lstrip("@"),
+            "main_app_enabled": request.app[SETTINGS_KEY].main_app_enabled,
         }
     )
 
@@ -315,7 +322,10 @@ async def create_collection(request: web.Request) -> web.Response:
     service, bot, user = _context(request)
     payload = await _json_body(request)
     chat_id = _integer(payload, "chat_id", "Выберите группу")
-    if not await service.can_create_in_chat(user["id"], chat_id):
+    context_chat_id = parse_group_start_param(
+        request[AUTH_KEY].get("start_param", ""), request.app[SETTINGS_KEY].bot_token
+    )
+    if chat_id != context_chat_id and not await service.can_create_in_chat(user["id"], chat_id):
         raise ApiError("Сначала откройте меню бота в нужной группе", 403)
     collection_id = await service.create_collection(
         chat_id, str(payload.get("title", "")), str(payload.get("currency", "")), user["id"]
@@ -526,6 +536,40 @@ async def save_payment(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def save_preferred_currency(request: web.Request) -> web.Response:
+    service, _, user = _context(request)
+    payload = await _json_body(request)
+    await service.set_preferred_currency(user["id"], str(payload.get("currency", "")))
+    return web.json_response({"ok": True})
+
+
+async def exchange_rates(request: web.Request) -> web.Response:
+    cache = request.app[FX_CACHE_KEY]
+    now = time.monotonic()
+    if not cache.get("rates") or now - cache.get("loaded_at", 0) > 6 * 60 * 60:
+        try:
+            async with (
+                ClientSession(timeout=ClientTimeout(total=6)) as session,
+                session.get(NBRB_RATES_URL) as response,
+            ):
+                response.raise_for_status()
+                rows = await response.json()
+            rates = {"BYN": 1.0}
+            rate_date = None
+            for row in rows:
+                currency = row.get("Cur_Abbreviation")
+                if currency in CURRENCIES:
+                    rates[currency] = float(row["Cur_OfficialRate"]) / int(row["Cur_Scale"])
+                    rate_date = rate_date or row.get("Date")
+            if set(rates) != set(CURRENCIES):
+                raise ValueError("Неполный набор курсов")
+            cache.update(rates=rates, rate_date=rate_date, loaded_at=now)
+        except (ClientError, OSError, ValueError, TypeError, KeyError, TimeoutError):
+            LOGGER.warning("Could not load NBRB exchange rates", exc_info=True)
+            raise ApiError("Не удалось загрузить курсы валют. Попробуйте позже", 503) from None
+    return web.json_response({"ok": True, "rates": cache["rates"], "date": cache.get("rate_date")})
+
+
 async def archive_collection(request: web.Request) -> web.Response:
     service, bot, user = _context(request)
     collection_id = int(request.match_info["collection_id"])
@@ -624,12 +668,14 @@ def setup_webapp_routes(
     application[BOT_KEY] = bot
     application[SERVICE_KEY] = service
     application[SETTINGS_KEY] = settings
+    application[FX_CACHE_KEY] = {}
     application.middlewares.extend([security_headers, api_middleware])
     application.router.add_get("/app", app_index)
     application.router.add_get("/app/", app_index)
     application.router.add_get("/app/static/{filename}", app_asset)
     application.router.add_get("/api/bootstrap", bootstrap)
     application.router.add_get("/api/history", global_history)
+    application.router.add_get("/api/rates", exchange_rates)
     application.router.add_get("/api/collections/{collection_id}", collection_details)
     application.router.add_post("/api/collections", create_collection)
     application.router.add_post("/api/chats/prepare", prepare_chat_request)
@@ -645,3 +691,4 @@ def setup_webapp_routes(
     application.router.add_post("/api/transactions/{transaction_id}/cancel", cancel_transaction)
     application.router.add_post("/api/transactions/{transaction_id}/confirm", confirm_repayment)
     application.router.add_patch("/api/me/payment", save_payment)
+    application.router.add_patch("/api/me/currency", save_preferred_currency)

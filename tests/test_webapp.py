@@ -12,7 +12,12 @@ from sharebudget.config import Settings
 from sharebudget.db import Database
 from sharebudget.links import group_start_param
 from sharebudget.service import BudgetService
-from sharebudget.webapp import ApiError, setup_webapp_routes, validate_init_data
+from sharebudget.webapp import (
+    ApiError,
+    _collection_invite_markup,
+    setup_webapp_routes,
+    validate_init_data,
+)
 
 TOKEN = "123456:test-token"
 
@@ -66,6 +71,22 @@ def test_validate_init_data_rejects_duplicate_fields():
         validate_init_data(raw, TOKEN)
 
 
+def test_invalid_startapp_link_is_not_rendered_without_main_app():
+    settings = Settings(bot_token=TOKEN, main_app_enabled=False)
+    buttons = [
+        button for row in _collection_invite_markup(settings, 42).inline_keyboard for button in row
+    ]
+
+    assert not any(button.url and "startapp" in button.url for button in buttons)
+    assert any(button.callback_data == "join:42" for button in buttons)
+
+    settings.main_app_enabled = True
+    enabled_buttons = [
+        button for row in _collection_invite_markup(settings, 42).inline_keyboard for button in row
+    ]
+    assert any(button.url and "startapp=collection_42" in button.url for button in enabled_buttons)
+
+
 @pytest.mark.asyncio
 async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
     database = Database(tmp_path / "miniapp.db")
@@ -96,7 +117,17 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         payload = await authorized.json()
         assert authorized.status == 200
         assert payload["user"]["id"] == 42
+        assert payload["user"]["preferred_currency"] == "BYN"
+        assert payload["main_app_enabled"] is False
         assert payload["is_new_user"] is True
+
+        currency = await client.patch(
+            "/api/me/currency",
+            json={"currency": "USD"},
+            headers={"X-Telegram-Init-Data": signed_init_data()},
+        )
+        assert currency.status == 200
+        assert (await service.get_user(42))["preferred_currency"] == "USD"
 
         group_context = await client.get(
             "/api/bootstrap",
