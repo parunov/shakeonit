@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT,
     full_name TEXT NOT NULL,
     payment_details TEXT NOT NULL DEFAULT '',
+    private_started INTEGER NOT NULL DEFAULT 0 CHECK (private_started IN (0, 1)),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -87,6 +88,11 @@ class Database:
                 ON participants(user_id, active, collection_id)
                 """
             )
+            user_columns = await connection.execute_fetchall("PRAGMA table_info(users)")
+            if "private_started" not in {column[1] for column in user_columns}:
+                await connection.execute(
+                    "ALTER TABLE users ADD COLUMN private_started INTEGER NOT NULL DEFAULT 0"
+                )
             await connection.commit()
 
     @asynccontextmanager

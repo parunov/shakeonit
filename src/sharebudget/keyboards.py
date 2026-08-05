@@ -55,7 +55,7 @@ def collection_actions(
     collection_id = collection["id"]
     if collection["status"] == "active":
         if start_url:
-            builder.button(text="🚀 Начать работу с ботом", url=start_url)
+            builder.button(text="🚀 Начать и участвовать", url=start_url)
         builder.button(text="🙋 Участвовать в сборе", callback_data=f"join:{collection_id}")
     if is_member:
         builder.button(text="💸 Добавить затрату", callback_data=f"expense:{collection_id}")
@@ -64,7 +64,7 @@ def collection_actions(
         builder.button(text="👥 Участники", callback_data=f"members:{collection_id}")
         builder.button(text="⚖️ Мой баланс", callback_data=f"mybalance:{collection_id}")
     if is_admin and collection["status"] == "active":
-        builder.button(text="⚙️ Управление", callback_data=f"manage:{collection_id}")
+        builder.button(text="⚙️ Управление · админ", callback_data=f"manage:{collection_id}")
     if is_admin and collection["status"] == "archived":
         builder.button(text="♻️ Восстановить", callback_data=f"restore:{collection_id}")
     builder.adjust(2, 2, 1)

@@ -25,6 +25,18 @@ async def make_collection(service):
 
 
 @pytest.mark.asyncio
+async def test_private_chat_authorization_is_explicit_and_monotonic(service):
+    await service.upsert_user(1, "anna", "Анна", private_started=False)
+    assert not await service.has_started_private_chat(1)
+
+    await service.upsert_user(1, "anna", "Анна", private_started=True)
+    assert await service.has_started_private_chat(1)
+
+    await service.upsert_user(1, "anna", "Анна", private_started=False)
+    assert await service.has_started_private_chat(1)
+
+
+@pytest.mark.asyncio
 async def test_expense_and_repayment_update_balances(service):
     collection_id = await make_collection(service)
     expense_id = await service.add_expense(collection_id, 1, 9000, [1, 2, 3], "Отель")

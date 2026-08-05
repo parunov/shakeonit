@@ -36,17 +36,37 @@ class BudgetService:
     def __init__(self, database: Database):
         self.db = database
 
-    async def upsert_user(self, user_id: int, username: str | None, full_name: str) -> None:
+    async def upsert_user(
+        self,
+        user_id: int,
+        username: str | None,
+        full_name: str,
+        private_started: bool = False,
+    ) -> None:
         async with self.db.connect() as connection:
             await connection.execute(
                 """
-                INSERT INTO users(id, username, full_name) VALUES (?, ?, ?)
+                INSERT INTO users(id, username, full_name, private_started) VALUES (?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET username=excluded.username,
-                    full_name=excluded.full_name, updated_at=CURRENT_TIMESTAMP
+                    full_name=excluded.full_name,
+                    private_started=MAX(users.private_started, excluded.private_started),
+                    updated_at=CURRENT_TIMESTAMP
                 """,
-                (user_id, username.lower() if username else None, full_name),
+                (
+                    user_id,
+                    username.lower() if username else None,
+                    full_name,
+                    int(private_started),
+                ),
             )
             await connection.commit()
+
+    async def has_started_private_chat(self, user_id: int) -> bool:
+        async with self.db.connect() as connection:
+            row = await _fetchone(
+                connection, "SELECT private_started FROM users WHERE id=?", (user_id,)
+            )
+            return bool(row and row["private_started"])
 
     async def set_payment_details(self, user_id: int, details: str) -> None:
         if len(details) > 500:
