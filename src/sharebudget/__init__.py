@@ -1,0 +1,1 @@
+"""ShareBudget Telegram bot."""
