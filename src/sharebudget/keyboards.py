@@ -5,6 +5,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
+    WebAppInfo,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -18,9 +19,23 @@ def main_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="💸 Добавить затрату"), KeyboardButton(text="🤝 Вернуть долг")],
             [KeyboardButton(text="⚖️ Мой баланс"), KeyboardButton(text="💳 Платежные данные")],
             [KeyboardButton(text="🎓 Обучение"), KeyboardButton(text="❓ Помощь")],
+            [KeyboardButton(text="📱 Приложение")],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие",
+    )
+
+
+def webapp_launch(url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📱 Открыть ShakeOnIt",
+                    web_app=WebAppInfo(url=url),
+                )
+            ]
+        ]
     )
 
 

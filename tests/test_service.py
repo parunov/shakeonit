@@ -32,6 +32,23 @@ async def test_private_chat_authorization_is_explicit_and_monotonic(service):
     await service.upsert_user(1, "anna", "Анна", private_started=True)
     assert await service.has_started_private_chat(1)
 
+
+@pytest.mark.asyncio
+async def test_shared_group_becomes_available_for_mini_app_collection(service):
+    await service.upsert_user(1, "anna", "Анна", private_started=True)
+    await service.register_user_chat(1, -100123, "Друзья")
+
+    chats = await service.list_user_collection_chats(1)
+
+    assert chats == [
+        {
+            "chat_id": -100123,
+            "reference_title": "Друзья",
+            "last_seen": chats[0]["last_seen"],
+        }
+    ]
+    assert await service.can_create_in_chat(1, -100123)
+
     await service.upsert_user(1, "anna", "Анна", private_started=False)
     assert await service.has_started_private_chat(1)
 

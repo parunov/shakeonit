@@ -20,6 +20,7 @@ from aiogram.types import (
 )
 from aiogram.utils.deep_linking import create_start_link
 
+from .config import Settings
 from .keyboards import (
     admin_actions,
     collection_actions,
@@ -31,6 +32,7 @@ from .keyboards import (
     participant_picker,
     people_keyboard,
     transaction_actions,
+    webapp_launch,
 )
 from .money import format_money, parse_amount
 from .render import collection_text, history_text, transaction_text, user_label
@@ -49,6 +51,8 @@ HELP_TEXT = """<b>❓ Помощь</b>
 
 На экране сбора всегда показаны чистые балансы и оптимальный список переводов. Отмена транзакции сохраняет ее в истории, но исключает из расчета.
 
+Кнопка «📱 Приложение» открывает тот же функционал в удобном Mini App.
+
 Команды: /menu, /new, /collections, /expense, /repay, /balance, /help, /cancel"""
 
 TUTORIAL_TEXT = """<b>🎓 Как пользоваться ShareBudget</b>
@@ -60,6 +64,7 @@ TUTORIAL_TEXT = """<b>🎓 Как пользоваться ShareBudget</b>
 5. Тот, кто заплатил, нажимает «Добавить затрату», вводит сумму, отмечает людей и пишет короткое описание.
 6. Когда кто-то действительно переводит деньги, используйте «Вернуть долг».
 7. Экран сбора сразу покажет, кто кому и сколько должен. В «Истории» видны все действия.
+8. Кнопка «📱 Приложение» открывает все эти операции в одном интерфейсе.
 
 Быстрая запись при включенном Privacy Mode: <code>/expense@имя_бота 40 @ivan @maxim билеты</code>. Она работает, если в группе один активный сбор, а отмеченные пользователи нажали «Участвовать в сборе».
 
@@ -195,6 +200,42 @@ async def help_screen(message: Message) -> None:
 @router.message(F.text == "🎓 Обучение")
 async def tutorial(message: Message) -> None:
     await message.answer(TUTORIAL_TEXT, parse_mode=ParseMode.HTML, reply_markup=main_menu())
+
+
+@router.message(F.text == "📱 Приложение")
+async def open_webapp(message: Message, settings: Settings) -> None:
+    if not settings.webapp_url:
+        await message.answer("ℹ️ Приложение пока не настроено.")
+        return
+    if message.chat.type != ChatType.PRIVATE:
+        start_url = await create_start_link(message.bot, payload="app")
+        await message.answer(
+            "📱 Приложение открывается в личном чате с ботом.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Открыть личный чат", url=start_url)]]
+            ),
+        )
+        return
+    await message.answer(
+        "📱 <b>ShakeOnIt</b> — все сборы и операции в одном спокойном интерфейсе.",
+        reply_markup=webapp_launch(settings.webapp_url),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.message(F.chat_shared)
+async def remember_shared_chat(message: Message, service: BudgetService) -> None:
+    await sync_user(service, message)
+    shared = message.chat_shared
+    await service.register_user_chat(
+        message.from_user.id,
+        shared.chat_id,
+        shared.title or shared.username or "Telegram-группа",
+    )
+    await message.answer(
+        f"✅ Группа «{escape(shared.title or 'Telegram-группа')}» добавлена в приложение.",
+        reply_markup=main_menu(),
+    )
 
 
 @router.message(Command("new"))

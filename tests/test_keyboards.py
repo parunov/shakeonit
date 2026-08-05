@@ -1,4 +1,4 @@
-from sharebudget.keyboards import collection_actions
+from sharebudget.keyboards import collection_actions, main_menu, webapp_launch
 
 
 def _buttons(markup):
@@ -35,3 +35,11 @@ def test_archived_collection_has_no_onboarding_or_join_button():
 
     assert not any(button.url for button in buttons)
     assert not any(button.callback_data == "join:42" for button in buttons)
+
+
+def test_main_menu_and_launch_button_expose_mini_app():
+    menu_labels = [button.text for row in main_menu().keyboard for button in row]
+    launch = _buttons(webapp_launch("https://example.com/app"))[0]
+
+    assert "📱 Приложение" in menu_labels
+    assert launch.web_app.url == "https://example.com/app"

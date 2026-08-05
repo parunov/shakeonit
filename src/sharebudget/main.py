@@ -9,7 +9,7 @@ from contextlib import suppress
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand, FSInputFile
+from aiogram.types import BotCommand, FSInputFile, MenuButtonWebApp, WebAppInfo
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
@@ -17,6 +17,7 @@ from .config import Settings
 from .db import Database
 from .handlers import router
 from .service import BudgetService
+from .webapp import setup_webapp_routes
 
 
 async def archive_cleanup(service: BudgetService) -> None:
@@ -34,12 +35,14 @@ async def health(_: web.Request) -> web.Response:
 async def start_webhook(
     bot: Bot,
     dispatcher: Dispatcher,
+    service: BudgetService,
     settings: Settings,
 ) -> None:
     if not settings.webhook_secret:
         raise RuntimeError("WEBHOOK_SECRET is required when WEBHOOK_URL is configured")
     application = web.Application()
     application.router.add_get("/health", health)
+    setup_webapp_routes(application, bot, service, settings)
     SimpleRequestHandler(
         dispatcher=dispatcher,
         bot=bot,
@@ -104,7 +107,7 @@ async def main() -> None:
         logging.getLogger(__name__).info("Permanently closed %s expired archives", expired)
 
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dispatcher = Dispatcher(service=service)
+    dispatcher = Dispatcher(service=service, settings=settings)
     dispatcher.include_router(router)
     await bot.set_my_commands(
         [
@@ -118,10 +121,17 @@ async def main() -> None:
             BotCommand(command="cancel", description="Отменить текущее действие"),
         ]
     )
+    if settings.webapp_url:
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text="Приложение",
+                web_app=WebAppInfo(url=settings.webapp_url),
+            )
+        )
     cleanup_task = asyncio.create_task(archive_cleanup(service))
     try:
         if settings.webhook_url:
-            await start_webhook(bot, dispatcher, settings)
+            await start_webhook(bot, dispatcher, service, settings)
         else:
             logging.getLogger(__name__).warning(
                 "WEBHOOK_URL is not configured; using long polling for local development"

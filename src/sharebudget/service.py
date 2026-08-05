@@ -68,6 +68,10 @@ class BudgetService:
             )
             return bool(row and row["private_started"])
 
+    async def get_user(self, user_id: int):
+        async with self.db.connect() as connection:
+            return await _fetchone(connection, "SELECT * FROM users WHERE id=?", (user_id,))
+
     async def set_payment_details(self, user_id: int, details: str) -> None:
         if len(details) > 500:
             raise DomainError("Платежные данные не должны быть длиннее 500 символов")
@@ -172,6 +176,61 @@ class BudgetService:
                 """,
                 (chat_id,),
             )
+
+    async def list_user_collection_chats(self, user_id: int):
+        """Return chats where the user can create another collection."""
+        async with self.db.connect() as connection:
+            collection_rows = await connection.execute_fetchall(
+                """
+                SELECT c.chat_id, MAX(c.created_at) last_seen,
+                       (SELECT c2.title FROM collections c2
+                        JOIN participants p2 ON p2.collection_id=c2.id
+                        WHERE c2.chat_id=c.chat_id AND p2.user_id=? AND p2.active=1
+                        ORDER BY c2.created_at DESC LIMIT 1) reference_title
+                FROM collections c
+                JOIN participants p ON p.collection_id=c.id
+                WHERE p.user_id=? AND p.active=1
+                GROUP BY c.chat_id ORDER BY last_seen DESC
+                """,
+                (user_id, user_id),
+            )
+            shared_rows = await connection.execute_fetchall(
+                """
+                SELECT chat_id, title reference_title, updated_at last_seen
+                FROM user_chats WHERE user_id=? ORDER BY updated_at DESC
+                """,
+                (user_id,),
+            )
+        merged = {row["chat_id"]: dict(row) for row in collection_rows}
+        merged.update({row["chat_id"]: dict(row) for row in shared_rows})
+        return sorted(merged.values(), key=lambda row: row["last_seen"], reverse=True)
+
+    async def register_user_chat(self, user_id: int, chat_id: int, title: str) -> None:
+        clean_title = title.strip()[:100] or "Telegram-группа"
+        async with self.db.connect() as connection:
+            await connection.execute(
+                """
+                INSERT INTO user_chats(user_id,chat_id,title) VALUES (?,?,?)
+                ON CONFLICT(user_id,chat_id) DO UPDATE SET
+                    title=excluded.title,updated_at=CURRENT_TIMESTAMP
+                """,
+                (user_id, chat_id, clean_title),
+            )
+            await connection.commit()
+
+    async def can_create_in_chat(self, user_id: int, chat_id: int) -> bool:
+        async with self.db.connect() as connection:
+            row = await _fetchone(
+                connection,
+                """
+                SELECT 1 FROM user_chats WHERE chat_id=? AND user_id=?
+                UNION ALL
+                SELECT 1 FROM collections c JOIN participants p ON p.collection_id=c.id
+                WHERE c.chat_id=? AND p.user_id=? AND p.active=1 LIMIT 1
+                """,
+                (chat_id, user_id, chat_id, user_id),
+            )
+            return row is not None
 
     async def is_participant(self, collection_id: int, user_id: int) -> bool:
         async with self.db.connect() as connection:

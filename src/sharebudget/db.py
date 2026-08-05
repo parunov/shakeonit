@@ -32,6 +32,14 @@ CREATE TABLE IF NOT EXISTS collections (
 
 CREATE INDEX IF NOT EXISTS idx_collections_chat ON collections(chat_id, status);
 
+CREATE TABLE IF NOT EXISTS user_chats (
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    chat_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, chat_id)
+);
+
 CREATE TABLE IF NOT EXISTS participants (
     collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
     user_id INTEGER NOT NULL REFERENCES users(id),
