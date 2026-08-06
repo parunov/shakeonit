@@ -73,6 +73,7 @@ main { width: min(100%, 720px); margin: 0 auto; padding: 8px 14px 28px; }
 button.card { text-align: left; padding: 17px; cursor: pointer; }
 .collection-card { display: grid; grid-template-columns: 46px 1fr auto; gap: 12px; align-items: center; }
 .collection-icon { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 16px; background: color-mix(in srgb, var(--accent) 12%, var(--surface)); font-size: 21px; }
+.collection-icon.status-icon { font-size: 30px; line-height: 1; }
 .card-title { font-weight: 730; line-height: 1.25; }
 .card-subtitle { margin-top: 5px; color: var(--muted); font-size: 13px; }
 .amount { text-align: right; font-weight: 750; white-space: nowrap; }

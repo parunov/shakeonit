@@ -38,6 +38,12 @@ function money(amount, currency) {
   }).format((amount || 0) / 100);
 }
 
+function balanceStatus(amount) {
+  if (amount > 0) return { icon: "💰", label: "ожидаете возврат" };
+  if (amount < 0) return { icon: "💸", label: "нужно вернуть долг" };
+  return { icon: "🤝", label: "все расчёты закрыты" };
+}
+
 function shortDate(value) {
   if (!value) return "";
   const normalized = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
@@ -168,11 +174,12 @@ async function renderBalance() {
   const totals = new Map();
   const cards = details.map((data) => {
     const mine = data.balances.find((item) => item.user_id === state.bootstrap.user.id)?.amount || 0;
+    const status = balanceStatus(mine);
     totals.set(data.collection.currency, (totals.get(data.collection.currency) || 0) + mine);
     return `
       <button class="card collection-card" type="button" data-action="open-collection" data-id="${data.collection.id}">
-        <span class="collection-icon">⚖️</span>
-        <span><span class="card-title">${e(data.collection.title)}</span><span class="card-subtitle">${mine > 0 ? "вам должны" : mine < 0 ? "вы должны" : "всё закрыто"}</span></span>
+        <span class="collection-icon status-icon" aria-hidden="true">${status.icon}</span>
+        <span><span class="card-title">${e(data.collection.title)}</span><span class="card-subtitle">Статус: ${status.label}</span></span>
         <span class="amount ${mine > 0 ? "positive" : mine < 0 ? "negative" : ""}">${money(Math.abs(mine), data.collection.currency)}</span>
       </button>`;
   });
@@ -392,7 +399,17 @@ function repaySheet() {
 
 function editSheet(transactionId) {
   const item = state.collection.history.find((row) => row.id === Number(transactionId));
-  showSheet(`<h2>Изменить транзакцию</h2><p class="sheet-intro">Распределение участников сохранится, балансы пересчитаются.</p><form id="edit-form" data-id="${item.id}"><label class="field"><span>Сумма · ${e(state.collection.collection.currency)}</span><input name="amount" inputmode="decimal" value="${(item.amount / 100).toFixed(2).replace(".", ",")}" required></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" value="${e(item.comment)}"></label><div class="sheet-actions"><button class="primary-button" type="submit">Сохранить</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+  const selectedIds = new Set(item.shares.map((share) => share.user_id));
+  const candidates = state.collection.participants
+    .filter((member) => member.active !== false)
+    .map((member) => ({ ...member, active: true }));
+  item.shares.forEach((share) => {
+    if (!candidates.some((member) => member.id === share.user_id)) {
+      candidates.push({ id: share.user_id, full_name: share.full_name, active: false });
+    }
+  });
+  const participantEditor = item.kind === "expense" ? `<div class="row-between"><span class="row-title">На кого делим</span><button class="text-button" type="button" data-action="select-all">Выбрать всех</button></div><div class="check-list">${candidates.map((member) => `<label class="check-row"><input type="checkbox" name="participant" value="${member.id}" ${selectedIds.has(member.id) ? "checked" : ""}><span>${e(member.full_name)}${member.id === state.bootstrap.user.id ? " · вы" : ""}${member.active ? "" : " · вышел из сбора"}</span></label>`).join("")}</div>` : "";
+  showSheet(`<h2>Изменить транзакцию</h2><p class="sheet-intro">После сохранения сумма будет поровну распределена между отмеченными людьми, а балансы пересчитаются.</p><form id="edit-form" data-id="${item.id}"><label class="field"><span>Сумма · ${e(state.collection.collection.currency)}</span><input name="amount" inputmode="decimal" value="${(item.amount / 100).toFixed(2).replace(".", ",")}" required></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" value="${e(item.comment)}"></label>${participantEditor}<div class="sheet-actions"><button class="primary-button" type="submit">Сохранить</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
 
 function paymentSheet() {
@@ -620,7 +637,13 @@ sheet.addEventListener("submit", async (event) => {
       closeSheet(); reportToast(result, "Возврат записан"); return await refreshCurrent("overview");
     }
     if (form.id === "edit-form") {
-      result = await api(`/api/transactions/${form.dataset.id}`, { method: "PATCH", body: JSON.stringify({ amount: values.get("amount"), comment: values.get("comment") }) });
+      const payload = { amount: values.get("amount"), comment: values.get("comment") };
+      const participantInputs = [...form.querySelectorAll('input[name="participant"]')];
+      if (participantInputs.length) {
+        payload.participant_ids = participantInputs.filter((input) => input.checked).map((input) => Number(input.value));
+        if (!payload.participant_ids.length) throw new Error("Выберите хотя бы одного участника");
+      }
+      result = await api(`/api/transactions/${form.dataset.id}`, { method: "PATCH", body: JSON.stringify(payload) });
       closeSheet(); reportToast(result, "Транзакция обновлена"); return await refreshCurrent("history");
     }
     if (form.id === "payment-form") {

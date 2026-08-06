@@ -598,13 +598,30 @@ async def edit_transaction(request: web.Request) -> web.Response:
     payload = await _json_body(request)
     amount = parse_amount(str(payload.get("amount", "")))
     comment = str(payload.get("comment", ""))
-    await service.edit_transaction(transaction_id, user["id"], amount, comment)
+    participant_ids = None
+    if "participant_ids" in payload:
+        participants = payload["participant_ids"]
+        if not isinstance(participants, list):
+            raise ApiError("Выберите участников")
+        participant_ids = [int(item) for item in participants]
+    await service.edit_transaction(
+        transaction_id,
+        user["id"],
+        amount,
+        comment,
+        participant_ids=participant_ids,
+    )
+    distribution = (
+        f" · распределено на {len(set(participant_ids))} чел."
+        if transaction["kind"] == "expense" and participant_ids is not None
+        else ""
+    )
     sent, notifications_sent = await _report(
         bot,
         service,
         collection,
         f"✏️ {_name(user)} обновил транзакцию #{transaction_id}: "
-        f"<b>{format_money(amount, collection['currency'])}</b>",
+        f"<b>{format_money(amount, collection['currency'])}</b>{distribution}",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(

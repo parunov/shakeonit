@@ -164,6 +164,43 @@ async def test_edit_expense_resplits_exactly(service):
 
 
 @pytest.mark.asyncio
+async def test_edit_expense_changes_participants_and_resplits_exactly(service):
+    collection_id = await make_collection(service)
+    transaction_id = await service.add_expense(collection_id, 1, 1000, [1, 2, 3], "Еда")
+
+    await service.edit_transaction(
+        transaction_id,
+        1,
+        1001,
+        "Ужин",
+        participant_ids=[2, 3],
+    )
+
+    assert await service.get_balances(collection_id) == {1: 1001, 2: -501, 3: -500}
+    shares = (await service.expense_shares_for_transactions([transaction_id]))[transaction_id]
+    assert [(row["user_id"], row["amount"]) for row in shares] == [(2, 501), (3, 500)]
+
+
+@pytest.mark.asyncio
+async def test_edit_expense_rejects_unknown_participant_without_mutation(service):
+    collection_id = await make_collection(service)
+    transaction_id = await service.add_expense(collection_id, 1, 1000, [1, 2], "Еда")
+
+    with pytest.raises(DomainError):
+        await service.edit_transaction(
+            transaction_id,
+            1,
+            1500,
+            "Ужин",
+            participant_ids=[1, 999],
+        )
+
+    transaction = await service.transaction(transaction_id)
+    assert transaction["amount"] == 1000
+    assert transaction["comment"] == "Еда"
+
+
+@pytest.mark.asyncio
 async def test_cannot_leave_with_balance(service):
     collection_id = await make_collection(service)
     await service.add_expense(collection_id, 1, 1000, [1, 2], "Такси")

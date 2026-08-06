@@ -204,6 +204,50 @@ async def test_collection_api_survives_cancel_after_member_left(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_edit_expense_api_replaces_participants(tmp_path):
+    database = Database(tmp_path / "edit-expense.db")
+    await database.initialize()
+    service = BudgetService(database)
+    await service.upsert_user(1, "owner", "Организатор")
+    await service.upsert_user(2, "anna", "Анна")
+    await service.upsert_user(3, "max", "Максим")
+    collection_id = await service.create_collection(-100500, "Поездка", "EUR", 1)
+    await service.join(collection_id, 2)
+    await service.join(collection_id, 3)
+    transaction_id = await service.add_expense(collection_id, 1, 1000, [1, 2, 3], "Ужин")
+    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    application = web.Application()
+    setup_webapp_routes(application, bot, service, settings)
+    owner_auth = signed_init_data(user={"id": 1, "first_name": "Организатор"})
+
+    async with TestClient(TestServer(application)) as client:
+        response = await client.patch(
+            f"/api/transactions/{transaction_id}",
+            json={
+                "amount": "10,01",
+                "comment": "Поздний ужин",
+                "participant_ids": [2, 3],
+            },
+            headers={"X-Telegram-Init-Data": owner_auth},
+        )
+        response_payload = await response.json()
+        details = await client.get(
+            f"/api/collections/{collection_id}",
+            headers={"X-Telegram-Init-Data": owner_auth},
+        )
+        details_payload = await details.json()
+
+    assert response.status == 200
+    assert response_payload["report_sent"] is True
+    edited = next(row for row in details_payload["history"] if row["id"] == transaction_id)
+    assert [(row["user_id"], row["amount"]) for row in edited["shares"]] == [
+        (2, 501),
+        (3, 500),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_join_can_enable_private_collection_notifications(tmp_path):
     database = Database(tmp_path / "notifications.db")
     await database.initialize()

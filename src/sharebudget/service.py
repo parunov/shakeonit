@@ -649,7 +649,12 @@ class BudgetService:
         return transaction["collection_id"]
 
     async def edit_transaction(
-        self, transaction_id: int, actor_id: int, amount: int, comment: str
+        self,
+        transaction_id: int,
+        actor_id: int,
+        amount: int,
+        comment: str,
+        participant_ids: Iterable[int] | None = None,
     ) -> int:
         transaction = await self.transaction(transaction_id)
         if not transaction or transaction["status"] != "active":
@@ -663,6 +668,13 @@ class BudgetService:
             raise DomainError("Подтверждённый возврат нельзя редактировать")
         if len(comment.strip()) > 200:
             raise DomainError("Комментарий не должен быть длиннее 200 символов")
+        expense_shares = None
+        if transaction["kind"] == "expense" and participant_ids is not None:
+            selected_ids = list(participant_ids)
+            await self._require_registered_members(transaction["collection_id"], selected_ids)
+            expense_shares = split_amount(amount, selected_ids)
+        elif transaction["kind"] == "repayment" and participant_ids is not None:
+            raise DomainError("Участников можно менять только у затрат")
         if transaction["kind"] == "repayment":
             direct_debt = next(
                 (
@@ -699,16 +711,21 @@ class BudgetService:
                 (amount, comment.strip(), transaction_id),
             )
             if transaction["kind"] == "expense":
-                rows = await connection.execute_fetchall(
-                    "SELECT user_id FROM expense_shares WHERE transaction_id=? ORDER BY user_id",
-                    (transaction_id,),
-                )
-                shares = split_amount(amount, [row["user_id"] for row in rows])
+                shares = expense_shares
+                if shares is None:
+                    rows = await connection.execute_fetchall(
+                        "SELECT user_id FROM expense_shares WHERE transaction_id=? ORDER BY user_id",
+                        (transaction_id,),
+                    )
+                    shares = split_amount(amount, [row["user_id"] for row in rows])
                 if sum(shares.values()) != amount:
                     raise RuntimeError("Нарушена целостность распределения затраты")
+                await connection.execute(
+                    "DELETE FROM expense_shares WHERE transaction_id=?", (transaction_id,)
+                )
                 await connection.executemany(
-                    "UPDATE expense_shares SET amount=? WHERE transaction_id=? AND user_id=?",
-                    [(share, transaction_id, user_id) for user_id, share in shares.items()],
+                    "INSERT INTO expense_shares(transaction_id,user_id,amount) VALUES (?,?,?)",
+                    [(transaction_id, user_id, share) for user_id, share in shares.items()],
                 )
             await connection.commit()
         return transaction["collection_id"]
@@ -841,6 +858,18 @@ class BudgetService:
         participants = {row["id"] for row in await self.list_participants(collection_id)}
         if not requested or not requested.issubset(participants):
             raise DomainError("Все выбранные люди должны участвовать в сборе")
+
+    async def _require_registered_members(
+        self, collection_id: int, user_ids: Iterable[int]
+    ) -> None:
+        requested = set(user_ids)
+        async with self.db.connect() as connection:
+            rows = await connection.execute_fetchall(
+                "SELECT user_id FROM participants WHERE collection_id=?", (collection_id,)
+            )
+        registered = {row["user_id"] for row in rows}
+        if not requested or not requested.issubset(registered):
+            raise DomainError("Выберите участников этого сбора")
 
     @staticmethod
     def _require_admin(collection, actor_id: int) -> None:
