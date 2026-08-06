@@ -324,6 +324,11 @@ async def test_global_history_contains_transactions_and_collection_events(servic
 
     assert transactions[0]["collection_title"] == "Берлин"
     assert transactions[0]["amount"] == 1200
+    assert transactions[0]["collection_admin_id"] == 1
+    assert transactions[0]["collection_status"] == "active"
+    assert transactions[0]["is_participant"] == 1
+    assert events[0]["collection_id"] == collection_id
+    assert events[0]["is_participant"] == 1
     assert {row["kind"] for row in events} >= {"created", "joined"}
 
     collection_events = await service.collection_events(collection_id)

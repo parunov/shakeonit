@@ -14,6 +14,7 @@ const launchParams = new URLSearchParams(window.location.search);
 const state = {
   bootstrap: null,
   collection: null,
+  collectionReturn: "collections",
   collectionTab: "overview",
   details: new Map(),
   nav: "collections",
@@ -233,13 +234,19 @@ async function renderHistory() {
     created: "создал сбор", joined: "вступил в сбор", left: "вышел из сбора",
     member_removed: "удалил участника", admin_transferred: "передал роль администратора",
     archived: "завершил сбор", restored: "восстановил сбор",
+    funds_requested: "вежливо запросил завершить расчёт",
   };
   const transactions = data.transactions.map((item) => {
+    const isConfirmedRepayment = item.kind === "repayment" && item.confirmation_status === "confirmed";
+    const canEdit = item.is_participant && item.status === "active" && !isConfirmedRepayment && item.collection_status === "active" && (item.creator_id === state.bootstrap.user.id || item.collection_admin_id === state.bootstrap.user.id);
+    const canCancel = item.is_participant && item.status === "active" && item.collection_status === "active" && (item.collection_admin_id === state.bootstrap.user.id || (item.creator_id === state.bootstrap.user.id && !isConfirmedRepayment));
     const status = item.status === "cancelled" ? '<span class="pill cancelled">отменено</span>' : item.kind === "repayment" && item.confirmation_status === "pending" ? '<span class="pill pending">ожидает</span>' : item.kind === "repayment" ? '<span class="pill">подтверждено</span>' : "";
     const shares = item.kind === "expense" && item.shares.length ? `<div class="share-breakdown">${item.shares.map((share) => `<div class="row-note">${e(share.full_name)} — ${money(share.amount, item.currency)}</div>`).join("")}</div>` : "";
-    return `<article class="history-row"><div class="row-between"><div><div class="row-title">${item.kind === "expense" ? "💸" : "🤝"} ${e(item.collection_title)}</div><div class="row-note">${e(item.creator_name)} · ${shortDate(item.created_at)}</div></div><div class="amount">${money(item.amount, item.currency)}</div></div><div class="row-note">${e(item.comment || (item.kind === "expense" ? "Затрата" : `Возврат → ${item.counterparty_name}`))} ${status}</div>${shares}</article>`;
+    const collectionTitle = item.is_participant ? `<button class="collection-link" type="button" data-action="open-collection" data-id="${item.collection_id}">${e(item.collection_title)}</button>` : `<span>${e(item.collection_title)}</span>`;
+    const actions = canEdit || canCancel ? `<div class="transaction-actions">${canEdit ? `<button class="mini-button" type="button" data-action="edit-history-transaction" data-id="${item.id}" data-collection-id="${item.collection_id}">Изменить</button>` : ""}${canCancel ? `<button class="mini-button danger" type="button" data-action="cancel-transaction" data-id="${item.id}" data-return="global">Удалить</button>` : ""}</div>` : "";
+    return `<article class="history-row"><div class="row-between"><div><div class="row-title history-collection-title"><span>${item.kind === "expense" ? "💸" : "🤝"}</span>${collectionTitle}</div><div class="row-note">${e(item.creator_name)} · ${shortDate(item.created_at)}</div></div><div class="amount">${money(item.amount, item.currency)}</div></div><div class="row-note">${e(item.comment || (item.kind === "expense" ? "Затрата" : `Возврат → ${item.counterparty_name}`))} ${status}</div>${shares}${actions}</article>`;
   }).join("");
-  const events = data.events.map((item) => `<article class="history-row"><div class="row-title">${e(item.collection_title)}</div><div class="row-note">${shortDate(item.created_at)} · ${e(item.actor_name)} ${e(eventLabels[item.kind] || item.kind)}${item.target_name && item.target_name !== item.actor_name ? ` · ${e(item.target_name)}` : ""}</div></article>`).join("");
+  const events = data.events.map((item) => `<article class="history-row"><div class="row-title">${item.is_participant ? `<button class="collection-link" type="button" data-action="open-collection" data-id="${item.collection_id}">${e(item.collection_title)}</button>` : e(item.collection_title)}</div><div class="row-note">${shortDate(item.created_at)} · ${e(item.actor_name)} ${e(eventLabels[item.kind] || item.kind)}${item.target_name && item.target_name !== item.actor_name ? ` · ${e(item.target_name)}` : ""}</div></article>`).join("");
   app.innerHTML = `<section class="hero"><div class="hero-label">ЛЕНТА ДЕЙСТВИЙ</div><div class="hero-value">${data.transactions.length}</div><div class="hero-meta">операций во всех ваших сборах</div></section><div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}<div class="section-head"><h2>История сборов</h2></div>${events ? `<div class="card">${events}</div>` : empty("🧾", "Событий пока нет")}`;
 }
 
@@ -296,6 +303,7 @@ async function loadDetails(id, force = false) {
 }
 
 async function openCollection(id, tab = "overview", force = false) {
+  if (!state.collection) state.collectionReturn = state.nav;
   state.collectionTab = tab;
   app.innerHTML = `<section class="loading-card"><div class="spinner"></div><p>Обновляем сбор…</p></section>`;
   const data = await loadDetails(id, force);
@@ -404,10 +412,10 @@ function repaySheet() {
   showSheet(`<h2>Вернуть долг</h2><p class="sheet-intro">После записи получатель должен подтвердить деньги. До этого баланс не изменится.</p><form id="repay-form"><label class="field"><span>Получатель</span><select name="creditor_id" data-action="repay-creditor">${debts.map((debt) => `<option value="${debt.creditor_id}">${e(debt.creditor_name)} · до ${money(debt.amount, data.collection.currency)}</option>`).join("")}</select></label>${cards}<label class="field"><span>Переведено · ${e(data.collection.currency)}</span><input name="amount" inputmode="decimal" placeholder="0,00" required></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" placeholder="Необязательно"></label><div class="sheet-actions"><button class="primary-button" type="submit">Отправить на подтверждение</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
 
-function editSheet(transactionId) {
-  const item = state.collection.history.find((row) => row.id === Number(transactionId));
+function editSheet(transactionId, collectionData = state.collection, returnTo = "collection") {
+  const item = collectionData.history.find((row) => row.id === Number(transactionId));
   const selectedIds = new Set(item.shares.map((share) => share.user_id));
-  const candidates = state.collection.participants
+  const candidates = collectionData.participants
     .filter((member) => member.active !== false)
     .map((member) => ({ ...member, active: true }));
   item.shares.forEach((share) => {
@@ -416,7 +424,10 @@ function editSheet(transactionId) {
     }
   });
   const participantEditor = item.kind === "expense" ? `<div class="row-between"><span class="row-title">На кого делим</span><button class="text-button" type="button" data-action="select-all">Выбрать всех</button></div><div class="check-list">${candidates.map((member) => `<label class="check-row"><input type="checkbox" name="participant" value="${member.id}" ${selectedIds.has(member.id) ? "checked" : ""}><span>${e(member.full_name)}${member.id === state.bootstrap.user.id ? " · вы" : ""}${member.active ? "" : " · вышел из сбора"}</span></label>`).join("")}</div>` : "";
-  showSheet(`<h2>Изменить транзакцию</h2><p class="sheet-intro">После сохранения сумма будет поровну распределена между отмеченными людьми, а балансы пересчитаются.</p><form id="edit-form" data-id="${item.id}"><label class="field"><span>Сумма · ${e(state.collection.collection.currency)}</span><input name="amount" inputmode="decimal" value="${(item.amount / 100).toFixed(2).replace(".", ",")}" required></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" value="${e(item.comment)}"></label>${participantEditor}<div class="sheet-actions"><button class="primary-button" type="submit">Сохранить</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+  const intro = item.kind === "expense"
+    ? "После сохранения сумма будет поровну распределена между отмеченными людьми, а балансы пересчитаются."
+    : "Изменённый возврат останется на подтверждении у получателя.";
+  showSheet(`<h2>Изменить транзакцию</h2><p class="sheet-intro">${intro}</p><form id="edit-form" data-id="${item.id}" data-return="${returnTo}"><label class="field"><span>Сумма · ${e(collectionData.collection.currency)}</span><input name="amount" inputmode="decimal" value="${(item.amount / 100).toFixed(2).replace(".", ",")}" required></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" value="${e(item.comment)}"></label>${participantEditor}<div class="sheet-actions"><button class="primary-button" type="submit">Сохранить</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
 
 function paymentSheet() {
@@ -474,6 +485,10 @@ app.addEventListener("click", async (event) => {
     if (action === "repay") return repaySheet();
     if (action === "tab") { state.collectionTab = target.dataset.tab; renderCollection(); return; }
     if (action === "edit-transaction") return editSheet(target.dataset.id);
+    if (action === "edit-history-transaction") {
+      const details = await loadDetails(target.dataset.collectionId, true);
+      return editSheet(target.dataset.id, details, "global");
+    }
     if (action === "request-funds") {
       if (!await confirmAction("Отправить всем вашим должникам вежливое напоминание о расчёте?")) return;
       setBusy(target, true);
@@ -514,11 +529,19 @@ app.addEventListener("click", async (event) => {
     }
     if (action === "transfer" || action === "remove-member") return memberActionSheet(action === "transfer" ? "transfer" : "remove");
     if (action === "cancel-transaction") {
-      if (!await confirmAction("Отменить транзакцию? Она останется в истории.")) return;
+      const fromGlobalHistory = target.dataset.return === "global";
+      const question = fromGlobalHistory
+        ? "Удалить транзакцию? Она останется в истории с отметкой об отмене."
+        : "Отменить транзакцию? Она останется в истории.";
+      if (!await confirmAction(question)) return;
       setBusy(target, true);
       const result = await api(`/api/transactions/${target.dataset.id}/cancel`, { method: "POST", body: "{}" });
-      reportToast(result, "Транзакция отменена");
-      await refreshCurrent("history");
+      reportToast(result, fromGlobalHistory ? "Транзакция удалена" : "Транзакция отменена");
+      if (fromGlobalHistory) {
+        await reloadBootstrap();
+        return await renderHistory();
+      }
+      return await refreshCurrent("history");
     }
     if (action === "confirm-repayment") {
       if (!await confirmAction("Подтвердить, что деньги получены?")) return;
@@ -640,7 +663,10 @@ sheet.addEventListener("submit", async (event) => {
         if (!payload.participant_ids.length) throw new Error("Выберите хотя бы одного участника");
       }
       result = await api(`/api/transactions/${form.dataset.id}`, { method: "PATCH", body: JSON.stringify(payload) });
-      closeSheet(); reportToast(result, "Транзакция обновлена"); return await refreshCurrent("history");
+      closeSheet();
+      reportToast(result, "Транзакция обновлена");
+      if (form.dataset.return === "global") return await renderHistory();
+      return await refreshCurrent("history");
     }
     if (form.id === "payment-form") {
       await api("/api/me/payment", { method: "PATCH", body: JSON.stringify({ payment_details: values.get("payment_details") }) });
@@ -673,7 +699,14 @@ nav.addEventListener("click", async (event) => {
 
 avatar.addEventListener("click", renderProfile);
 document.getElementById("sheet-backdrop").addEventListener("click", closeSheet);
-tg?.BackButton?.onClick(() => state.collection ? renderCollections() : tg.close());
+tg?.BackButton?.onClick(async () => {
+  if (!state.collection) return tg.close();
+  const returnTo = state.collectionReturn;
+  state.collection = null;
+  if (returnTo === "history") return await renderHistory();
+  if (returnTo === "balance") return await renderBalance();
+  return renderCollections();
+});
 
 async function init() {
   tg?.ready();

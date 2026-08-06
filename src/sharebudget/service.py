@@ -614,6 +614,8 @@ class BudgetService:
             transactions = await connection.execute_fetchall(
                 """
                 SELECT t.*,c.title collection_title,c.currency,
+                       c.admin_id collection_admin_id,c.status collection_status,
+                       p.active is_participant,
                        creator.full_name creator_name,
                        counterparty.full_name counterparty_name
                 FROM transactions t
@@ -628,6 +630,7 @@ class BudgetService:
             events = await connection.execute_fetchall(
                 """
                 SELECT e.*,c.title collection_title,c.currency,
+                       p.active is_participant,
                        actor.full_name actor_name,target.full_name target_name
                 FROM collection_events e
                 JOIN collections c ON c.id=e.collection_id
