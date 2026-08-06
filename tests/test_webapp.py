@@ -257,7 +257,7 @@ async def test_repayment_can_be_confirmed_from_global_history(tmp_path):
     collection_id = await service.create_collection(-100500, "Поездка", "EUR", 1)
     await service.join(collection_id, 2)
     await service.add_expense(collection_id, 1, 1000, [1, 2], "Билеты")
-    repayment_id = await service.add_repayment(collection_id, 2, 1, 500)
+    repayment_id = await service.add_repayment(collection_id, 2, 1, 500, "За билеты")
     settings = Settings(bot_token=TOKEN, database_path=database.path)
     bot = SimpleNamespace(send_message=AsyncMock())
     application = web.Application()
@@ -293,6 +293,68 @@ async def test_repayment_can_be_confirmed_from_global_history(tmp_path):
     assert response.status == 200
     assert response_payload["report_sent"] is True
     assert confirmed["confirmation_status"] == "confirmed"
+    confirmation_message = bot.send_message.await_args_list[0].args[1]
+    assert "Отправитель" in confirmation_message
+    assert "За билеты" in confirmation_message
+    assert f"#{repayment_id}" not in confirmation_message
+
+
+@pytest.mark.asyncio
+async def test_repayment_notification_can_be_rejected_by_recipient(tmp_path):
+    database = Database(tmp_path / "reject-repayment.db")
+    await database.initialize()
+    service = BudgetService(database)
+    await service.upsert_user(1, "recipient", "Получатель")
+    await service.upsert_user(2, "sender", "Отправитель")
+    collection_id = await service.create_collection(-100500, "Поездка", "EUR", 1)
+    await service.join(collection_id, 2)
+    await service.add_expense(collection_id, 1, 1000, [1, 2], "Билеты")
+    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    application = web.Application()
+    setup_webapp_routes(application, bot, service, settings)
+    sender_auth = signed_init_data(user={"id": 2, "first_name": "Отправитель"})
+    recipient_auth = signed_init_data(user={"id": 1, "first_name": "Получатель"})
+
+    async with TestClient(TestServer(application)) as client:
+        created = await client.post(
+            f"/api/collections/{collection_id}/repayments",
+            json={"creditor_id": 1, "amount": "5", "comment": "Перевод на карту"},
+            headers={"X-Telegram-Init-Data": sender_auth},
+        )
+        created_payload = await created.json()
+        repayment_id = created_payload["transaction_id"]
+        private_call = next(call for call in bot.send_message.await_args_list if call.args[0] == 1)
+        private_message = private_call.args[1]
+        callbacks = {
+            button.callback_data
+            for row in private_call.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        }
+
+        rejected = await client.post(
+            f"/api/transactions/{repayment_id}/reject",
+            json={},
+            headers={"X-Telegram-Init-Data": recipient_auth},
+        )
+        rejected_payload = await rejected.json()
+        history = await client.get(
+            "/api/history",
+            headers={"X-Telegram-Init-Data": recipient_auth},
+        )
+        history_payload = await history.json()
+        transaction = next(
+            row for row in history_payload["transactions"] if row["id"] == repayment_id
+        )
+
+    assert created.status == 200
+    assert "От: Отправитель" in private_message
+    assert "Комментарий: Перевод на карту" in private_message
+    assert f"#{repayment_id}" not in private_message
+    assert callbacks == {f"repayconfirm:{repayment_id}", f"repayreject:{repayment_id}"}
+    assert rejected.status == 200
+    assert rejected_payload["report_sent"] is True
+    assert transaction["status"] == "cancelled"
 
 
 @pytest.mark.asyncio

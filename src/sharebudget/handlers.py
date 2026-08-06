@@ -669,7 +669,7 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
     collection = await service.get_collection(data["collection_id"])
     await state.clear()
     await message.answer(
-        f"⏳ Возврат #{transaction_id} на сумму "
+        "⏳ Возврат на сумму "
         f"<b>{format_money(amount, collection['currency'])}</b> отправлен получателю на "
         "подтверждение. До подтверждения баланс не изменится.",
         parse_mode="HTML",
@@ -681,7 +681,11 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
                 InlineKeyboardButton(
                     text="✅ Подтвердить получение",
                     callback_data=f"repayconfirm:{transaction_id}",
-                )
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отклонить",
+                    callback_data=f"repayreject:{transaction_id}",
+                ),
             ]
         ]
     )
@@ -697,8 +701,9 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
     try:
         await message.bot.send_message(
             data["creditor_id"],
-            f"🤝 <b>Подтвердите получение</b>\n\nВозврат #{transaction_id}: "
-            f"<b>{format_money(amount, collection['currency'])}</b>\n"
+            "🤝 <b>Подтвердите получение</b>\n\n"
+            f"От: {escape(message.from_user.full_name)}\n"
+            f"Сумма: <b>{format_money(amount, collection['currency'])}</b>\n"
             f"Сбор: {escape(collection['title'])}",
             parse_mode=ParseMode.HTML,
             reply_markup=confirm_markup,
@@ -724,17 +729,28 @@ async def repayment_confirm(callback: CallbackQuery, service: BudgetService) -> 
     await callback.answer("Получение подтверждено. Балансы пересчитаны.", show_alert=True)
     collection = await service.get_collection(collection_id)
     transaction = await service.transaction(transaction_id)
+    sender = await service.get_user(transaction["creator_id"])
+    comment_line = (
+        f" Комментарий: {escape(transaction['comment'])}." if transaction["comment"] else ""
+    )
+    comment_detail = (
+        f"\nКомментарий: {escape(transaction['comment'])}" if transaction["comment"] else ""
+    )
     await notify_subscribers(
         callback.bot,
         service,
         collection,
-        f"✅ {escape(callback.from_user.full_name)} подтвердил получение возврата "
-        f"#{transaction_id}: <b>{format_money(transaction['amount'], collection['currency'])}</b>.",
+        f"✅ {escape(callback.from_user.full_name)} подтвердил получение возврата от "
+        f"{escape(sender['full_name'])}: "
+        f"<b>{format_money(transaction['amount'], collection['currency'])}</b>.{comment_line}",
         exclude_user_ids={callback.from_user.id},
     )
     await safe_edit(
         callback.message,
-        f"✅ <b>Получение подтверждено</b>\n\nВозврат #{transaction_id} учтён в балансах.",
+        "✅ <b>Получение подтверждено</b>\n\n"
+        f"От: {escape(sender['full_name'])}\n"
+        f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>"
+        f"{comment_detail}",
     )
     await callback.message.answer(
         await collection_text(service, collection),
@@ -899,6 +915,48 @@ async def transaction_edit_comment(
             message, collection, True, collection["admin_id"] == message.from_user.id
         ),
         parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("repayreject:"))
+async def repayment_reject(callback: CallbackQuery, service: BudgetService) -> None:
+    transaction_id = int(callback.data.split(":")[1])
+    collection_id = await service.reject_repayment(transaction_id, callback.from_user.id)
+    await callback.answer("Получение отклонено. Баланс не изменился.", show_alert=True)
+    collection = await service.get_collection(collection_id)
+    transaction = await service.transaction(transaction_id)
+    sender = await service.get_user(transaction["creator_id"])
+    comment_line = (
+        f" Комментарий: {escape(transaction['comment'])}." if transaction["comment"] else ""
+    )
+    comment_detail = (
+        f"\nКомментарий: {escape(transaction['comment'])}" if transaction["comment"] else ""
+    )
+    await notify_subscribers(
+        callback.bot,
+        service,
+        collection,
+        f"❌ {escape(callback.from_user.full_name)} отклонил получение возврата от "
+        f"{escape(sender['full_name'])}: "
+        f"<b>{format_money(transaction['amount'], collection['currency'])}</b>.{comment_line}",
+        exclude_user_ids={callback.from_user.id},
+    )
+    await safe_edit(
+        callback.message,
+        "❌ <b>Получение отклонено</b>\n\n"
+        f"От: {escape(sender['full_name'])}\n"
+        f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>"
+        f"{comment_detail}",
+    )
+    await callback.message.answer(
+        await collection_text(service, collection),
+        reply_markup=await collection_markup(
+            callback.message,
+            collection,
+            True,
+            collection["admin_id"] == callback.from_user.id,
+        ),
+        parse_mode=ParseMode.HTML,
     )
 
 

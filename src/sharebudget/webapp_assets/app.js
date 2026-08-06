@@ -238,13 +238,14 @@ async function renderHistory() {
   };
   const transactions = data.transactions.map((item) => {
     const isConfirmedRepayment = item.kind === "repayment" && item.confirmation_status === "confirmed";
+    const isRejectedRepayment = item.kind === "repayment" && item.status === "cancelled" && item.cancelled_by === item.counterparty_id;
     const canConfirm = item.is_participant && item.collection_status === "active" && item.kind === "repayment" && item.status === "active" && item.confirmation_status === "pending" && item.counterparty_id === state.bootstrap.user.id;
     const canEdit = item.is_participant && item.status === "active" && !isConfirmedRepayment && item.collection_status === "active" && (item.creator_id === state.bootstrap.user.id || item.collection_admin_id === state.bootstrap.user.id);
     const canCancel = item.is_participant && item.status === "active" && item.collection_status === "active" && (item.collection_admin_id === state.bootstrap.user.id || (item.creator_id === state.bootstrap.user.id && !isConfirmedRepayment));
-    const status = item.status === "cancelled" ? '<span class="pill cancelled">отменено</span>' : item.kind === "repayment" && item.confirmation_status === "pending" ? '<span class="pill pending">ожидает</span>' : item.kind === "repayment" ? '<span class="pill">подтверждено</span>' : "";
+    const status = item.status === "cancelled" ? `<span class="pill cancelled">${isRejectedRepayment ? "отклонено" : "отменено"}</span>` : item.kind === "repayment" && item.confirmation_status === "pending" ? '<span class="pill pending">ожидает</span>' : item.kind === "repayment" ? '<span class="pill">подтверждено</span>' : "";
     const shares = item.kind === "expense" && item.shares.length ? `<div class="share-breakdown">${item.shares.map((share) => `<div class="row-note">${e(share.full_name)} — ${money(share.amount, item.currency)}</div>`).join("")}</div>` : "";
     const collectionTitle = item.is_participant ? `<button class="collection-link" type="button" data-action="open-collection" data-id="${item.collection_id}">${e(item.collection_title)}</button>` : `<span>${e(item.collection_title)}</span>`;
-    const actions = canConfirm || canEdit || canCancel ? `<div class="transaction-actions">${canConfirm ? `<button class="mini-button confirm" type="button" data-action="confirm-repayment" data-id="${item.id}" data-return="global">✅ Подтвердить получение</button>` : ""}${canEdit ? `<button class="mini-button" type="button" data-action="edit-history-transaction" data-id="${item.id}" data-collection-id="${item.collection_id}">Изменить</button>` : ""}${canCancel ? `<button class="mini-button danger" type="button" data-action="cancel-transaction" data-id="${item.id}" data-return="global">Удалить</button>` : ""}</div>` : "";
+    const actions = canConfirm || canEdit || canCancel ? `<div class="transaction-actions">${canConfirm ? `<button class="mini-button confirm" type="button" data-action="confirm-repayment" data-id="${item.id}" data-return="global">✅ Подтвердить получение</button><button class="mini-button danger" type="button" data-action="reject-repayment" data-id="${item.id}" data-return="global">❌ Отклонить</button>` : ""}${canEdit ? `<button class="mini-button" type="button" data-action="edit-history-transaction" data-id="${item.id}" data-collection-id="${item.collection_id}">Изменить</button>` : ""}${canCancel ? `<button class="mini-button danger" type="button" data-action="cancel-transaction" data-id="${item.id}" data-return="global">Удалить</button>` : ""}</div>` : "";
     return `<article class="history-row"><div class="row-between"><div><div class="row-title history-collection-title"><span>${item.kind === "expense" ? "💸" : "🤝"}</span>${collectionTitle}</div><div class="row-note">${e(item.creator_name)} · ${shortDate(item.created_at)}</div></div><div class="amount">${money(item.amount, item.currency)}</div></div><div class="row-note">${e(item.comment || (item.kind === "expense" ? "Затрата" : `Возврат → ${item.counterparty_name}`))} ${status}</div>${shares}${actions}</article>`;
   }).join("");
   const events = data.events.map((item) => `<article class="history-row"><div class="row-title">${item.is_participant ? `<button class="collection-link" type="button" data-action="open-collection" data-id="${item.collection_id}">${e(item.collection_title)}</button>` : e(item.collection_title)}</div><div class="row-note">${shortDate(item.created_at)} · ${e(item.actor_name)} ${e(eventLabels[item.kind] || item.kind)}${item.target_name && item.target_name !== item.actor_name ? ` · ${e(item.target_name)}` : ""}</div></article>`).join("");
@@ -357,13 +358,14 @@ function renderCollectionPanel(data, isAdmin) {
   if (state.collectionTab === "history") {
     const transactions = data.history.map((item) => {
       const isConfirmedRepayment = item.kind === "repayment" && item.confirmation_status === "confirmed";
+      const isRejectedRepayment = item.kind === "repayment" && item.status === "cancelled" && item.cancelled_by === item.counterparty_id;
       const canEdit = item.status === "active" && !isConfirmedRepayment && collection.status === "active" && (isAdmin || item.creator_id === state.bootstrap.user.id);
       const canCancel = item.status === "active" && collection.status === "active" && (isAdmin || (item.creator_id === state.bootstrap.user.id && !isConfirmedRepayment));
       const canConfirm = item.kind === "repayment" && item.status === "active" && item.confirmation_status === "pending" && item.counterparty_id === state.bootstrap.user.id;
       const subject = item.kind === "expense" ? (item.comment || "Затрата") : `Возврат → ${item.counterparty_name}`;
-      const status = item.status === "cancelled" ? '<span class="pill cancelled">отменено</span>' : item.kind === "repayment" && item.confirmation_status === "pending" ? '<span class="pill pending">ожидает подтверждения</span>' : item.kind === "repayment" ? '<span class="pill">подтверждено</span>' : "";
+      const status = item.status === "cancelled" ? `<span class="pill cancelled">${isRejectedRepayment ? "отклонено" : "отменено"}</span>` : item.kind === "repayment" && item.confirmation_status === "pending" ? '<span class="pill pending">ожидает подтверждения</span>' : item.kind === "repayment" ? '<span class="pill">подтверждено</span>' : "";
       const shares = item.kind === "expense" ? `<div class="share-breakdown">${item.shares.map((share) => `<div class="row-note">${e(share.full_name)} — ${money(share.amount, collection.currency)}</div>`).join("")}</div>` : "";
-      return `<article class="history-row"><div class="row-between"><div><div class="row-title">${item.kind === "expense" ? "💸" : "🤝"} ${e(subject)}</div><div class="row-note">${e(item.creator_name)} · ${shortDate(item.created_at)}</div></div><div class="amount">${money(item.amount, collection.currency)}</div></div><div class="row-note">${item.kind === "expense" ? "Распределение по людям" : "Фактический перевод"} ${status}</div>${shares}${canConfirm ? `<div class="transaction-actions"><button class="mini-button" type="button" data-action="confirm-repayment" data-id="${item.id}">✅ Подтвердить получение</button></div>` : ""}${canEdit || canCancel ? `<div class="transaction-actions">${canEdit ? `<button class="mini-button" type="button" data-action="edit-transaction" data-id="${item.id}">Изменить</button>` : ""}${canCancel ? `<button class="mini-button danger" type="button" data-action="cancel-transaction" data-id="${item.id}">Отменить</button>` : ""}</div>` : ""}</article>`;
+      return `<article class="history-row"><div class="row-between"><div><div class="row-title">${item.kind === "expense" ? "💸" : "🤝"} ${e(subject)}</div><div class="row-note">${e(item.creator_name)} · ${shortDate(item.created_at)}</div></div><div class="amount">${money(item.amount, collection.currency)}</div></div><div class="row-note">${item.kind === "expense" ? "Распределение по людям" : "Фактический перевод"} ${status}</div>${shares}${canConfirm ? `<div class="transaction-actions"><button class="mini-button confirm" type="button" data-action="confirm-repayment" data-id="${item.id}">✅ Подтвердить получение</button><button class="mini-button danger" type="button" data-action="reject-repayment" data-id="${item.id}">❌ Отклонить</button></div>` : ""}${canEdit || canCancel ? `<div class="transaction-actions">${canEdit ? `<button class="mini-button" type="button" data-action="edit-transaction" data-id="${item.id}">Изменить</button>` : ""}${canCancel ? `<button class="mini-button danger" type="button" data-action="cancel-transaction" data-id="${item.id}">Отменить</button>` : ""}</div>` : ""}</article>`;
     }).join("");
     const eventLabels = {
       created: "создал сбор", joined: "вступил в сбор", left: "вышел из сбора",
@@ -549,6 +551,17 @@ app.addEventListener("click", async (event) => {
       setBusy(target, true);
       const result = await api(`/api/transactions/${target.dataset.id}/confirm`, { method: "POST", body: "{}" });
       reportToast(result, "Получение подтверждено");
+      if (target.dataset.return === "global") {
+        await reloadBootstrap();
+        return await renderHistory();
+      }
+      return await refreshCurrent("history");
+    }
+    if (action === "reject-repayment") {
+      if (!await confirmAction("Отклонить получение? Возврат не будет учтён в балансах.")) return;
+      setBusy(target, true);
+      const result = await api(`/api/transactions/${target.dataset.id}/reject`, { method: "POST", body: "{}" });
+      reportToast(result, "Получение отклонено");
       if (target.dataset.return === "global") {
         await reloadBootstrap();
         return await renderHistory();

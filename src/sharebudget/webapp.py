@@ -476,13 +476,18 @@ async def add_repayment(request: web.Request) -> web.Response:
         collection_id, user["id"], creditor_id, amount, comment
     )
     creditor = await _member(service, collection_id, creditor_id)
+    comment_line = f"\nКомментарий: {escape(comment.strip())}" if comment.strip() else ""
     confirm_markup = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="✅ Подтвердить получение",
                     callback_data=f"repayconfirm:{transaction_id}",
-                )
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отклонить",
+                    callback_data=f"repayreject:{transaction_id}",
+                ),
             ]
         ]
     )
@@ -492,16 +497,17 @@ async def add_repayment(request: web.Request) -> web.Response:
         collection,
         f"⏳ {_name(user)} сообщил о возврате долга {escape(creditor['full_name'])}: "
         f"<b>{format_money(amount, collection['currency'])}</b>. Баланс изменится после "
-        "подтверждения получателем.",
+        f"подтверждения получателем.{comment_line}",
         confirm_markup,
         exclude_user_ids={user["id"], creditor_id},
     )
     try:
         await bot.send_message(
             creditor_id,
-            f"🤝 <b>Подтвердите получение</b>\n\nВозврат #{transaction_id}: "
-            f"<b>{format_money(amount, collection['currency'])}</b>\n"
-            f"Сбор: {escape(collection['title'])}",
+            "🤝 <b>Подтвердите получение</b>\n\n"
+            f"От: {_name(user)}\n"
+            f"Сумма: <b>{format_money(amount, collection['currency'])}</b>\n"
+            f"Сбор: {escape(collection['title'])}{comment_line}",
             parse_mode="HTML",
             reply_markup=confirm_markup,
         )
@@ -602,13 +608,43 @@ async def confirm_repayment(request: web.Request) -> web.Response:
         raise ApiError("Возврат долга не найден", 404)
     collection = await _require_member(service, transaction["collection_id"], user["id"])
     await service.confirm_repayment(transaction_id, user["id"])
+    sender = await service.get_user(transaction["creator_id"])
+    comment_line = (
+        f" Комментарий: {escape(transaction['comment'])}." if transaction["comment"] else ""
+    )
     sent, notifications_sent = await _report(
         bot,
         service,
         collection,
-        f"✅ {_name(user)} подтвердил получение возврата #{transaction_id}: "
+        f"✅ {_name(user)} подтвердил получение возврата от {escape(sender['full_name'])}: "
         f"<b>{format_money(transaction['amount'], collection['currency'])}</b>. "
-        "Балансы пересчитаны.",
+        f"Балансы пересчитаны.{comment_line}",
+        exclude_user_ids={user["id"]},
+    )
+    return web.json_response(
+        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+    )
+
+
+async def reject_repayment(request: web.Request) -> web.Response:
+    service, bot, user = _context(request)
+    transaction_id = int(request.match_info["transaction_id"])
+    transaction = await service.transaction(transaction_id)
+    if not transaction:
+        raise ApiError("Возврат долга не найден", 404)
+    collection = await _require_member(service, transaction["collection_id"], user["id"])
+    await service.reject_repayment(transaction_id, user["id"])
+    sender = await service.get_user(transaction["creator_id"])
+    comment_line = (
+        f" Комментарий: {escape(transaction['comment'])}." if transaction["comment"] else ""
+    )
+    sent, notifications_sent = await _report(
+        bot,
+        service,
+        collection,
+        f"❌ {_name(user)} отклонил получение возврата от {escape(sender['full_name'])}: "
+        f"<b>{format_money(transaction['amount'], collection['currency'])}</b>. "
+        f"Баланс не изменился.{comment_line}",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
@@ -943,5 +979,6 @@ def setup_webapp_routes(
     application.router.add_patch("/api/transactions/{transaction_id}", edit_transaction)
     application.router.add_post("/api/transactions/{transaction_id}/cancel", cancel_transaction)
     application.router.add_post("/api/transactions/{transaction_id}/confirm", confirm_repayment)
+    application.router.add_post("/api/transactions/{transaction_id}/reject", reject_repayment)
     application.router.add_patch("/api/me/payment", save_payment)
     application.router.add_patch("/api/me/currency", save_preferred_currency)

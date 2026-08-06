@@ -524,6 +524,31 @@ class BudgetService:
             await connection.commit()
         return transaction["collection_id"]
 
+    async def reject_repayment(self, transaction_id: int, actor_id: int) -> int:
+        transaction = await self.transaction(transaction_id)
+        if not transaction or transaction["kind"] != "repayment":
+            raise DomainError("Возврат долга не найден")
+        if transaction["status"] != "active":
+            raise DomainError("Возврат долга уже отклонён или отменён")
+        if transaction["confirmation_status"] != "pending":
+            raise DomainError("Подтверждённый возврат нельзя отклонить")
+        if transaction["counterparty_id"] != actor_id:
+            raise DomainError("Отклонить получение может только получатель")
+        await self._require_member_active(transaction["collection_id"], actor_id)
+        async with self.db.connect() as connection:
+            cursor = await connection.execute(
+                """
+                UPDATE transactions SET status='cancelled',cancelled_by=?,
+                    cancelled_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND status='active' AND confirmation_status='pending'
+                """,
+                (actor_id, transaction_id),
+            )
+            if cursor.rowcount != 1:
+                raise DomainError("Возврат долга уже подтверждён, отклонён или отменён")
+            await connection.commit()
+        return transaction["collection_id"]
+
     async def get_balances(self, collection_id: int) -> dict[int, int]:
         return (await self.collection_snapshot(collection_id)).balances
 

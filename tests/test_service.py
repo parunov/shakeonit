@@ -280,6 +280,25 @@ async def test_only_receiver_can_confirm_and_pending_does_not_change_balance(ser
 
 
 @pytest.mark.asyncio
+async def test_only_receiver_can_reject_pending_repayment(service):
+    collection_id = await make_collection(service)
+    await service.add_expense(collection_id, 1, 1000, [1, 2], "Такси")
+    repayment_id = await service.add_repayment(collection_id, 2, 1, 500, "Перевод на карту")
+
+    with pytest.raises(DomainError, match="только получатель"):
+        await service.reject_repayment(repayment_id, 2)
+
+    await service.reject_repayment(repayment_id, 1)
+    transaction = await service.transaction(repayment_id)
+    assert transaction["status"] == "cancelled"
+    assert transaction["cancelled_by"] == 1
+    assert await service.get_balances(collection_id) == {1: 500, 2: -500, 3: 0}
+
+    with pytest.raises(DomainError, match="отклонён или отменён"):
+        await service.reject_repayment(repayment_id, 1)
+
+
+@pytest.mark.asyncio
 async def test_pending_repayments_cannot_overbook_debt(service):
     collection_id = await make_collection(service)
     await service.add_expense(collection_id, 1, 1000, [1, 2], "Такси")

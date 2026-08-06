@@ -140,18 +140,24 @@ def history_keyboard(collection_id: int, rows, offset: int, can_next: bool):
 
 def transaction_actions(transaction, collection, actor_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    if (
+    can_respond = (
         transaction["kind"] == "repayment"
         and transaction["status"] == "active"
         and transaction["confirmation_status"] == "pending"
         and actor_id == transaction["counterparty_id"]
-    ):
+    )
+    if can_respond:
         builder.button(
             text="✅ Подтвердить получение",
             callback_data=f"repayconfirm:{transaction['id']}",
         )
+        builder.button(
+            text="❌ Отклонить",
+            callback_data=f"repayreject:{transaction['id']}",
+        )
     if (
-        transaction["status"] == "active"
+        not can_respond
+        and transaction["status"] == "active"
         and collection["status"] == "active"
         and actor_id in (transaction["creator_id"], collection["admin_id"])
         and not (

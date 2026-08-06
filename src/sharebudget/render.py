@@ -115,5 +115,8 @@ async def transaction_text(service, transaction) -> str:
     if row["comment"]:
         lines.append(f"Комментарий: {escape(row['comment'])}")
     if row["status"] == "cancelled":
-        lines.append("\n❌ Транзакция отменена и не влияет на баланс.")
+        if row["kind"] == "repayment" and row["cancelled_by"] == row["counterparty_id"]:
+            lines.append("\n❌ Получение отклонено. Возврат не влияет на баланс.")
+        else:
+            lines.append("\n❌ Транзакция отменена и не влияет на баланс.")
     return "\n".join(lines)
