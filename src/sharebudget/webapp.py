@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 import secrets
+import socket
 import time
 from html import escape
 from pathlib import Path
@@ -21,7 +22,7 @@ from aiogram.types import (
     KeyboardButton,
     KeyboardButtonRequestChat,
 )
-from aiohttp import ClientError, ClientSession, ClientTimeout, web
+from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector, web
 
 from .config import Settings
 from .links import collection_app_url, collection_html_link, parse_group_start_param
@@ -45,6 +46,7 @@ USER_SYNC_CACHE_KEY = web.AppKey("user_sync_cache", dict)
 AUTH_CACHE_KEY = web.AppKey("auth_cache", dict)
 NBRB_RATES_URL = "https://api.nbrb.by/exrates/rates?periodicity=0"
 FX_CACHE_SECONDS = 30 * 60
+FX_RETRY_SECONDS = 60
 USER_SYNC_CACHE_SECONDS = 10 * 60
 USER_SYNC_CACHE_LIMIT = 10_000
 AUTH_CACHE_SECONDS = 5 * 60
@@ -1098,38 +1100,119 @@ async def save_notification_subscription(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "notifications_enabled": enabled})
 
 
+def _valid_exchange_rates(rates) -> bool:
+    if not isinstance(rates, dict) or set(rates) != set(CURRENCIES):
+        return False
+    return all(
+        isinstance(rate, (int, float)) and not isinstance(rate, bool) and rate > 0
+        for rate in rates.values()
+    )
+
+
+async def _restore_exchange_rate_cache(application: web.Application) -> None:
+    cache = application[FX_CACHE_KEY]
+    if cache.get("rates"):
+        return
+    stored = await application[SERVICE_KEY].db.load_exchange_rate_cache()
+    if not stored or not _valid_exchange_rates(stored.get("rates")):
+        return
+    try:
+        fetched_at = int(stored.get("fetched_at") or 0)
+    except (TypeError, ValueError):
+        return
+    age = max(0, int(time.time()) - fetched_at)
+    cache.update(
+        rates=stored["rates"],
+        rate_date=stored.get("rate_date"),
+        loaded_at=time.monotonic() - age,
+        fetched_at=fetched_at,
+    )
+
+
+async def _refresh_exchange_rates(application: web.Application) -> bool:
+    cache = application[FX_CACHE_KEY]
+    async with application[FX_LOCK_KEY]:
+        now = time.monotonic()
+        if cache.get("rates") and now - cache.get("loaded_at", 0) < FX_CACHE_SECONDS:
+            return True
+        try:
+            connector = TCPConnector(family=socket.AF_INET, ttl_dns_cache=FX_CACHE_SECONDS)
+            timeout = ClientTimeout(total=5, connect=2, sock_connect=2, sock_read=3)
+            async with (
+                ClientSession(
+                    connector=connector,
+                    timeout=timeout,
+                    headers={"Accept": "application/json", "User-Agent": "ShakeOnIt/1.0"},
+                ) as session,
+                session.get(NBRB_RATES_URL) as response,
+            ):
+                response.raise_for_status()
+                rows = await response.json()
+            if not isinstance(rows, list):
+                raise ValueError("Некорректный ответ НБРБ")
+            rates = {"BYN": 1.0}
+            rate_date = None
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise ValueError("Некорректная запись курса НБРБ")
+                currency = row.get("Cur_Abbreviation")
+                if currency in CURRENCIES:
+                    rates[currency] = float(row["Cur_OfficialRate"]) / int(row["Cur_Scale"])
+                    rate_date = rate_date or row.get("Date")
+            if not _valid_exchange_rates(rates):
+                raise ValueError("Неполный набор курсов")
+            now = time.monotonic()
+            fetched_at = int(time.time())
+            cache.update(
+                rates=rates,
+                rate_date=rate_date,
+                loaded_at=now,
+                fetched_at=fetched_at,
+                retry_at=0,
+            )
+            try:
+                await application[SERVICE_KEY].db.save_exchange_rate_cache(
+                    rates, rate_date, fetched_at
+                )
+            except Exception:
+                LOGGER.exception("Could not persist NBRB exchange rates")
+            return True
+        except (ClientError, OSError, ValueError, TypeError, KeyError, TimeoutError):
+            cache["retry_at"] = time.monotonic() + FX_RETRY_SECONDS
+            LOGGER.warning("Could not load NBRB exchange rates", exc_info=True)
+            return False
+
+
+def _queue_exchange_rate_refresh(application: web.Application) -> None:
+    cache = application[FX_CACHE_KEY]
+    task = cache.get("refresh_task")
+    if task and not task.done():
+        return
+    task = asyncio.create_task(_refresh_exchange_rates(application), name="exchange-rate-refresh")
+    cache["refresh_task"] = task
+    application[DELIVERY_TASKS_KEY].add(task)
+    task.add_done_callback(application[DELIVERY_TASKS_KEY].discard)
+
+
 async def exchange_rates(request: web.Request) -> web.Response:
     cache = request.app[FX_CACHE_KEY]
+    await _restore_exchange_rate_cache(request.app)
     now = time.monotonic()
-    if not cache.get("rates") or now - cache.get("loaded_at", 0) >= FX_CACHE_SECONDS:
-        async with request.app[FX_LOCK_KEY]:
-            now = time.monotonic()
-            if not cache.get("rates") or now - cache.get("loaded_at", 0) >= FX_CACHE_SECONDS:
-                try:
-                    async with (
-                        ClientSession(timeout=ClientTimeout(total=6)) as session,
-                        session.get(NBRB_RATES_URL) as response,
-                    ):
-                        response.raise_for_status()
-                        rows = await response.json()
-                    rates = {"BYN": 1.0}
-                    rate_date = None
-                    for row in rows:
-                        currency = row.get("Cur_Abbreviation")
-                        if currency in CURRENCIES:
-                            rates[currency] = float(row["Cur_OfficialRate"]) / int(row["Cur_Scale"])
-                            rate_date = rate_date or row.get("Date")
-                    if set(rates) != set(CURRENCIES):
-                        raise ValueError("Неполный набор курсов")
-                    cache.update(rates=rates, rate_date=rate_date, loaded_at=now)
-                except (ClientError, OSError, ValueError, TypeError, KeyError, TimeoutError):
-                    LOGGER.warning("Could not load NBRB exchange rates", exc_info=True)
-                    if not cache.get("rates"):
-                        raise ApiError(
-                            "Не удалось загрузить курсы валют. Попробуйте позже", 503
-                        ) from None
-                    cache["loaded_at"] = now
-    return web.json_response({"ok": True, "rates": cache["rates"], "date": cache.get("rate_date")})
+    stale = not cache.get("rates") or now - cache.get("loaded_at", 0) >= FX_CACHE_SECONDS
+    if not cache.get("rates"):
+        if not await _refresh_exchange_rates(request.app):
+            raise ApiError("Не удалось загрузить курсы валют. Попробуйте позже", 503)
+        stale = False
+    elif stale and now >= cache.get("retry_at", 0):
+        _queue_exchange_rate_refresh(request.app)
+    return web.json_response(
+        {
+            "ok": True,
+            "rates": cache["rates"],
+            "date": cache.get("rate_date"),
+            "stale": stale,
+        }
+    )
 
 
 async def archive_collection(request: web.Request) -> web.Response:

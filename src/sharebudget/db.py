@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -112,6 +113,13 @@ CREATE TABLE IF NOT EXISTS bot_messages (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (chat_id, kind)
 );
+
+CREATE TABLE IF NOT EXISTS exchange_rate_cache (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    rates_json TEXT NOT NULL,
+    rate_date TEXT,
+    fetched_at INTEGER NOT NULL
+);
 """
 
 
@@ -208,3 +216,44 @@ class Database:
             yield connection
         finally:
             await connection.close()
+
+    async def load_exchange_rate_cache(self) -> dict | None:
+        async with self.connect() as connection:
+            cursor = await connection.execute(
+                "SELECT rates_json,rate_date,fetched_at FROM exchange_rate_cache WHERE id=1"
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        try:
+            rates = json.loads(row["rates_json"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(rates, dict):
+            return None
+        return {
+            "rates": rates,
+            "rate_date": row["rate_date"],
+            "fetched_at": row["fetched_at"],
+        }
+
+    async def save_exchange_rate_cache(
+        self,
+        rates: dict[str, float],
+        rate_date: str | None,
+        fetched_at: int,
+    ) -> None:
+        payload = json.dumps(rates, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        async with self.connect() as connection:
+            await connection.execute(
+                """
+                INSERT INTO exchange_rate_cache(id,rates_json,rate_date,fetched_at)
+                VALUES(1,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                    rates_json=excluded.rates_json,
+                    rate_date=excluded.rate_date,
+                    fetched_at=excluded.fetched_at
+                """,
+                (payload, rate_date, fetched_at),
+            )
+            await connection.commit()

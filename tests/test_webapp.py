@@ -21,6 +21,7 @@ from sharebudget.webapp import (
     FX_CACHE_KEY,
     FX_CACHE_SECONDS,
     FX_LOCK_KEY,
+    SERVICE_KEY,
     ApiError,
     _collection_invite_markup,
     exchange_rates,
@@ -591,8 +592,17 @@ async def test_nbrb_rates_are_cached_for_thirty_minutes(monkeypatch):
             return FakeResponse()
 
     monkeypatch.setattr("sharebudget.webapp.ClientSession", FakeSession)
+    monkeypatch.setattr("sharebudget.webapp.TCPConnector", lambda **_: None)
+    database = SimpleNamespace(
+        load_exchange_rate_cache=AsyncMock(return_value=None),
+        save_exchange_rate_cache=AsyncMock(),
+    )
     request = SimpleNamespace(
-        app={FX_CACHE_KEY: {}, FX_LOCK_KEY: asyncio.Lock()},
+        app={
+            FX_CACHE_KEY: {},
+            FX_LOCK_KEY: asyncio.Lock(),
+            SERVICE_KEY: SimpleNamespace(db=database),
+        },
     )
 
     first = await exchange_rates(request)
@@ -602,6 +612,170 @@ async def test_nbrb_rates_are_cached_for_thirty_minutes(monkeypatch):
     assert second.status == 200
     assert FX_CACHE_SECONDS == 30 * 60
     assert calls == 1
+    database.save_exchange_rate_cache.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_rate_requests_share_one_nbrb_call(monkeypatch):
+    calls = 0
+
+    class FakeResponse:
+        async def __aenter__(self):
+            await asyncio.sleep(0.01)
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        async def json(self):
+            return [
+                {"Cur_Abbreviation": "USD", "Cur_OfficialRate": 3.1, "Cur_Scale": 1},
+                {"Cur_Abbreviation": "EUR", "Cur_OfficialRate": 3.4, "Cur_Scale": 1},
+                {"Cur_Abbreviation": "RUB", "Cur_OfficialRate": 3.6, "Cur_Scale": 100},
+            ]
+
+    class FakeSession:
+        def __init__(self, **_):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        def get(self, _url):
+            nonlocal calls
+            calls += 1
+            return FakeResponse()
+
+    monkeypatch.setattr("sharebudget.webapp.ClientSession", FakeSession)
+    monkeypatch.setattr("sharebudget.webapp.TCPConnector", lambda **_: None)
+    database = SimpleNamespace(
+        load_exchange_rate_cache=AsyncMock(return_value=None),
+        save_exchange_rate_cache=AsyncMock(),
+    )
+    application = {
+        FX_CACHE_KEY: {},
+        FX_LOCK_KEY: asyncio.Lock(),
+        SERVICE_KEY: SimpleNamespace(db=database),
+    }
+
+    responses = await asyncio.gather(
+        *(exchange_rates(SimpleNamespace(app=application)) for _ in range(10))
+    )
+
+    assert all(response.status == 200 for response in responses)
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_saved_rates_remain_available_after_restart(tmp_path, monkeypatch):
+    database = Database(tmp_path / "exchange-rate-cache.db")
+    await database.initialize()
+    expected = {"BYN": 1.0, "USD": 3.1, "EUR": 3.4, "RUB": 0.036}
+    await database.save_exchange_rate_cache(expected, "2026-08-06", int(time.time()))
+
+    class UnexpectedSession:
+        def __init__(self, **_):
+            raise AssertionError("fresh saved rates must not trigger a network request")
+
+    monkeypatch.setattr("sharebudget.webapp.ClientSession", UnexpectedSession)
+    request = SimpleNamespace(
+        app={
+            FX_CACHE_KEY: {},
+            FX_LOCK_KEY: asyncio.Lock(),
+            SERVICE_KEY: BudgetService(database),
+        },
+    )
+
+    response = await exchange_rates(request)
+    payload = json.loads(response.text)
+
+    assert response.status == 200
+    assert payload["rates"] == expected
+    assert payload["stale"] is False
+
+
+@pytest.mark.asyncio
+async def test_stale_saved_rates_are_returned_while_refresh_retries(tmp_path, monkeypatch):
+    database = Database(tmp_path / "stale-exchange-rate-cache.db")
+    await database.initialize()
+    expected = {"BYN": 1.0, "USD": 3.1, "EUR": 3.4, "RUB": 0.036}
+    await database.save_exchange_rate_cache(
+        expected,
+        "2026-08-05",
+        int(time.time()) - FX_CACHE_SECONDS - 1,
+    )
+
+    class FailingSession:
+        def __init__(self, **_):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        def get(self, _url):
+            raise TimeoutError
+
+    monkeypatch.setattr("sharebudget.webapp.ClientSession", FailingSession)
+    monkeypatch.setattr("sharebudget.webapp.TCPConnector", lambda **_: None)
+    tasks = set()
+    request = SimpleNamespace(
+        app={
+            FX_CACHE_KEY: {},
+            FX_LOCK_KEY: asyncio.Lock(),
+            SERVICE_KEY: BudgetService(database),
+            DELIVERY_TASKS_KEY: tasks,
+        },
+    )
+
+    response = await exchange_rates(request)
+    payload = json.loads(response.text)
+    await asyncio.gather(*tasks)
+
+    assert response.status == 200
+    assert payload["rates"] == expected
+    assert payload["stale"] is True
+
+
+@pytest.mark.asyncio
+async def test_rates_report_service_unavailable_without_network_or_saved_cache(monkeypatch):
+    class FailingSession:
+        def __init__(self, **_):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        def get(self, _url):
+            raise TimeoutError
+
+    monkeypatch.setattr("sharebudget.webapp.ClientSession", FailingSession)
+    monkeypatch.setattr("sharebudget.webapp.TCPConnector", lambda **_: None)
+    database = SimpleNamespace(load_exchange_rate_cache=AsyncMock(return_value=None))
+    request = SimpleNamespace(
+        app={
+            FX_CACHE_KEY: {},
+            FX_LOCK_KEY: asyncio.Lock(),
+            SERVICE_KEY: SimpleNamespace(db=database),
+        },
+    )
+
+    with pytest.raises(ApiError) as error:
+        await exchange_rates(request)
+
+    assert error.value.status == 503
+    assert "курсы валют" in str(error.value)
 
 
 @pytest.mark.asyncio

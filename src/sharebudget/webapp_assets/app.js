@@ -274,7 +274,7 @@ function paintBalance() {
     <section class="hero">
       <div class="hero-label">ОБЩИЙ БАЛАНС · ${e(preferred)}</div>
       <div class="hero-value">${netLabel}</div>
-      <div class="hero-meta">${data.exchange ? `≈ по официальному курсу НБРБ · ${e(originalLabel)}` : "По активным сборам · без конвертации"}</div>
+      <div class="hero-meta">${data.exchange ? `≈ ${data.exchange.stale ? "по последнему доступному" : "по официальному"} курсу НБРБ · ${e(originalLabel)}` : "По активным сборам · без конвертации"}</div>
     </section>
     <div class="segmented"><button type="button" data-action="balance-mode" data-mode="collections" class="${state.balanceMode === "collections" ? "active" : ""}">По сборам</button><button type="button" data-action="balance-mode" data-mode="personal" class="${state.balanceMode === "personal" ? "active" : ""}">Персональный</button></div>
     ${state.balanceMode === "collections"
