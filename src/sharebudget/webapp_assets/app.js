@@ -394,7 +394,7 @@ function renderCollectionPanel(data, isAdmin) {
     const members = activeParticipants.map((member) => `<div class="member-row"><div class="row-between"><div><div class="row-title">${e(member.full_name)} ${member.is_admin ? "👑" : ""}</div><div class="row-note">${member.username ? `@${e(member.username)}` : `ID ${member.id}`}${member.payment_details ? `<br>💳 ${e(member.payment_details)}` : ""}</div></div></div></div>`).join("");
     return `${invite}<div class="section-head"><h2>Участники · ${activeParticipants.length}</h2></div><div class="card">${members}</div>${collection.status === "active" && !isAdmin ? '<div class="sheet-actions"><button class="danger-button" type="button" data-action="leave">Выйти из сбора</button></div>' : ""}`;
   }
-  return `<div class="card member-row"><div class="row-title">Администратор сбора</div><div class="row-note">Передача роли и удаление участников доступны только при соблюдении балансов.</div></div><div class="sheet-actions">${collection.status === "active" ? '<button class="secondary-button" type="button" data-action="transfer">Передать администратора</button><button class="secondary-button" type="button" data-action="remove-member">Удалить участника</button><button class="danger-button" type="button" data-action="archive">Завершить и архивировать</button>' : '<button class="primary-button" type="button" data-action="restore">Восстановить сбор</button>'}</div>`;
+  return `<div class="card member-row"><div class="row-title">Администратор сбора</div><div class="row-note">Передача роли и удаление участников доступны только при соблюдении балансов.</div></div><div class="sheet-actions">${collection.status === "active" ? '<button class="secondary-button" type="button" data-action="transfer">Передать администратора</button><button class="secondary-button" type="button" data-action="remove-member">Удалить участника</button><button class="danger-button" type="button" data-action="archive">Завершить и архивировать</button>' : '<button class="primary-button" type="button" data-action="restore">Восстановить сбор</button><button class="danger-button" type="button" data-action="delete-collection">Удалить сбор навсегда</button>'}</div>`;
 }
 
 function createSheet() {
@@ -622,6 +622,16 @@ app.addEventListener("click", async (event) => {
       const id = state.collection.collection.id;
       const result = await api(`/api/collections/${id}/${action}`, { method: "POST", body: "{}" });
       reportToast(result, action === "leave" ? "Вы вышли из сбора" : action === "archive" ? "Сбор в архиве" : "Сбор восстановлен");
+      await reloadBootstrap();
+      renderCollections();
+    }
+    if (action === "delete-collection") {
+      if (!await confirmAction("Удалить архивный сбор навсегда? Все затраты, возвраты и история этого сбора будут удалены без возможности восстановления.")) return;
+      setBusy(target, true);
+      const id = state.collection.collection.id;
+      const result = await api(`/api/collections/${id}`, { method: "DELETE" });
+      reportToast(result, "Сбор удалён");
+      state.collection = null;
       await reloadBootstrap();
       renderCollections();
     }

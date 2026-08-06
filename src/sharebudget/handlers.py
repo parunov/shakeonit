@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from html import escape
 
@@ -37,7 +38,7 @@ from .keyboards import (
 )
 from .links import group_start_param
 from .money import format_money, parse_amount
-from .notifications import report_collection_event
+from .notifications import replace_repayment_prompt, report_collection_event
 from .render import (
     collection_text,
     history_text,
@@ -47,6 +48,8 @@ from .render import (
 )
 from .service import BudgetService, DomainError
 from .states import AddExpense, AddRepayment, CreateCollection, EditTransaction, PaymentDetails
+
+LOGGER = logging.getLogger(__name__)
 
 router = Router()
 
@@ -257,7 +260,7 @@ async def tutorial(message: Message) -> None:
 
 @router.message(Command("app"))
 @router.message(F.text.in_({"📱 Приложение", "📱 Открыть приложение"}))
-async def open_webapp(message: Message, settings: Settings) -> None:
+async def open_webapp(message: Message, settings: Settings, service: BudgetService) -> None:
     if not settings.webapp_url:
         await message.answer("ℹ️ Приложение пока не настроено.")
         return
@@ -272,7 +275,7 @@ async def open_webapp(message: Message, settings: Settings) -> None:
             app_url = f"https://t.me/{username}?start=app"
             text = "📱 Перейдите в личный чат и откройте защищённую кнопку ShakeOnIt."
             button_text = "📱 Перейти к приложению"
-        await message.answer(
+        sent_message = await message.answer(
             text,
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -280,12 +283,31 @@ async def open_webapp(message: Message, settings: Settings) -> None:
                 ]
             ),
         )
-        return
-    await message.answer(
-        "📱 <b>ShakeOnIt</b> — все сборы и операции в одном спокойном интерфейсе.",
-        reply_markup=webapp_launch(settings.webapp_url),
-        parse_mode=ParseMode.HTML,
-    )
+    else:
+        sent_message = await message.answer(
+            "📱 <b>ShakeOnIt</b> — все сборы и операции в одном спокойном интерфейсе.",
+            reply_markup=webapp_launch(settings.webapp_url),
+            parse_mode=ParseMode.HTML,
+        )
+
+    sent_message_id = getattr(sent_message, "message_id", None)
+    if isinstance(sent_message_id, int):
+        previous_message_id = await service.replace_bot_message(
+            message.chat.id, "app_link", sent_message_id
+        )
+        if previous_message_id is not None:
+            try:
+                await message.bot.delete_message(message.chat.id, previous_message_id)
+            except TelegramAPIError:
+                LOGGER.info(
+                    "Could not delete previous app link %s in chat %s",
+                    previous_message_id,
+                    message.chat.id,
+                )
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        LOGGER.debug("Could not delete app-link request in chat %s", message.chat.id)
 
 
 @router.message(F.chat_shared)
@@ -705,7 +727,7 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
         exclude_user_ids={message.from_user.id, data["creditor_id"]},
     )
     try:
-        await message.bot.send_message(
+        confirmation_message = await message.bot.send_message(
             data["creditor_id"],
             "🤝 <b>Подтвердите получение</b>\n\n"
             f"От: {escape(message.from_user.full_name)}\n"
@@ -713,6 +735,9 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
             f"Сбор: {escape(collection['title'])}",
             parse_mode=ParseMode.HTML,
             reply_markup=confirm_markup,
+        )
+        await service.set_repayment_confirmation_message(
+            transaction_id, confirmation_message.message_id
         )
     except TelegramAPIError:
         await message.answer(
@@ -751,24 +776,25 @@ async def repayment_confirm(callback: CallbackQuery, service: BudgetService) -> 
         f"<b>{format_money(transaction['amount'], collection['currency'])}</b>.{comment_line}",
         exclude_user_ids={callback.from_user.id},
     )
-    await safe_edit(
-        callback.message,
+    final_text = (
         "✅ <b>Получение подтверждено</b>\n\n"
         f"От: {escape(sender['full_name'])}\n"
         f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
         f"Сбор: {escape(collection['title'])}"
-        f"{comment_detail}",
+        f"{comment_detail}"
     )
-    await callback.message.answer(
-        await collection_text(service, collection),
-        reply_markup=await collection_markup(
-            callback.message,
-            collection,
-            True,
-            collection["admin_id"] == callback.from_user.id,
-        ),
-        parse_mode=ParseMode.HTML,
-    )
+    if callback.message.chat.type == ChatType.PRIVATE:
+        await replace_repayment_prompt(
+            callback.bot,
+            callback.message.chat.id,
+            transaction["confirmation_message_id"] or callback.message.message_id,
+            final_text,
+        )
+    else:
+        try:
+            await callback.message.delete()
+        except TelegramAPIError:
+            await safe_edit(callback.message, final_text)
 
 
 @router.callback_query(F.data.startswith("history:"))
@@ -965,24 +991,25 @@ async def repayment_reject(callback: CallbackQuery, service: BudgetService) -> N
         f"<b>{format_money(transaction['amount'], collection['currency'])}</b>.{comment_line}",
         exclude_user_ids={callback.from_user.id},
     )
-    await safe_edit(
-        callback.message,
+    final_text = (
         "❌ <b>Получение отклонено</b>\n\n"
         f"От: {escape(sender['full_name'])}\n"
         f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
         f"Сбор: {escape(collection['title'])}"
-        f"{comment_detail}",
+        f"{comment_detail}"
     )
-    await callback.message.answer(
-        await collection_text(service, collection),
-        reply_markup=await collection_markup(
-            callback.message,
-            collection,
-            True,
-            collection["admin_id"] == callback.from_user.id,
-        ),
-        parse_mode=ParseMode.HTML,
-    )
+    if callback.message.chat.type == ChatType.PRIVATE:
+        await replace_repayment_prompt(
+            callback.bot,
+            callback.message.chat.id,
+            transaction["confirmation_message_id"] or callback.message.message_id,
+            final_text,
+        )
+    else:
+        try:
+            await callback.message.delete()
+        except TelegramAPIError:
+            await safe_edit(callback.message, final_text)
 
 
 @router.message(Command("balance"))

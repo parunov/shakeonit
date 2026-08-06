@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     confirmation_status TEXT NOT NULL DEFAULT 'not_required',
     confirmed_by INTEGER REFERENCES users(id),
     confirmed_at TEXT,
+    confirmation_message_id INTEGER,
     cancelled_by INTEGER REFERENCES users(id),
     cancelled_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -93,6 +94,14 @@ CREATE TABLE IF NOT EXISTS collection_events (
 
 CREATE INDEX IF NOT EXISTS idx_collection_events_collection
 ON collection_events(collection_id, created_at);
+
+CREATE TABLE IF NOT EXISTS bot_messages (
+    chat_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (chat_id, kind)
+);
 """
 
 
@@ -157,6 +166,10 @@ class Database:
                 await connection.execute(
                     "UPDATE transactions SET confirmed_at=created_at "
                     "WHERE kind='repayment' AND confirmation_status='confirmed'"
+                )
+            if "confirmation_message_id" not in transaction_column_names:
+                await connection.execute(
+                    "ALTER TABLE transactions ADD COLUMN confirmation_message_id INTEGER"
                 )
             await connection.execute(
                 """

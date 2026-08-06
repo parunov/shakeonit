@@ -128,6 +128,27 @@ class BudgetService:
             )
             return bool(row and row["private_started"])
 
+    async def replace_bot_message(self, chat_id: int, kind: str, message_id: int) -> int | None:
+        """Remember one current bot message per chat and return the message it replaced."""
+        async with self.db.connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            previous = await _fetchone(
+                connection,
+                "SELECT message_id FROM bot_messages WHERE chat_id=? AND kind=?",
+                (chat_id, kind),
+            )
+            await connection.execute(
+                """
+                INSERT INTO bot_messages(chat_id,kind,message_id) VALUES (?,?,?)
+                ON CONFLICT(chat_id,kind) DO UPDATE SET
+                    message_id=excluded.message_id,updated_at=CURRENT_TIMESTAMP
+                """,
+                (chat_id, kind, message_id),
+            )
+            await connection.commit()
+        old_message_id = previous["message_id"] if previous else None
+        return old_message_id if old_message_id != message_id else None
+
     async def get_user(self, user_id: int):
         async with self.db.connect() as connection:
             return await _fetchone(connection, "SELECT * FROM users WHERE id=?", (user_id,))
@@ -828,6 +849,19 @@ class BudgetService:
                 connection, "SELECT * FROM transactions WHERE id=?", (transaction_id,)
             )
 
+    async def set_repayment_confirmation_message(
+        self, transaction_id: int, message_id: int
+    ) -> None:
+        async with self.db.connect() as connection:
+            await connection.execute(
+                """
+                UPDATE transactions SET confirmation_message_id=?
+                WHERE id=? AND kind='repayment' AND confirmation_status='pending'
+                """,
+                (message_id, transaction_id),
+            )
+            await connection.commit()
+
     async def cancel_transaction(self, transaction_id: int, actor_id: int) -> int:
         transaction = await self.transaction(transaction_id)
         if not transaction or transaction["status"] != "active":
@@ -968,6 +1002,19 @@ class BudgetService:
                 "INSERT INTO collection_events(collection_id,kind,actor_id) VALUES (?,'restored',?)",
                 (collection_id, actor_id),
             )
+            await connection.commit()
+
+    async def delete_archived(self, collection_id: int, actor_id: int) -> None:
+        collection = await self._collection(collection_id)
+        self._require_admin(collection, actor_id)
+        if collection["status"] != "archived":
+            raise DomainError("Удалить можно только сбор из архива")
+        async with self.db.connect() as connection:
+            cursor = await connection.execute(
+                "DELETE FROM collections WHERE id=? AND status='archived'", (collection_id,)
+            )
+            if cursor.rowcount != 1:
+                raise DomainError("Архивный сбор уже удалён или восстановлен")
             await connection.commit()
 
     async def expire_archives(self) -> int:

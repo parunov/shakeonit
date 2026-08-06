@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -23,7 +24,7 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, web
 from .config import Settings
 from .links import parse_group_start_param
 from .money import CURRENCIES, format_money, parse_amount
-from .notifications import report_collection_event
+from .notifications import replace_repayment_prompt, report_collection_event
 from .render import transaction_update_report
 from .service import BudgetService, DomainError
 
@@ -35,7 +36,9 @@ SETTINGS_KEY = web.AppKey("settings", Settings)
 AUTH_KEY = web.RequestKey("telegram_auth", dict)
 NEW_USER_KEY = web.RequestKey("new_user", bool)
 FX_CACHE_KEY = web.AppKey("fx_cache", dict)
+FX_LOCK_KEY = web.AppKey("fx_lock", asyncio.Lock)
 NBRB_RATES_URL = "https://api.nbrb.by/exrates/rates?periodicity=0"
+FX_CACHE_SECONDS = 30 * 60
 
 
 class ApiError(Exception):
@@ -500,11 +503,10 @@ async def add_repayment(request: web.Request) -> web.Response:
         f"⏳ {_name(user)} сообщил о возврате долга {escape(creditor['full_name'])}: "
         f"<b>{format_money(amount, collection['currency'])}</b>. Баланс изменится после "
         f"подтверждения получателем.{comment_line}",
-        confirm_markup,
         exclude_user_ids={user["id"], creditor_id},
     )
     try:
-        await bot.send_message(
+        confirmation_message = await bot.send_message(
             creditor_id,
             "🤝 <b>Подтвердите получение</b>\n\n"
             f"От: {_name(user)}\n"
@@ -513,6 +515,9 @@ async def add_repayment(request: web.Request) -> web.Response:
             parse_mode="HTML",
             reply_markup=confirm_markup,
         )
+        message_id = getattr(confirmation_message, "message_id", None)
+        if isinstance(message_id, int):
+            await service.set_repayment_confirmation_message(transaction_id, message_id)
     except TelegramAPIError:
         LOGGER.info("Creditor %s has no private chat with bot", creditor_id)
     return web.json_response(
@@ -623,6 +628,18 @@ async def confirm_repayment(request: web.Request) -> web.Response:
         f"Балансы пересчитаны.{comment_line}",
         exclude_user_ids={user["id"]},
     )
+    comment_detail = (
+        f"\nКомментарий: {escape(transaction['comment'])}" if transaction["comment"] else ""
+    )
+    await replace_repayment_prompt(
+        bot,
+        user["id"],
+        transaction["confirmation_message_id"],
+        "✅ <b>Получение подтверждено</b>\n\n"
+        f"От: {escape(sender['full_name'])}\n"
+        f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
+        f"Сбор: {escape(collection['title'])}{comment_detail}",
+    )
     return web.json_response(
         {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
     )
@@ -648,6 +665,18 @@ async def reject_repayment(request: web.Request) -> web.Response:
         f"<b>{format_money(transaction['amount'], collection['currency'])}</b>. "
         f"Баланс не изменился.{comment_line}",
         exclude_user_ids={user["id"]},
+    )
+    comment_detail = (
+        f"\nКомментарий: {escape(transaction['comment'])}" if transaction["comment"] else ""
+    )
+    await replace_repayment_prompt(
+        bot,
+        user["id"],
+        transaction["confirmation_message_id"],
+        "❌ <b>Получение отклонено</b>\n\n"
+        f"От: {escape(sender['full_name'])}\n"
+        f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
+        f"Сбор: {escape(collection['title'])}{comment_detail}",
     )
     return web.json_response(
         {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
@@ -824,27 +853,34 @@ async def save_notification_subscription(request: web.Request) -> web.Response:
 async def exchange_rates(request: web.Request) -> web.Response:
     cache = request.app[FX_CACHE_KEY]
     now = time.monotonic()
-    if not cache.get("rates") or now - cache.get("loaded_at", 0) > 6 * 60 * 60:
-        try:
-            async with (
-                ClientSession(timeout=ClientTimeout(total=6)) as session,
-                session.get(NBRB_RATES_URL) as response,
-            ):
-                response.raise_for_status()
-                rows = await response.json()
-            rates = {"BYN": 1.0}
-            rate_date = None
-            for row in rows:
-                currency = row.get("Cur_Abbreviation")
-                if currency in CURRENCIES:
-                    rates[currency] = float(row["Cur_OfficialRate"]) / int(row["Cur_Scale"])
-                    rate_date = rate_date or row.get("Date")
-            if set(rates) != set(CURRENCIES):
-                raise ValueError("Неполный набор курсов")
-            cache.update(rates=rates, rate_date=rate_date, loaded_at=now)
-        except (ClientError, OSError, ValueError, TypeError, KeyError, TimeoutError):
-            LOGGER.warning("Could not load NBRB exchange rates", exc_info=True)
-            raise ApiError("Не удалось загрузить курсы валют. Попробуйте позже", 503) from None
+    if not cache.get("rates") or now - cache.get("loaded_at", 0) >= FX_CACHE_SECONDS:
+        async with request.app[FX_LOCK_KEY]:
+            now = time.monotonic()
+            if not cache.get("rates") or now - cache.get("loaded_at", 0) >= FX_CACHE_SECONDS:
+                try:
+                    async with (
+                        ClientSession(timeout=ClientTimeout(total=6)) as session,
+                        session.get(NBRB_RATES_URL) as response,
+                    ):
+                        response.raise_for_status()
+                        rows = await response.json()
+                    rates = {"BYN": 1.0}
+                    rate_date = None
+                    for row in rows:
+                        currency = row.get("Cur_Abbreviation")
+                        if currency in CURRENCIES:
+                            rates[currency] = float(row["Cur_OfficialRate"]) / int(row["Cur_Scale"])
+                            rate_date = rate_date or row.get("Date")
+                    if set(rates) != set(CURRENCIES):
+                        raise ValueError("Неполный набор курсов")
+                    cache.update(rates=rates, rate_date=rate_date, loaded_at=now)
+                except (ClientError, OSError, ValueError, TypeError, KeyError, TimeoutError):
+                    LOGGER.warning("Could not load NBRB exchange rates", exc_info=True)
+                    if not cache.get("rates"):
+                        raise ApiError(
+                            "Не удалось загрузить курсы валют. Попробуйте позже", 503
+                        ) from None
+                    cache["loaded_at"] = now
     return web.json_response({"ok": True, "rates": cache["rates"], "date": cache.get("rate_date")})
 
 
@@ -877,6 +913,26 @@ async def restore_collection(request: web.Request) -> web.Response:
         f"♻️ {_name(user)} восстановил сбор <b>«{escape(collection['title'])}»</b>.",
         exclude_user_ids={user["id"]},
     )
+    return web.json_response(
+        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+    )
+
+
+async def delete_collection(request: web.Request) -> web.Response:
+    service, bot, user = _context(request)
+    collection_id = int(request.match_info["collection_id"])
+    collection = await _require_member(service, collection_id, user["id"])
+    if collection["status"] != "archived":
+        raise ApiError("Удалить можно только сбор из архива")
+    sent, notifications_sent = await _report(
+        bot,
+        service,
+        collection,
+        f"🗑 {_name(user)} безвозвратно удалил архивный сбор "
+        f"<b>«{escape(collection['title'])}»</b>.",
+        exclude_user_ids={user["id"]},
+    )
+    await service.delete_archived(collection_id, user["id"])
     return web.json_response(
         {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
     )
@@ -968,6 +1024,7 @@ def setup_webapp_routes(
     application[SERVICE_KEY] = service
     application[SETTINGS_KEY] = settings
     application[FX_CACHE_KEY] = {}
+    application[FX_LOCK_KEY] = asyncio.Lock()
     application.middlewares.extend([security_headers, api_middleware])
     application.router.add_get("/app", app_index)
     application.router.add_get("/app/", app_index)
@@ -989,6 +1046,7 @@ def setup_webapp_routes(
     application.router.add_post("/api/collections/{collection_id}/leave", leave_collection)
     application.router.add_post("/api/collections/{collection_id}/archive", archive_collection)
     application.router.add_post("/api/collections/{collection_id}/restore", restore_collection)
+    application.router.add_delete("/api/collections/{collection_id}", delete_collection)
     application.router.add_post("/api/collections/{collection_id}/transfer", transfer_admin)
     application.router.add_post("/api/collections/{collection_id}/remove", remove_member)
     application.router.add_patch("/api/transactions/{transaction_id}", edit_transaction)

@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import json
@@ -15,8 +16,12 @@ from sharebudget.db import Database
 from sharebudget.links import group_start_param
 from sharebudget.service import BudgetService
 from sharebudget.webapp import (
+    FX_CACHE_KEY,
+    FX_CACHE_SECONDS,
+    FX_LOCK_KEY,
     ApiError,
     _collection_invite_markup,
+    exchange_rates,
     setup_webapp_routes,
     validate_init_data,
 )
@@ -113,6 +118,7 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         script = await client.get("/app/static/app.js")
         assert script.status == 200
         assert script.headers["Cache-Control"] == "no-cache"
+        assert "delete-collection" in await script.text()
 
         unauthorized = await client.get("/api/bootstrap")
         assert unauthorized.status == 401
@@ -417,6 +423,83 @@ async def test_request_funds_notifies_each_debtor_and_reports_to_group(tmp_path)
         "startapp=collection_"
         in bot.send_message.await_args_list[0].kwargs["reply_markup"].inline_keyboard[0][0].url
     )
+
+
+@pytest.mark.asyncio
+async def test_nbrb_rates_are_cached_for_thirty_minutes(monkeypatch):
+    calls = 0
+
+    class FakeResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        async def json(self):
+            return [
+                {"Cur_Abbreviation": "USD", "Cur_OfficialRate": 3.1, "Cur_Scale": 1},
+                {"Cur_Abbreviation": "EUR", "Cur_OfficialRate": 3.4, "Cur_Scale": 1},
+                {"Cur_Abbreviation": "RUB", "Cur_OfficialRate": 3.6, "Cur_Scale": 100},
+            ]
+
+    class FakeSession:
+        def __init__(self, **_):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        def get(self, _url):
+            nonlocal calls
+            calls += 1
+            return FakeResponse()
+
+    monkeypatch.setattr("sharebudget.webapp.ClientSession", FakeSession)
+    request = SimpleNamespace(
+        app={FX_CACHE_KEY: {}, FX_LOCK_KEY: asyncio.Lock()},
+    )
+
+    first = await exchange_rates(request)
+    second = await exchange_rates(request)
+
+    assert first.status == 200
+    assert second.status == 200
+    assert FX_CACHE_SECONDS == 30 * 60
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_archived_collection_can_be_deleted_by_admin_from_mini_app(tmp_path):
+    database = Database(tmp_path / "delete-archive.db")
+    await database.initialize()
+    service = BudgetService(database)
+    await service.upsert_user(1, "owner", "Организатор")
+    collection_id = await service.create_collection(-100500, "Старый сбор", "EUR", 1)
+    await service.archive(collection_id, 1)
+    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    application = web.Application()
+    setup_webapp_routes(application, bot, service, settings)
+    owner_auth = signed_init_data(user={"id": 1, "first_name": "Организатор"})
+
+    async with TestClient(TestServer(application)) as client:
+        response = await client.delete(
+            f"/api/collections/{collection_id}",
+            headers={"X-Telegram-Init-Data": owner_auth},
+        )
+        payload = await response.json()
+
+    assert response.status == 200
+    assert payload["report_sent"] is True
+    assert await service.get_collection(collection_id) is None
+    assert "безвозвратно удалил" in bot.send_message.await_args.args[1]
 
 
 @pytest.mark.asyncio

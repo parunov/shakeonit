@@ -322,6 +322,31 @@ async def test_sync_token_changes_only_when_visible_data_changes(service):
 
 
 @pytest.mark.asyncio
+async def test_only_admin_can_permanently_delete_archived_collection(service):
+    collection_id = await make_collection(service)
+    transaction_id = await service.add_expense(collection_id, 1, 1200, [1, 2, 3], "Музей")
+
+    with pytest.raises(DomainError, match="только сбор из архива"):
+        await service.delete_archived(collection_id, 1)
+
+    await service.archive(collection_id, 1)
+    with pytest.raises(DomainError, match="администратору"):
+        await service.delete_archived(collection_id, 2)
+
+    await service.delete_archived(collection_id, 1)
+
+    assert await service.get_collection(collection_id) is None
+    assert await service.transaction(transaction_id) is None
+
+
+@pytest.mark.asyncio
+async def test_current_bot_message_replaces_previous_message(service):
+    assert await service.replace_bot_message(-100, "app_link", 10) is None
+    assert await service.replace_bot_message(-100, "app_link", 15) == 10
+    assert await service.replace_bot_message(-200, "app_link", 7) is None
+
+
+@pytest.mark.asyncio
 async def test_expense_share_breakdown_is_exact(service):
     collection_id = await make_collection(service)
     transaction_id = await service.add_expense(collection_id, 1, 1001, [3, 1, 2], "Билеты")
