@@ -780,8 +780,13 @@ async def remove_member(request: web.Request) -> web.Response:
     )
 
 
-async def app_index(_: web.Request) -> web.FileResponse:
-    response = web.FileResponse(WEBAPP_DIR / "index.html")
+async def app_index(request: web.Request) -> web.Response:
+    template = (WEBAPP_DIR / "index.html").read_text(encoding="utf-8")
+    username = escape(request.app[SETTINGS_KEY].bot_username.lstrip("@"), quote=True)
+    response = web.Response(
+        text=template.replace("__BOT_USERNAME__", username),
+        content_type="text/html",
+    )
     response.headers["Cache-Control"] = "no-store"
     return response
 

@@ -105,7 +105,10 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
     async with TestClient(TestServer(application)) as client:
         page = await client.get("/app")
         assert page.status == 200
-        assert "ShakeOnIt" in await page.text()
+        page_text = await page.text()
+        assert "ShakeOnIt" in page_text
+        assert 'name="telegram-bot-username" content="ShakeOnIt_bot"' in page_text
+        assert "__BOT_USERNAME__" not in page_text
 
         script = await client.get("/app/static/app.js")
         assert script.status == 200

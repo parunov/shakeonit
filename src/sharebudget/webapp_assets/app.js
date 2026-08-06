@@ -8,6 +8,8 @@ const nav = document.getElementById("bottom-nav");
 const sheetLayer = document.getElementById("sheet-layer");
 const sheet = document.getElementById("sheet");
 const toastNode = document.getElementById("toast");
+const botUsername = document.querySelector('meta[name="telegram-bot-username"]')?.content;
+const launchParams = new URLSearchParams(window.location.search);
 
 const state = {
   bootstrap: null,
@@ -16,7 +18,9 @@ const state = {
   details: new Map(),
   nav: "collections",
   busy: false,
-  launchIntent: new URLSearchParams(window.location.search).get("intent"),
+  launchIntent: launchParams.get("intent")
+    || launchParams.get("tgWebAppStartParam")
+    || tg?.initDataUnsafe?.start_param,
 };
 
 const e = (value) => String(value ?? "")
@@ -659,7 +663,13 @@ async function init() {
   tg?.setBackgroundColor?.("bg_color");
   if (!tg?.initData) {
     nav.hidden = true;
-    app.innerHTML = `<section class="auth-error"><span class="empty-icon">🔐</span><h2>Откройте из Telegram</h2><p class="row-note">Так мы безопасно узнаем ваш Telegram ID без логина и пароля.</p></section>`;
+    app.innerHTML = `<section class="auth-error"><span class="empty-icon">🔐</span><h2>Нужен защищённый запуск</h2><p class="row-note">Telegram открыл старую кнопку без данных профиля. Нажмите ниже — вход произойдёт автоматически, без логина и пароля.</p><div class="sheet-actions"><button class="primary-button" type="button" id="secure-open">Открыть в Telegram</button></div></section>`;
+    document.getElementById("secure-open")?.addEventListener("click", () => {
+      const startParam = state.launchIntent === "create" ? "create" : "app";
+      const url = `https://t.me/${botUsername}?startapp=${startParam}`;
+      if (tg?.openTelegramLink) tg.openTelegramLink(url);
+      else window.location.href = url;
+    });
     return;
   }
   try {

@@ -40,16 +40,13 @@ def test_archived_collection_has_no_onboarding_or_join_button():
 
 
 def test_main_menu_and_launch_button_expose_mini_app():
-    menu_labels = [button.text for row in main_menu().keyboard for button in row]
-    private_menu = [
-        button for row in main_menu("https://example.com/app").keyboard for button in row
-    ]
+    menu_buttons = [button for row in main_menu().keyboard for button in row]
+    menu_labels = [button.text for button in menu_buttons]
     launch = _buttons(webapp_launch("https://example.com/app"))[0]
 
     assert menu_labels == [
         "➕ Создать сбор",
         "📱 Открыть приложение",
     ]
-    assert private_menu[0].web_app.url == "https://example.com/app?intent=create"
-    assert private_menu[1].web_app.url == "https://example.com/app"
+    assert all(button.web_app is None for button in menu_buttons)
     assert launch.web_app.url == "https://example.com/app"

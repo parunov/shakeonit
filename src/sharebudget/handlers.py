@@ -152,7 +152,7 @@ async def start(
     settings: Settings,
 ) -> None:
     await sync_user(service, message)
-    private_menu = main_menu(settings.webapp_url if message.chat.type == ChatType.PRIVATE else None)
+    private_menu = main_menu()
     if command.args == "app" and message.chat.type == ChatType.PRIVATE and settings.webapp_url:
         await message.answer(
             "✅ <b>ShakeOnIt готов</b>\n\nОткройте приложение — вход уже подтвержден Telegram.",
@@ -228,9 +228,7 @@ async def menu(
     await state.clear()
     await message.answer(
         "Что хотите сделать?",
-        reply_markup=main_menu(
-            settings.webapp_url if message.chat.type == ChatType.PRIVATE else None
-        ),
+        reply_markup=main_menu(),
     )
 
 
