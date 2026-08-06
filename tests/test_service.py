@@ -126,6 +126,17 @@ async def test_private_notification_subscription_follows_active_membership(servi
 
 
 @pytest.mark.asyncio
+async def test_personal_collection_is_not_exposed_as_telegram_chat(service):
+    personal_id = await service.create_collection(0, "Личный подарок", "BYN", 1)
+
+    collection = await service.get_collection(personal_id)
+    chats = await service.list_user_collection_chats(1)
+
+    assert collection["chat_id"] == 0
+    assert all(row["chat_id"] != 0 for row in chats)
+
+
+@pytest.mark.asyncio
 async def test_cancel_removes_effect_but_keeps_history(service):
     collection_id = await make_collection(service)
     transaction_id = await service.add_expense(collection_id, 2, 1000, [1, 2], "Такси")
@@ -259,6 +270,10 @@ async def test_global_history_contains_transactions_and_collection_events(servic
     assert transactions[0]["collection_title"] == "Берлин"
     assert transactions[0]["amount"] == 1200
     assert {row["kind"] for row in events} >= {"created", "joined"}
+
+    collection_events = await service.collection_events(collection_id)
+    assert {row["kind"] for row in collection_events} >= {"created", "joined"}
+    assert all(row["actor_name"] for row in collection_events)
 
 
 def test_simplify_balances_is_deterministic_and_exact():

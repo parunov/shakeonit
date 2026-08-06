@@ -11,6 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
     ChatMemberUpdated,
+    ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InlineQuery,
@@ -343,8 +344,8 @@ async def new_collection(
             separator = "&" if "?" in settings.webapp_url else "?"
             create_url = f"{settings.webapp_url}{separator}intent=create"
             await message.answer(
-                "➕ <b>Новый сбор</b>\n\nОткройте форму создания. Если нужной группы "
-                "ещё нет в списке, приложение поможет добавить туда бота.",
+                "➕ <b>Новый сбор</b>\n\nОткройте форму создания. Сбор можно вести "
+                "в Telegram-группе или без группы — тогда уведомления будут приходить лично от бота.",
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
@@ -370,7 +371,15 @@ async def new_collection(
         return
     await state.set_state(CreateCollection.title)
     await state.update_data(chat_id=message.chat.id)
-    await message.answer("Как назовем сбор? Например: <b>Поездка в Берлин</b>", parse_mode="HTML")
+    await message.answer(
+        "Как назовем сбор? Например: <b>Поездка в Берлин</b>\n\n"
+        "Ответьте прямо на это сообщение — так бот увидит название при включённом Privacy Mode.",
+        parse_mode="HTML",
+        reply_markup=ForceReply(
+            selective=True,
+            input_field_placeholder="Название сбора",
+        ),
+    )
 
 
 @router.message(CreateCollection.title)
@@ -756,6 +765,21 @@ async def history(callback: CallbackQuery, service: BudgetService) -> None:
     participants = snapshot.participants
     active_count = sum(bool(row["active"]) for row in participants)
     text = history_text(collection, rows, snapshot.total, active_count)
+    member_events = [
+        row
+        for row in await service.collection_events(collection_id)
+        if row["kind"] in {"joined", "left", "member_removed"}
+    ]
+    if member_events:
+        text += "\n\n<b>Изменения участников</b>\n"
+        for event in member_events[:20]:
+            if event["kind"] == "joined":
+                action = "вступил в сбор"
+            elif event["kind"] == "left":
+                action = "вышел из сбора"
+            else:
+                action = f"удалил участника {escape(event['target_name'] or '')}"
+            text += f"\n• {event['created_at'][:16]} · {escape(event['actor_name'])} {action}"
     debts = snapshot.debts
     names = {row["id"]: user_label(row) for row in participants}
     text += "\n\n<b>Финальный список балансов</b>\n"

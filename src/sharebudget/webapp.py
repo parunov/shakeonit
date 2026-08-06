@@ -93,6 +93,7 @@ def _collection(row) -> dict:
     return {
         "id": row["id"],
         "chat_id": row["chat_id"],
+        "is_personal": row["chat_id"] == 0,
         "title": row["title"],
         "currency": row["currency"],
         "admin_id": row["admin_id"],
@@ -149,20 +150,23 @@ async def _report(
     exclude_user_ids=(),
     subscriber_reply_markup=None,
 ) -> tuple[bool, int]:
-    try:
-        await bot.send_message(
-            collection["chat_id"],
-            text,
-            parse_mode="HTML",
-            disable_notification=True,
-            reply_markup=reply_markup,
-        )
-        group_sent = True
-    except TelegramAPIError:
-        LOGGER.warning(
-            "Could not publish Mini App report to chat %s", collection["chat_id"], exc_info=True
-        )
-        group_sent = False
+    group_sent = False
+    if collection["chat_id"]:
+        try:
+            await bot.send_message(
+                collection["chat_id"],
+                text,
+                parse_mode="HTML",
+                disable_notification=True,
+                reply_markup=reply_markup,
+            )
+            group_sent = True
+        except TelegramAPIError:
+            LOGGER.warning(
+                "Could not publish Mini App report to chat %s",
+                collection["chat_id"],
+                exc_info=True,
+            )
     notifications_sent = await notify_subscribers(
         bot,
         service,
@@ -311,6 +315,7 @@ async def collection_details(request: web.Request) -> web.Response:
     collection = await _require_member(service, collection_id, user["id"])
     snapshot = await service.collection_snapshot(collection_id)
     history = await service.history(collection_id, 100)
+    events = await service.collection_events(collection_id, 200)
     shares = await service.expense_shares_for_transactions(
         row["id"] for row in history if row["kind"] == "expense"
     )
@@ -338,6 +343,7 @@ async def collection_details(request: web.Request) -> web.Response:
             "notifications_enabled": await service.notification_subscription(
                 collection_id, user["id"]
             ),
+            "events": [dict(row) for row in events],
             "history": [
                 {
                     "id": row["id"],
@@ -364,16 +370,30 @@ async def collection_details(request: web.Request) -> web.Response:
 async def create_collection(request: web.Request) -> web.Response:
     service, bot, user = _context(request)
     payload = await _json_body(request)
-    chat_id = _integer(payload, "chat_id", "Выберите группу")
+    raw_chat_id = payload.get("chat_id")
+    chat_id = (
+        0 if raw_chat_id in (None, "", 0, "0") else _integer(payload, "chat_id", "Выберите группу")
+    )
+    personal = chat_id == 0
     context_chat_id = parse_group_start_param(
         request[AUTH_KEY].get("start_param", ""), request.app[SETTINGS_KEY].bot_token
     )
-    if chat_id != context_chat_id and not await service.can_create_in_chat(user["id"], chat_id):
+    if (
+        not personal
+        and chat_id != context_chat_id
+        and not await service.can_create_in_chat(user["id"], chat_id)
+    ):
         raise ApiError("Сначала откройте меню бота в нужной группе", 403)
     collection_id = await service.create_collection(
         chat_id, str(payload.get("title", "")), str(payload.get("currency", "")), user["id"]
     )
     collection = await service.get_collection(collection_id)
+    notifications_enabled = False
+    if personal and payload.get("subscribe") is True:
+        await service.set_notification_subscription(collection_id, user["id"], True)
+        notifications_enabled = await _confirm_private_subscription(
+            bot, service, collection, user["id"]
+        )
     sent, notifications_sent = await _report(
         bot,
         service,
@@ -389,6 +409,7 @@ async def create_collection(request: web.Request) -> web.Response:
             "collection_id": collection_id,
             "report_sent": sent,
             "notifications_sent": notifications_sent,
+            "notifications_enabled": notifications_enabled,
         }
     )
 

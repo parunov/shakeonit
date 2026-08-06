@@ -205,7 +205,7 @@ class BudgetService:
                         ORDER BY c2.created_at DESC LIMIT 1) reference_title
                 FROM collections c
                 JOIN participants p ON p.collection_id=c.id
-                WHERE p.user_id=? AND p.active=1
+                WHERE p.user_id=? AND p.active=1 AND c.chat_id<>0
                 GROUP BY c.chat_id ORDER BY last_seen DESC
                 """,
                 (user_id, user_id),
@@ -599,6 +599,21 @@ class BudgetService:
                 (user_id, limit),
             )
         return transactions, events
+
+    async def collection_events(self, collection_id: int, limit: int = 200):
+        await self._collection(collection_id)
+        async with self.db.connect() as connection:
+            return await connection.execute_fetchall(
+                """
+                SELECT e.*,actor.full_name actor_name,target.full_name target_name
+                FROM collection_events e
+                JOIN users actor ON actor.id=e.actor_id
+                LEFT JOIN users target ON target.id=e.target_user_id
+                WHERE e.collection_id=?
+                ORDER BY e.created_at DESC,e.id DESC LIMIT ?
+                """,
+                (collection_id, limit),
+            )
 
     async def transaction(self, transaction_id: int):
         async with self.db.connect() as connection:

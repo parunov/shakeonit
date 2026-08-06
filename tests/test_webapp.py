@@ -225,3 +225,35 @@ async def test_join_can_enable_private_collection_notifications(tmp_path):
     assert payload["notifications_enabled"] is True
     assert await service.notification_subscription(collection_id, 2) is True
     assert bot.send_message.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_personal_collection_uses_bot_notifications_without_group(tmp_path):
+    database = Database(tmp_path / "personal-collection.db")
+    await database.initialize()
+    service = BudgetService(database)
+    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    application = web.Application()
+    setup_webapp_routes(application, bot, service, settings)
+    owner_auth = signed_init_data(user={"id": 7, "first_name": "Владелец"})
+
+    async with TestClient(TestServer(application)) as client:
+        response = await client.post(
+            "/api/collections",
+            json={"chat_id": 0, "title": "Без группы", "currency": "BYN", "subscribe": True},
+            headers={"X-Telegram-Init-Data": owner_auth},
+        )
+        payload = await response.json()
+        details = await client.get(
+            f"/api/collections/{payload['collection_id']}",
+            headers={"X-Telegram-Init-Data": owner_auth},
+        )
+        details_payload = await details.json()
+
+    assert response.status == 200
+    assert payload["report_sent"] is False
+    assert payload["notifications_enabled"] is True
+    assert details_payload["collection"]["is_personal"] is True
+    assert details_payload["events"][0]["kind"] == "created"
+    bot.send_message.assert_awaited_once()
