@@ -44,9 +44,6 @@ def test_main_menu_and_launch_button_expose_mini_app():
     menu_labels = [button.text for button in menu_buttons]
     launch = _buttons(webapp_launch("https://example.com/app"))[0]
 
-    assert menu_labels == [
-        "➕ Создать сбор",
-        "📱 Открыть приложение",
-    ]
+    assert menu_labels == ["📱 Открыть приложение"]
     assert all(button.web_app is None for button in menu_buttons)
     assert launch.web_app.url == "https://example.com/app"

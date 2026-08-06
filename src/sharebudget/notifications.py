@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Collection
 from html import escape
@@ -23,11 +24,14 @@ async def notify_subscribers(
 ) -> int:
     """Deliver a collection event to opted-in participants via private chat."""
     excluded = set(exclude_user_ids)
-    delivered = 0
-    for row in await service.notification_subscribers(collection["id"]):
+    subscribers = [
+        row
+        for row in await service.notification_subscribers(collection["id"])
+        if row["user_id"] not in excluded
+    ]
+
+    async def deliver(row) -> bool:
         user_id = row["user_id"]
-        if user_id in excluded:
-            continue
         try:
             await bot.send_message(
                 user_id,
@@ -36,7 +40,7 @@ async def notify_subscribers(
                 disable_notification=False,
                 reply_markup=reply_markup,
             )
-            delivered += 1
+            return True
         except TelegramForbiddenError:
             await service.set_notification_subscription(collection["id"], user_id, False)
             LOGGER.info("Disabled notifications after bot was blocked by user %s", user_id)
@@ -47,4 +51,61 @@ async def notify_subscribers(
                 collection["id"],
                 exc_info=True,
             )
+        return False
+
+    if not subscribers:
+        return 0
+    delivered = 0
+    batch_size = 20
+    for offset in range(0, len(subscribers), batch_size):
+        batch = subscribers[offset : offset + batch_size]
+        delivered += sum(await asyncio.gather(*(deliver(row) for row in batch)))
+        if offset + batch_size < len(subscribers):
+            await asyncio.sleep(1)
     return delivered
+
+
+async def report_collection_event(
+    bot: Bot,
+    service: BudgetService,
+    collection,
+    text: str,
+    reply_markup=None,
+    *,
+    exclude_user_ids: Collection[int] = (),
+    subscriber_reply_markup=None,
+) -> tuple[bool, int]:
+    """Publish an event to the linked group and opted-in private subscribers."""
+
+    async def send_to_group() -> bool:
+        if not collection["chat_id"]:
+            return False
+        try:
+            await bot.send_message(
+                collection["chat_id"],
+                f"🔔 <b>{escape(collection['title'])}</b>\n\n{text}",
+                parse_mode="HTML",
+                disable_notification=True,
+                reply_markup=reply_markup,
+            )
+            return True
+        except TelegramAPIError:
+            LOGGER.warning(
+                "Could not publish collection event to chat %s",
+                collection["chat_id"],
+                exc_info=True,
+            )
+            return False
+
+    group_sent, delivered = await asyncio.gather(
+        send_to_group(),
+        notify_subscribers(
+            bot,
+            service,
+            collection,
+            text,
+            exclude_user_ids=exclude_user_ids,
+            reply_markup=subscriber_reply_markup,
+        ),
+    )
+    return group_sent, delivered

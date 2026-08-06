@@ -23,7 +23,8 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, web
 from .config import Settings
 from .links import parse_group_start_param
 from .money import CURRENCIES, format_money, parse_amount
-from .notifications import notify_subscribers
+from .notifications import report_collection_event
+from .render import transaction_update_report
 from .service import BudgetService, DomainError
 
 LOGGER = logging.getLogger(__name__)
@@ -132,10 +133,10 @@ async def _member(service: BudgetService, collection_id: int, user_id: int):
 
 
 async def _require_member(service: BudgetService, collection_id: int, user_id: int):
-    collection = await service.get_collection(collection_id)
+    collection = await service.get_collection_for_member(collection_id, user_id)
     if not collection:
-        raise ApiError("Сбор не найден", 404)
-    if not await service.is_participant(collection_id, user_id):
+        if not await service.get_collection(collection_id):
+            raise ApiError("Сбор не найден", 404)
         raise ApiError("Этот сбор доступен только его участникам", 403)
     return collection
 
@@ -150,32 +151,15 @@ async def _report(
     exclude_user_ids=(),
     subscriber_reply_markup=None,
 ) -> tuple[bool, int]:
-    group_sent = False
-    if collection["chat_id"]:
-        try:
-            await bot.send_message(
-                collection["chat_id"],
-                text,
-                parse_mode="HTML",
-                disable_notification=True,
-                reply_markup=reply_markup,
-            )
-            group_sent = True
-        except TelegramAPIError:
-            LOGGER.warning(
-                "Could not publish Mini App report to chat %s",
-                collection["chat_id"],
-                exc_info=True,
-            )
-    notifications_sent = await notify_subscribers(
+    return await report_collection_event(
         bot,
         service,
         collection,
         text,
+        reply_markup,
         exclude_user_ids=exclude_user_ids,
-        reply_markup=subscriber_reply_markup,
+        subscriber_reply_markup=subscriber_reply_markup,
     )
-    return group_sent, notifications_sent
 
 
 async def _confirm_private_subscription(
@@ -219,9 +203,12 @@ def _collection_invite_markup(settings: Settings, collection_id: int) -> InlineK
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _full_name(user: dict) -> str:
+    return " ".join(part for part in (user.get("first_name"), user.get("last_name")) if part)
+
+
 def _name(user: dict) -> str:
-    full_name = " ".join(part for part in (user.get("first_name"), user.get("last_name")) if part)
-    return escape(full_name)
+    return escape(_full_name(user))
 
 
 @web.middleware
@@ -240,9 +227,12 @@ async def api_middleware(request: web.Request, handler):
         full_name = " ".join(
             part for part in (user.get("first_name"), user.get("last_name")) if part
         )
-        request[NEW_USER_KEY] = await request.app[SERVICE_KEY].upsert_user(
-            user["id"], user.get("username"), full_name, private_started=True
-        )
+        if request.path == "/api/sync":
+            request[NEW_USER_KEY] = False
+        else:
+            request[NEW_USER_KEY] = await request.app[SERVICE_KEY].upsert_user(
+                user["id"], user.get("username"), full_name, private_started=True
+            )
         return await handler(request)
     except (ApiError, DomainError, ValueError) as exc:
         status = exc.status if isinstance(exc, ApiError) else 400
@@ -305,6 +295,20 @@ async def bootstrap(request: web.Request) -> web.Response:
             "context_chat_id": context_chat_id,
             "bot_username": request.app[SETTINGS_KEY].bot_username.lstrip("@"),
             "main_app_enabled": request.app[SETTINGS_KEY].main_app_enabled,
+            "sync_version": await service.sync_token(user_id, context_chat_id),
+        }
+    )
+
+
+async def sync_status(request: web.Request) -> web.Response:
+    service, _, telegram_user = _context(request)
+    context_chat_id = parse_group_start_param(
+        request[AUTH_KEY].get("start_param", ""), request.app[SETTINGS_KEY].bot_token
+    )
+    return web.json_response(
+        {
+            "ok": True,
+            "sync_version": await service.sync_token(telegram_user["id"], context_chat_id),
         }
     )
 
@@ -313,12 +317,11 @@ async def collection_details(request: web.Request) -> web.Response:
     service, _, user = _context(request)
     collection_id = int(request.match_info["collection_id"])
     collection = await _require_member(service, collection_id, user["id"])
-    snapshot = await service.collection_snapshot(collection_id)
-    history = await service.history(collection_id, 100)
-    events = await service.collection_events(collection_id, 200)
-    shares = await service.expense_shares_for_transactions(
-        row["id"] for row in history if row["kind"] == "expense"
-    )
+    view = await service.collection_view(collection_id, user["id"])
+    snapshot = view.snapshot
+    history = view.history
+    events = view.events
+    shares = view.shares
     names = {row["id"]: row["full_name"] for row in snapshot.participants}
     return web.json_response(
         {
@@ -340,9 +343,7 @@ async def collection_details(request: web.Request) -> web.Response:
                 for debt in snapshot.debts
             ],
             "total": snapshot.total,
-            "notifications_enabled": await service.notification_subscription(
-                collection_id, user["id"]
-            ),
+            "notifications_enabled": view.notifications_enabled,
             "events": [dict(row) for row in events],
             "history": [
                 {
@@ -357,6 +358,7 @@ async def collection_details(request: web.Request) -> web.Response:
                     "status": row["status"],
                     "confirmation_status": row["confirmation_status"],
                     "confirmed_at": row["confirmed_at"],
+                    "cancelled_by": row["cancelled_by"],
                     "created_at": row["created_at"],
                     "shared_with": row["shared_with"],
                     "shares": shares.get(row["id"], []),
@@ -717,6 +719,11 @@ async def edit_transaction(request: web.Request) -> web.Response:
         if not isinstance(participants, list):
             raise ApiError("Выберите участников")
         participant_ids = [int(item) for item in participants]
+    before_shares = (
+        (await service.expense_shares_for_transactions([transaction_id])).get(transaction_id, [])
+        if transaction["kind"] == "expense"
+        else []
+    )
     await service.edit_transaction(
         transaction_id,
         user["id"],
@@ -724,17 +731,24 @@ async def edit_transaction(request: web.Request) -> web.Response:
         comment,
         participant_ids=participant_ids,
     )
-    distribution = (
-        f" · распределено на {len(set(participant_ids))} чел."
-        if transaction["kind"] == "expense" and participant_ids is not None
-        else ""
+    updated = await service.transaction(transaction_id)
+    after_shares = (
+        (await service.expense_shares_for_transactions([transaction_id])).get(transaction_id, [])
+        if transaction["kind"] == "expense"
+        else []
     )
     sent, notifications_sent = await _report(
         bot,
         service,
         collection,
-        f"✏️ {_name(user)} обновил транзакцию #{transaction_id}: "
-        f"<b>{format_money(amount, collection['currency'])}</b>{distribution}",
+        transaction_update_report(
+            _full_name(user),
+            collection,
+            transaction,
+            updated,
+            [row["full_name"] for row in before_shares],
+            [row["full_name"] for row in after_shares],
+        ),
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
@@ -959,6 +973,7 @@ def setup_webapp_routes(
     application.router.add_get("/app/", app_index)
     application.router.add_get("/app/static/{filename}", app_asset)
     application.router.add_get("/api/bootstrap", bootstrap)
+    application.router.add_get("/api/sync", sync_status)
     application.router.add_get("/api/history", global_history)
     application.router.add_get("/api/rates", exchange_rates)
     application.router.add_get("/api/collections/{collection_id}", collection_details)

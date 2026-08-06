@@ -27,6 +27,15 @@ class CollectionSnapshot:
     total: int
 
 
+@dataclass(frozen=True)
+class CollectionView:
+    snapshot: CollectionSnapshot
+    history: list
+    events: list
+    shares: dict[int, list[dict]]
+    notifications_enabled: bool
+
+
 async def _fetchone(connection, query: str, params=()):
     cursor = await connection.execute(query, params)
     return await cursor.fetchone()
@@ -43,25 +52,74 @@ class BudgetService:
         full_name: str,
         private_started: bool = False,
     ) -> bool:
+        normalized_username = username.lower() if username else None
         async with self.db.connect() as connection:
-            existing = await _fetchone(connection, "SELECT 1 FROM users WHERE id=?", (user_id,))
-            await connection.execute(
-                """
-                INSERT INTO users(id, username, full_name, private_started) VALUES (?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET username=excluded.username,
-                    full_name=excluded.full_name,
-                    private_started=MAX(users.private_started, excluded.private_started),
-                    updated_at=CURRENT_TIMESTAMP
-                """,
-                (
-                    user_id,
-                    username.lower() if username else None,
-                    full_name,
-                    int(private_started),
-                ),
+            existing = await _fetchone(
+                connection,
+                "SELECT username,full_name,private_started FROM users WHERE id=?",
+                (user_id,),
             )
+            if existing is not None:
+                if (
+                    existing["username"] == normalized_username
+                    and existing["full_name"] == full_name
+                    and (existing["private_started"] or not private_started)
+                ):
+                    return False
+                await connection.execute(
+                    """
+                    UPDATE users SET username=?,full_name=?,
+                        private_started=MAX(private_started,?),updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    """,
+                    (normalized_username, full_name, int(private_started), user_id),
+                )
+            else:
+                await connection.execute(
+                    "INSERT INTO users(id,username,full_name,private_started) VALUES (?,?,?,?)",
+                    (user_id, normalized_username, full_name, int(private_started)),
+                )
             await connection.commit()
             return existing is None
+
+    async def sync_token(self, user_id: int, context_chat_id: int | None = None) -> str:
+        """Return a compact version of data visible to one Mini App user."""
+        async with self.db.connect() as connection:
+            row = await _fetchone(
+                connection,
+                """
+                WITH visible(collection_id) AS (
+                    SELECT collection_id FROM participants WHERE user_id=?
+                    UNION
+                    SELECT id FROM collections WHERE chat_id=?
+                )
+                SELECT
+                    (SELECT COUNT(*) FROM collections c JOIN visible v ON v.collection_id=c.id)
+                        collection_count,
+                    (SELECT SUM(c.status='active') FROM collections c
+                        JOIN visible v ON v.collection_id=c.id) active_count,
+                    (SELECT SUM(c.status='archived') FROM collections c
+                        JOIN visible v ON v.collection_id=c.id) archived_count,
+                    (SELECT SUM(c.admin_id) FROM collections c
+                        JOIN visible v ON v.collection_id=c.id) admin_checksum,
+                    (SELECT MAX(t.id) FROM transactions t
+                        JOIN visible v ON v.collection_id=t.collection_id) transaction_id,
+                    (SELECT MAX(t.updated_at) FROM transactions t
+                        JOIN visible v ON v.collection_id=t.collection_id) transaction_updated,
+                    (SELECT MAX(e.id) FROM collection_events e
+                        JOIN visible v ON v.collection_id=e.collection_id) event_id,
+                    (SELECT COUNT(*) FROM participants p
+                        JOIN visible v ON v.collection_id=p.collection_id) participant_count,
+                    (SELECT SUM(p.active) FROM participants p
+                        JOIN visible v ON v.collection_id=p.collection_id) participant_active,
+                    (SELECT SUM(p.notifications_enabled) FROM participants p
+                        JOIN visible v ON v.collection_id=p.collection_id) notification_count,
+                    (SELECT MAX(u.updated_at) FROM users u JOIN participants p ON p.user_id=u.id
+                        JOIN visible v ON v.collection_id=p.collection_id) user_updated
+                """,
+                (user_id, context_chat_id),
+            )
+        return "|".join(str(value or "") for value in row)
 
     async def has_started_private_chat(self, user_id: int) -> bool:
         async with self.db.connect() as connection:
@@ -128,6 +186,21 @@ class BudgetService:
                 FROM collections c JOIN users u ON u.id=c.admin_id WHERE c.id=?
                 """,
                 (collection_id,),
+            )
+
+    async def get_collection_for_member(self, collection_id: int, user_id: int):
+        async with self.db.connect() as connection:
+            return await _fetchone(
+                connection,
+                """
+                SELECT c.*,u.full_name AS admin_name
+                FROM collections c
+                JOIN users u ON u.id=c.admin_id
+                JOIN participants p ON p.collection_id=c.id
+                    AND p.user_id=? AND p.active=1
+                WHERE c.id=?
+                """,
+                (user_id, collection_id),
             )
 
     async def list_collections(
@@ -342,49 +415,48 @@ class BudgetService:
                 (collection_id,),
             )
 
-    async def collection_snapshot(self, collection_id: int) -> CollectionSnapshot:
-        async with self.db.connect() as connection:
-            participants = await connection.execute_fetchall(
-                """
-                SELECT u.id,u.username,u.full_name,u.payment_details,p.joined_at,p.active,
-                       c.admin_id=u.id AS is_admin
-                FROM participants p JOIN users u ON u.id=p.user_id
-                JOIN collections c ON c.id=p.collection_id
-                WHERE p.collection_id=?
-                ORDER BY is_admin DESC,u.full_name
-                """,
-                (collection_id,),
-            )
-            ledger = await connection.execute_fetchall(
-                """
-                WITH ledger(user_id, delta) AS (
-                    SELECT creator_id, amount FROM transactions
-                    WHERE collection_id=? AND kind='expense' AND status='active'
-                    UNION ALL
-                    SELECT s.user_id, -s.amount FROM expense_shares s
-                    JOIN transactions t ON t.id=s.transaction_id
-                    WHERE t.collection_id=? AND t.status='active'
-                    UNION ALL
-                    SELECT creator_id, amount FROM transactions
-                    WHERE collection_id=? AND kind='repayment' AND status='active'
-                      AND confirmation_status='confirmed'
-                    UNION ALL
-                    SELECT counterparty_id, -amount FROM transactions
-                    WHERE collection_id=? AND kind='repayment' AND status='active'
-                      AND confirmation_status='confirmed'
-                )
-                SELECT user_id, SUM(delta) balance FROM ledger GROUP BY user_id
-                """,
-                (collection_id, collection_id, collection_id, collection_id),
-            )
-            total_row = await _fetchone(
-                connection,
-                """
-                SELECT COALESCE(SUM(amount),0) total FROM transactions
+    async def _snapshot_on(self, connection, collection_id: int) -> CollectionSnapshot:
+        participants = await connection.execute_fetchall(
+            """
+            SELECT u.id,u.username,u.full_name,u.payment_details,p.joined_at,p.active,
+                   c.admin_id=u.id AS is_admin
+            FROM participants p JOIN users u ON u.id=p.user_id
+            JOIN collections c ON c.id=p.collection_id
+            WHERE p.collection_id=?
+            ORDER BY is_admin DESC,u.full_name
+            """,
+            (collection_id,),
+        )
+        ledger = await connection.execute_fetchall(
+            """
+            WITH ledger(user_id, delta) AS (
+                SELECT creator_id, amount FROM transactions
                 WHERE collection_id=? AND kind='expense' AND status='active'
-                """,
-                (collection_id,),
+                UNION ALL
+                SELECT s.user_id, -s.amount FROM expense_shares s
+                JOIN transactions t ON t.id=s.transaction_id
+                WHERE t.collection_id=? AND t.status='active'
+                UNION ALL
+                SELECT creator_id, amount FROM transactions
+                WHERE collection_id=? AND kind='repayment' AND status='active'
+                  AND confirmation_status='confirmed'
+                UNION ALL
+                SELECT counterparty_id, -amount FROM transactions
+                WHERE collection_id=? AND kind='repayment' AND status='active'
+                  AND confirmation_status='confirmed'
             )
+            SELECT user_id, SUM(delta) balance FROM ledger GROUP BY user_id
+            """,
+            (collection_id, collection_id, collection_id, collection_id),
+        )
+        total_row = await _fetchone(
+            connection,
+            """
+            SELECT COALESCE(SUM(amount),0) total FROM transactions
+            WHERE collection_id=? AND kind='expense' AND status='active'
+            """,
+            (collection_id,),
+        )
         ledger_balances = {row["user_id"]: row["balance"] for row in ledger}
         participants = [
             row for row in participants if row["active"] or ledger_balances.get(row["id"], 0)
@@ -397,6 +469,73 @@ class BudgetService:
             balances=balances,
             debts=simplify_balances(balances),
             total=total_row["total"],
+        )
+
+    async def collection_snapshot(self, collection_id: int) -> CollectionSnapshot:
+        async with self.db.connect() as connection:
+            return await self._snapshot_on(connection, collection_id)
+
+    async def collection_view(
+        self, collection_id: int, user_id: int, history_limit: int = 100, events_limit: int = 200
+    ) -> CollectionView:
+        """Load the complete collection screen through one SQLite connection."""
+        async with self.db.connect() as connection:
+            snapshot = await self._snapshot_on(connection, collection_id)
+            history = await connection.execute_fetchall(
+                """
+                SELECT t.*, creator.full_name creator_name, creator.username creator_username,
+                    counterparty.full_name counterparty_name,
+                    (SELECT GROUP_CONCAT(u.full_name, ', ')
+                     FROM expense_shares s JOIN users u ON u.id=s.user_id
+                     WHERE s.transaction_id=t.id) shared_with
+                FROM transactions t
+                JOIN users creator ON creator.id=t.creator_id
+                LEFT JOIN users counterparty ON counterparty.id=t.counterparty_id
+                WHERE t.collection_id=?
+                ORDER BY t.created_at DESC,t.id DESC LIMIT ?
+                """,
+                (collection_id, history_limit),
+            )
+            events = await connection.execute_fetchall(
+                """
+                SELECT e.*,actor.full_name actor_name,target.full_name target_name
+                FROM collection_events e
+                JOIN users actor ON actor.id=e.actor_id
+                LEFT JOIN users target ON target.id=e.target_user_id
+                WHERE e.collection_id=?
+                ORDER BY e.created_at DESC,e.id DESC LIMIT ?
+                """,
+                (collection_id, events_limit),
+            )
+            subscription = await _fetchone(
+                connection,
+                """
+                SELECT notifications_enabled FROM participants
+                WHERE collection_id=? AND user_id=? AND active=1
+                """,
+                (collection_id, user_id),
+            )
+            expense_ids = [row["id"] for row in history if row["kind"] == "expense"]
+            shares: dict[int, list[dict]] = {}
+            if expense_ids:
+                placeholders = ",".join("?" for _ in expense_ids)
+                share_rows = await connection.execute_fetchall(
+                    f"""
+                    SELECT s.transaction_id,s.user_id,s.amount,u.full_name
+                    FROM expense_shares s JOIN users u ON u.id=s.user_id
+                    WHERE s.transaction_id IN ({placeholders})
+                    ORDER BY s.transaction_id,u.full_name,u.id
+                    """,
+                    expense_ids,
+                )
+                for row in share_rows:
+                    shares.setdefault(row["transaction_id"], []).append(dict(row))
+        return CollectionView(
+            snapshot=snapshot,
+            history=history,
+            events=events,
+            shares=shares,
+            notifications_enabled=bool(subscription and subscription["notifications_enabled"]),
         )
 
     async def add_expense(

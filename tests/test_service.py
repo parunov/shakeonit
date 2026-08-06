@@ -308,6 +308,20 @@ async def test_pending_repayments_cannot_overbook_debt(service):
 
 
 @pytest.mark.asyncio
+async def test_sync_token_changes_only_when_visible_data_changes(service):
+    collection_id = await make_collection(service)
+    initial = await service.sync_token(1)
+
+    await service.upsert_user(1, "anna", "Анна")
+    unchanged = await service.sync_token(1)
+    await service.add_expense(collection_id, 1, 1000, [1, 2], "Такси")
+    changed = await service.sync_token(1)
+
+    assert unchanged == initial
+    assert changed != initial
+
+
+@pytest.mark.asyncio
 async def test_expense_share_breakdown_is_exact(service):
     collection_id = await make_collection(service)
     transaction_id = await service.add_expense(collection_id, 1, 1001, [3, 1, 2], "Билеты")

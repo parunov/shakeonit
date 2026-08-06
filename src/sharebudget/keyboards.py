@@ -16,13 +16,12 @@ def main_menu() -> ReplyKeyboardMarkup:
     # Reply-keyboard Mini Apps do not receive authenticated user data from Telegram.
     # Plain text buttons route through the bot, which returns an authenticated
     # InlineKeyboardButton with WebAppInfo.
-    create = KeyboardButton(text="➕ Создать сбор")
     app = KeyboardButton(text="📱 Открыть приложение")
     return ReplyKeyboardMarkup(
-        keyboard=[[create], [app]],
+        keyboard=[[app]],
         resize_keyboard=True,
         is_persistent=True,
-        input_field_placeholder="Создать сбор или открыть приложение",
+        input_field_placeholder="Открыть приложение ShakeOnIt",
     )
 
 

@@ -127,6 +127,15 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert payload["user"]["preferred_currency"] == "BYN"
         assert payload["main_app_enabled"] is False
         assert payload["is_new_user"] is True
+        assert payload["sync_version"]
+
+        sync = await client.get(
+            "/api/sync",
+            headers={"X-Telegram-Init-Data": signed_init_data()},
+        )
+        sync_payload = await sync.json()
+        assert sync.status == 200
+        assert sync_payload["sync_version"] == payload["sync_version"]
 
         currency = await client.patch(
             "/api/me/currency",
@@ -245,6 +254,12 @@ async def test_edit_expense_api_replaces_participants(tmp_path):
         (2, 501),
         (3, 500),
     ]
+    report = bot.send_message.await_args_list[0].args[1]
+    assert "Поездка" in report
+    assert "Было:" in report and "Стало:" in report
+    assert "Ужин" in report and "Поздний ужин" in report
+    assert "Организатор" in report and "Анна" in report and "Максим" in report
+    assert f"#{transaction_id}" not in report
 
 
 @pytest.mark.asyncio
@@ -296,6 +311,7 @@ async def test_repayment_can_be_confirmed_from_global_history(tmp_path):
     confirmation_message = bot.send_message.await_args_list[0].args[1]
     assert "Отправитель" in confirmation_message
     assert "За билеты" in confirmation_message
+    assert "Поездка" in confirmation_message
     assert f"#{repayment_id}" not in confirmation_message
 
 
@@ -350,6 +366,7 @@ async def test_repayment_notification_can_be_rejected_by_recipient(tmp_path):
     assert created.status == 200
     assert "От: Отправитель" in private_message
     assert "Комментарий: Перевод на карту" in private_message
+    assert "Сбор: Поездка" in private_message
     assert f"#{repayment_id}" not in private_message
     assert callbacks == {f"repayconfirm:{repayment_id}", f"repayreject:{repayment_id}"}
     assert rejected.status == 200

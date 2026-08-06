@@ -10,6 +10,8 @@ const sheet = document.getElementById("sheet");
 const toastNode = document.getElementById("toast");
 const botUsername = document.querySelector('meta[name="telegram-bot-username"]')?.content;
 const launchParams = new URLSearchParams(window.location.search);
+const moneyFormatters = new Map();
+const dateFormatter = new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 
 const state = {
   bootstrap: null,
@@ -19,6 +21,10 @@ const state = {
   details: new Map(),
   nav: "collections",
   busy: false,
+  syncVersion: null,
+  syncTimer: null,
+  lastSyncCheck: 0,
+  refreshInFlight: false,
   launchIntent: launchParams.get("intent")
     || launchParams.get("tgWebAppStartParam")
     || tg?.initDataUnsafe?.start_param,
@@ -32,11 +38,14 @@ const e = (value) => String(value ?? "")
   .replaceAll("'", "&#039;");
 
 function money(amount, currency) {
-  return new Intl.NumberFormat("ru-RU", {
-    style: "currency",
-    currency,
-    minimumFractionDigits: 2,
-  }).format((amount || 0) / 100);
+  if (!moneyFormatters.has(currency)) {
+    moneyFormatters.set(currency, new Intl.NumberFormat("ru-RU", {
+      style: "currency",
+      currency,
+      minimumFractionDigits: 2,
+    }));
+  }
+  return moneyFormatters.get(currency).format((amount || 0) / 100);
 }
 
 function balanceStatus(amount) {
@@ -51,7 +60,7 @@ function shortDate(value) {
   const date = new Date(normalized);
   return Number.isNaN(date.getTime())
     ? value.slice(0, 16)
-    : new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).format(date);
+    : dateFormatter.format(date);
 }
 
 function haptic(type = "light") {
@@ -69,6 +78,7 @@ function toast(message, isError = false) {
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
+    cache: "no-store",
     headers: {
       "Content-Type": "application/json",
       "X-Telegram-Init-Data": tg?.initData || "",
@@ -116,6 +126,7 @@ function reportToast(result, fallback = "Готово") {
 
 async function reloadBootstrap() {
   state.bootstrap = await api("/api/bootstrap");
+  state.syncVersion = state.bootstrap.sync_version;
   state.details.clear();
   const initials = state.bootstrap.user.full_name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2);
   avatar.textContent = initials || "S";
@@ -461,6 +472,42 @@ async function refreshCurrent(tab = state.collectionTab) {
   if (state.collection) await openCollection(state.collection.collection.id, tab, true);
 }
 
+async function refreshVisibleView() {
+  const collectionId = state.collection?.collection?.id;
+  const collectionTab = state.collectionTab;
+  await reloadBootstrap();
+  if (collectionId) return await openCollection(collectionId, collectionTab, true);
+  if (state.nav === "history") return await renderHistory();
+  if (state.nav === "balance") return await renderBalance();
+  if (state.nav === "profile") return renderProfile();
+  return renderCollections();
+}
+
+async function checkForUpdates(force = false) {
+  if (!state.bootstrap || state.refreshInFlight || state.busy || !sheetLayer.hidden) return;
+  if (document.visibilityState !== "visible") return;
+  const now = Date.now();
+  if (!force && now - state.lastSyncCheck < 5000) return;
+  state.lastSyncCheck = now;
+  state.refreshInFlight = true;
+  try {
+    const result = await api("/api/sync");
+    if (result.sync_version !== state.syncVersion) await refreshVisibleView();
+  } catch (error) {
+    console.debug("Background sync postponed", error);
+  } finally {
+    state.refreshInFlight = false;
+  }
+}
+
+function scheduleSync() {
+  clearTimeout(state.syncTimer);
+  state.syncTimer = setTimeout(async () => {
+    await checkForUpdates();
+    scheduleSync();
+  }, 20000);
+}
+
 app.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-action]");
   if (!target || state.busy) return;
@@ -749,11 +796,17 @@ async function init() {
     } else {
       await continueAfterWelcome();
     }
+    scheduleSync();
   } catch (error) {
     nav.hidden = true;
     app.innerHTML = `<section class="auth-error"><span class="empty-icon">↻</span><h2>Не удалось открыть приложение</h2><p class="row-note">${e(error.message)}</p><div class="sheet-actions"><button class="primary-button" type="button" id="retry">Попробовать снова</button></div></section>`;
     document.getElementById("retry")?.addEventListener("click", () => window.location.reload());
   }
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") checkForUpdates(true);
+});
+window.addEventListener("focus", () => checkForUpdates(true));
 
 init();

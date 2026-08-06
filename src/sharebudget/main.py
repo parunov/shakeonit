@@ -113,7 +113,6 @@ async def main() -> None:
     dispatcher.include_router(router)
     await bot.set_my_commands(
         [
-            BotCommand(command="new", description="Создать сбор в группе"),
             BotCommand(command="app", description="Открыть приложение"),
         ]
     )

@@ -10,6 +10,34 @@ def user_label(row) -> str:
     return f"{escape(row['full_name'])}{username}"
 
 
+def transaction_update_report(
+    actor_name: str,
+    collection,
+    before,
+    after,
+    before_participants=(),
+    after_participants=(),
+) -> str:
+    """Render a concrete audit message without exposing an internal transaction id."""
+
+    def state_text(transaction, participant_names) -> str:
+        comment = escape(transaction["comment"]) if transaction["comment"] else "без комментария"
+        parts = [f"<b>{format_money(transaction['amount'], collection['currency'])}</b>"]
+        parts.append(f"комментарий: {comment}")
+        if transaction["kind"] == "expense":
+            names = ", ".join(escape(name) for name in participant_names) or "не выбраны"
+            parts.append(f"участники: {names}")
+        return " · ".join(parts)
+
+    kind = "затрату" if before["kind"] == "expense" else "возврат долга"
+    return (
+        f"✏️ {escape(actor_name)} изменил {kind} по сбору "
+        f"<b>«{escape(collection['title'])}»</b>.\n"
+        f"Было: {state_text(before, before_participants)}\n"
+        f"Стало: {state_text(after, after_participants)}"
+    )
+
+
 async def collection_text(service, collection) -> str:
     snapshot = await service.collection_snapshot(collection["id"])
     participants = snapshot.participants
