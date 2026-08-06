@@ -30,6 +30,8 @@ const state = {
   globalHistory: null,
   collectionHistoryLimit: 20,
   collectionEventsLimit: 20,
+  viewStack: [],
+  swipeStart: null,
   launchIntent: launchParams.get("intent")
     || launchParams.get("tgWebAppStartParam")
     || tg?.initDataUnsafe?.start_param,
@@ -251,17 +253,24 @@ function paintBalance() {
   const netLabel = convertedTotal === null ? originalLabel : `${convertedTotal >= 0 ? "+" : "−"}${money(Math.abs(convertedTotal), preferred)}`;
   const personal = data.personal_debts.map((debt) => {
     const iOwe = debt.debtor_id === state.bootstrap.user.id;
-    const label = iOwe
-      ? `Вы должны ${userLink(debt.creditor_id, debt.creditor_name, debt.creditor_username)}`
-      : `${userLink(debt.debtor_id, debt.debtor_name, debt.debtor_username)} должен(а) вам`;
-    return `<div class="card personal-debt"><span><b>${label}</b><button class="collection-link" type="button" data-action="open-collection" data-id="${debt.collection_id}">Сбор «${e(debt.collection_title)}»</button></span><strong class="${iOwe ? "negative" : "positive"}">${money(debt.amount, debt.currency)}</strong></div>`;
+    const personId = iOwe ? debt.creditor_id : debt.debtor_id;
+    const personName = iOwe ? debt.creditor_name : debt.debtor_name;
+    const personUsername = iOwe ? debt.creditor_username : debt.debtor_username;
+    const initials = String(personName || "?").split(/\s+/).map((part) => part[0]).join("").slice(0, 2);
+    return `<article class="personal-settlement ${iOwe ? "outgoing" : "incoming"}">
+      <span class="person-avatar">${e(initials)}</span>
+      <span class="personal-settlement-main"><small>${iOwe ? "Вы должны" : "Вам должен(а)"}</small><b>${userLink(personId, personName, personUsername)}</b><button class="collection-link" type="button" data-action="open-collection" data-id="${debt.collection_id}">${e(debt.collection_title)}</button></span>
+      <span class="personal-settlement-side"><strong class="${iOwe ? "negative" : "positive"}">${money(debt.amount, debt.currency)}</strong>${iOwe ? `<button class="pay-small" type="button" data-action="quick-repay" data-collection-id="${debt.collection_id}" data-creditor-id="${debt.creditor_id}">Оплатить</button>` : ""}</span>
+    </article>`;
   }).join("");
+  const quickPayments = quickPaymentRows(data.personal_debts);
   app.innerHTML = `
     <section class="hero">
       <div class="hero-label">ОБЩИЙ БАЛАНС · ${e(preferred)}</div>
       <div class="hero-value">${netLabel}</div>
       <div class="hero-meta">${data.exchange ? `≈ по официальному курсу НБРБ · ${e(originalLabel)}` : "По активным сборам · без конвертации"}</div>
     </section>
+    ${quickPayments ? `<section class="quick-pay-block"><div class="quick-pay-heading"><span>↗</span><div><b>Быстрая оплата</b><small>Погасить долг без лишних шагов</small></div></div>${quickPayments}</section>` : ""}
     <div class="segmented"><button type="button" data-action="balance-mode" data-mode="collections" class="${state.balanceMode === "collections" ? "active" : ""}">По сборам</button><button type="button" data-action="balance-mode" data-mode="personal" class="${state.balanceMode === "personal" ? "active" : ""}">Персональный</button></div>
     ${state.balanceMode === "collections"
     ? (cards.length ? `<div class="card-list">${cards.join("")}</div>` : empty("✅", "Активных долгов нет"))
@@ -292,10 +301,10 @@ function renderProfile() {
   updateNav();
 }
 
-function quickPaymentRows(debts, compact = false) {
+function quickPaymentRows(debts) {
   const mine = (debts || []).filter((debt) => debt.debtor_id === state.bootstrap.user.id);
   if (!mine.length) return "";
-  return `<div class="quick-payments ${compact ? "compact" : ""}">${mine.map((debt) => `<div class="quick-payment"><span><small>Вернуть</small><b>${userLink(debt.creditor_id, debt.creditor_name, debt.creditor_username)}</b><em>${money(debt.amount, debt.currency)} · ${e(debt.collection_title || "")}</em></span><button type="button" data-action="quick-repay" data-collection-id="${debt.collection_id}" data-creditor-id="${debt.creditor_id}">Оплатить</button></div>`).join("")}</div>`;
+  return `<div class="quick-payments">${mine.map((debt) => `<div class="quick-payment"><span><b>${userLink(debt.creditor_id, debt.creditor_name, debt.creditor_username)}</b><em>${e(debt.collection_title || "")} · ${money(debt.amount, debt.currency)}</em></span><button type="button" data-action="quick-repay" data-collection-id="${debt.collection_id}" data-creditor-id="${debt.creditor_id}">Оплатить</button></div>`).join("")}</div>`;
 }
 
 async function renderHistory(loadKind = null) {
@@ -309,14 +318,7 @@ async function renderHistory(loadKind = null) {
   const transactionOffset = loadKind === "transactions" ? current.transactions.length : 0;
   const eventOffset = loadKind === "events" ? current.events.length : 0;
   let page;
-  if (!loadKind && !state.balanceData) {
-    [page, state.balanceData] = await Promise.all([
-      api(`/api/history?transaction_offset=${transactionOffset}&event_offset=${eventOffset}`),
-      api("/api/balance"),
-    ]);
-  } else {
-    page = await api(`/api/history?transaction_offset=${transactionOffset}&event_offset=${eventOffset}`);
-  }
+  page = await api(`/api/history?transaction_offset=${transactionOffset}&event_offset=${eventOffset}`);
   if (!loadKind) {
     state.globalHistory = page;
   } else if (loadKind === "transactions") {
@@ -349,8 +351,7 @@ async function renderHistory(loadKind = null) {
     return `<article class="history-row"><div class="row-between"><div><div class="row-title history-collection-title"><span>${item.kind === "expense" ? "💸" : "🤝"}</span>${collectionTitle}</div><div class="row-note">${userLink(item.creator_id, item.creator_name, item.creator_username)} · ${shortDate(item.created_at)}</div></div><div class="amount">${money(item.amount, item.currency)}</div></div><div class="row-note">${description} ${status}</div>${shares}${actions}</article>`;
   }).join("");
   const events = data.events.map((item) => `<article class="history-row"><div class="row-title">${item.is_participant ? `<button class="collection-link" type="button" data-action="open-collection" data-id="${item.collection_id}">${e(item.collection_title)}</button>` : e(item.collection_title)}</div><div class="row-note">${shortDate(item.created_at)} · ${userLink(item.actor_id, item.actor_name, item.actor_username)} ${e(eventLabels[item.kind] || item.kind)}${item.target_name && item.target_name !== item.actor_name ? ` · ${userLink(item.target_user_id, item.target_name, item.target_username)}` : ""}</div></article>`).join("");
-  const quickPayments = quickPaymentRows(state.balanceData?.personal_debts);
-  app.innerHTML = `<section class="hero"><div class="hero-label">МОИ ЗАТРАТЫ С НАЧАЛА МЕСЯЦА</div><div class="hero-value">${moneyMap(data.expense_stats.monthly_by_currency)}</div><div class="hero-meta">${data.expense_stats.monthly_count} операций</div></section>${quickPayments ? `<div class="section-head"><h2>Быстрая оплата</h2></div>${quickPayments}` : ""}<button class="statistics-button" type="button" data-action="expense-statistics"><span>📊</span><span><b>Статистика моих затрат</b><small>По валютам и сборам</small></span><i>›</i></button><div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}${data.transaction_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="transactions">Загрузить ещё</button>' : ""}<div class="section-head"><h2>История сборов</h2></div>${events ? `<div class="card">${events}</div>` : empty("🧾", "Событий пока нет")}${data.event_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="events">Загрузить ещё</button>' : ""}`;
+  app.innerHTML = `<section class="hero"><div class="hero-label">МОИ ЗАТРАТЫ С НАЧАЛА МЕСЯЦА</div><div class="hero-value">${moneyMap(data.expense_stats.monthly_by_currency)}</div><div class="hero-meta">${data.expense_stats.monthly_count} операций</div></section><button class="statistics-button" type="button" data-action="expense-statistics"><span>📊</span><span><b>Статистика моих затрат</b><small>По валютам и сборам</small></span><i>›</i></button><div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}${data.transaction_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="transactions">Загрузить ещё</button>' : ""}<div class="section-head"><h2>История сборов</h2></div>${events ? `<div class="card">${events}</div>` : empty("🧾", "Событий пока нет")}${data.event_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="events">Загрузить ещё</button>' : ""}`;
 }
 
 function expenseStatisticsSheet() {
@@ -487,7 +488,7 @@ function renderCollectionPanel(data, isAdmin) {
     };
     const events = data.events.map((item) => `<article class="history-row"><div class="row-title">${shortDate(item.created_at)} · ${userLink(item.actor_id, item.actor_name, item.actor_username)} ${e(eventLabels[item.kind] || item.kind)}</div>${item.target_name && item.target_name !== item.actor_name ? `<div class="row-note">Участник: ${userLink(item.target_user_id, item.target_name, item.target_username)}</div>` : ""}</article>`).join("");
     if (!transactions && !events) return empty("📜", "История пока пуста");
-    return `${quickPaymentRows(data.debts.map((debt) => ({ ...debt, collection_id: collection.id, collection_title: collection.title, currency: collection.currency })), true)}<div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}${data.history_has_more ? '<button class="load-more" type="button" data-action="load-collection-history" data-kind="transactions">Загрузить ещё</button>' : ""}<div class="section-head"><h2>Участники и сбор</h2></div>${events ? `<div class="card">${events}</div>` : empty("👥", "Событий пока нет")}${data.events_has_more ? '<button class="load-more" type="button" data-action="load-collection-history" data-kind="events">Загрузить ещё</button>' : ""}`;
+    return `<div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}${data.history_has_more ? '<button class="load-more" type="button" data-action="load-collection-history" data-kind="transactions">Загрузить ещё</button>' : ""}<div class="section-head"><h2>Участники и сбор</h2></div>${events ? `<div class="card">${events}</div>` : empty("👥", "Событий пока нет")}${data.events_has_more ? '<button class="load-more" type="button" data-action="load-collection-history" data-kind="events">Загрузить ещё</button>' : ""}`;
   }
   if (state.collectionTab === "members") {
     const invite = collection.status === "active" ? `<button class="invite-button" type="button" data-action="share-invite">👥<span><b>Пригласить друзей</b><small>Выбрать человека или Telegram-группу</small></span><i>›</i></button>` : "";
@@ -498,19 +499,32 @@ function renderCollectionPanel(data, isAdmin) {
   return `<div class="card member-row"><div class="row-title">Администратор сбора</div><div class="row-note">Передача роли и удаление участников доступны только при соблюдении балансов.</div></div><div class="sheet-actions">${collection.status === "active" ? '<button class="secondary-button" type="button" data-action="transfer">Передать администратора</button><button class="secondary-button" type="button" data-action="remove-member">Удалить участника</button><button class="danger-button" type="button" data-action="archive">Завершить и архивировать</button>' : '<button class="primary-button" type="button" data-action="restore">Восстановить сбор</button><button class="danger-button" type="button" data-action="delete-collection">Удалить сбор навсегда</button>'}</div>`;
 }
 
-function shareCollection(collection) {
+async function shareCollection(collection) {
+  haptic();
+  if (tg?.shareMessage) {
+    const prepared = await api(`/api/collections/${collection.id}/prepare-share`, {
+      method: "POST",
+      body: "{}",
+    });
+    return await new Promise((resolve) => {
+      tg.shareMessage(prepared.prepared_message_id, (shared) => {
+        if (shared) toast("Приглашение отправлено");
+        resolve(Boolean(shared));
+      });
+    });
+  }
   const inviteUrl = state.bootstrap.main_app_enabled
     ? `https://t.me/${state.bootstrap.bot_username}?startapp=collection_${collection.id}&mode=compact`
     : `https://t.me/${state.bootstrap.bot_username}?start=collection_${collection.id}`;
-  const inviteText = `Присоединяйся к сбору «${collection.title}» в ShakeOnIt.`;
+  const inviteText = `Присоединяйтесь к сбору «${collection.title}» в ShakeOnIt — расходы и расчёты будут понятны всем участникам.`;
   const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(inviteUrl)}&text=${encodeURIComponent(inviteText)}`;
-  haptic();
   if (tg?.openTelegramLink) tg.openTelegramLink(shareUrl);
   else window.location.href = shareUrl;
+  return true;
 }
 
 function createdCollectionInviteSheet(collection) {
-  showSheet(`<div class="success-mark">✓</div><h2>Сбор создан</h2><p class="sheet-intro">Сразу пригласите друзей — Telegram предложит выбрать человека или группу. Это окно показывается только сейчас.</p><div class="created-collection"><b>${e(collection.title)}</b><span>${e(collection.currency)}</span></div><div class="sheet-actions"><button class="primary-button" type="button" data-action="share-created">👥 Поделиться ссылкой</button><button class="secondary-button" type="button" data-action="close-sheet">Не сейчас</button></div>`);
+  showSheet(`<div class="success-mark">✓</div><h2>Сбор готов</h2><p class="sheet-intro">Пригласите сразу несколько друзей или групп. Позже приглашение всегда будет доступно во вкладке «Люди» внутри сбора.</p><div class="created-collection"><b>${e(collection.title)}</b><span>${e(collection.currency)}</span></div><div class="sheet-actions"><button class="primary-button" type="button" data-action="share-created">👥 Выбрать людей и группы</button><button class="secondary-button" type="button" data-action="close-sheet">Продолжить без приглашения</button></div>`);
 }
 
 function createSheet() {
@@ -529,9 +543,9 @@ function expenseSheet() {
 
 function repaySheet(preferredCreditorId = null) {
   const data = state.collection;
-  const debts = data.debts.filter((debt) => debt.debtor_id === state.bootstrap.user.id);
+  const debts = data.debts.filter((debt) => debt.debtor_id === state.bootstrap.user.id && debt.repayable_amount > 0);
   if (!debts.length) {
-    toast("По текущему балансу у вас нет долгов");
+    toast("Свободного остатка нет: долг уже возвращён или ожидает подтверждения");
     return;
   }
   const selectedIndex = Math.max(0, debts.findIndex((debt) => debt.creditor_id === Number(preferredCreditorId)));
@@ -539,9 +553,24 @@ function repaySheet(preferredCreditorId = null) {
     const member = data.participants.find((item) => item.id === debt.creditor_id);
     const payment = member?.payment_details || "Получатель пока не добавил(а) платежные данные";
     const bank = member?.bank_name ? `<span class="row-note">Банк: ${e(member.bank_name)}</span><br>` : "";
-    return `<div class="payment-card" data-payment="${debt.creditor_id}" ${index === selectedIndex ? "" : "hidden"}><b>💳 Данные для перевода · ${userLink(member?.id, member?.full_name, member?.username)}</b><br>${bank}${e(payment)}</div>`;
+    return `<div class="payment-card" data-payment="${debt.creditor_id}" ${index === selectedIndex ? "" : "hidden"}><div class="payment-card-head"><b>💳 Данные для перевода · ${userLink(member?.id, member?.full_name, member?.username)}</b><button class="copy-payment" type="button" data-action="copy-payment" data-value="${encodeURIComponent(payment)}">Копировать</button></div>${bank}<span class="payment-value">${e(payment)}</span></div>`;
   }).join("");
-  showSheet(`<h2>Вернуть долг</h2><p class="sheet-intro">После записи получатель должен(а) подтвердить деньги. До этого баланс не изменится.</p><form id="repay-form"><label class="field"><span>Получатель</span><select name="creditor_id" data-action="repay-creditor">${debts.map((debt, index) => `<option value="${debt.creditor_id}" data-max="${debt.amount}" ${index === selectedIndex ? "selected" : ""}>${e(debt.creditor_name)} · до ${money(debt.amount, data.collection.currency)}</option>`).join("")}</select></label>${cards}<label class="field"><span>Переведено · ${e(data.collection.currency)}</span><span class="amount-input"><input name="amount" inputmode="decimal" placeholder="0,00" required><button type="button" data-action="repay-max">MAX</button></span></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" placeholder="Необязательно"></label><div class="sheet-actions"><button class="primary-button" type="submit">Отправить на подтверждение</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+  showSheet(`<h2>Вернуть долг</h2><p class="sheet-intro">После записи получатель должен(а) подтвердить деньги. До этого баланс не изменится.</p><form id="repay-form"><label class="field"><span>Получатель</span><select name="creditor_id" data-action="repay-creditor">${debts.map((debt, index) => `<option value="${debt.creditor_id}" data-max="${debt.repayable_amount}" ${index === selectedIndex ? "selected" : ""}>${e(debt.creditor_name)} · доступно ${money(debt.repayable_amount, data.collection.currency)}</option>`).join("")}</select></label>${cards}<label class="field"><span>Переведено · ${e(data.collection.currency)}</span><span class="amount-input"><input name="amount" inputmode="decimal" placeholder="0,00" required><button type="button" data-action="repay-max">MAX</button></span></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" placeholder="Необязательно"></label><div class="sheet-actions"><button class="primary-button" type="submit">Отправить на подтверждение</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+}
+
+async function copyText(value) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const node = document.createElement("textarea");
+  node.value = value;
+  node.style.position = "fixed";
+  node.style.opacity = "0";
+  document.body.append(node);
+  node.select();
+  document.execCommand("copy");
+  node.remove();
 }
 
 function editSheet(transactionId, collectionData = state.collection, returnTo = "collection") {
@@ -618,6 +647,40 @@ async function checkForUpdates(force = false) {
   }
 }
 
+function rememberView(nextView) {
+  if (!state.collection && state.nav !== nextView) {
+    if (state.viewStack[state.viewStack.length - 1] !== state.nav) state.viewStack.push(state.nav);
+    if (state.viewStack.length > 12) state.viewStack.shift();
+  }
+}
+
+async function renderTopLevel(view) {
+  if (view === "balance") return await renderBalance();
+  if (view === "history") return await renderHistory();
+  if (view === "profile") return renderProfile();
+  return await renderCollections();
+}
+
+async function navigateBack(closeAtRoot = false) {
+  if (!sheetLayer.hidden) {
+    closeSheet();
+    return true;
+  }
+  if (state.collection) {
+    const returnTo = state.collectionReturn;
+    state.collection = null;
+    await renderTopLevel(returnTo);
+    return true;
+  }
+  const previous = state.viewStack.pop();
+  if (previous) {
+    await renderTopLevel(previous);
+    return true;
+  }
+  if (closeAtRoot) tg?.close();
+  return false;
+}
+
 function scheduleSync() {
   clearTimeout(state.syncTimer);
   state.syncTimer = setTimeout(async () => {
@@ -636,6 +699,7 @@ app.addEventListener("click", async (event) => {
       return;
     }
     if (action === "collections-summary") {
+      rememberView("balance");
       state.balanceMode = "personal";
       return await renderBalance();
     }
@@ -710,7 +774,7 @@ app.addEventListener("click", async (event) => {
       return await openCollection(id, state.collectionTab, true);
     }
     if (action === "share-invite") {
-      shareCollection(state.collection.collection);
+      await shareCollection(state.collection.collection);
       return;
     }
     if (action === "transfer" || action === "remove-member") return memberActionSheet(action === "transfer" ? "transfer" : "remove");
@@ -808,8 +872,18 @@ sheet.addEventListener("click", async (event) => {
   if (target.dataset.action === "close-sheet") closeSheet();
   if (target.dataset.action === "share-created") {
     const collection = state.collection?.collection;
+    if (collection) await shareCollection(collection);
     closeSheet();
-    if (collection) shareCollection(collection);
+    return;
+  }
+  if (target.dataset.action === "copy-payment") {
+    try {
+      await copyText(decodeURIComponent(target.dataset.value || ""));
+      haptic();
+      toast("Платёжные реквизиты скопированы");
+    } catch (error) {
+      toast("Не удалось скопировать реквизиты", true);
+    }
     return;
   }
   if (target.dataset.action === "repay-max") {
@@ -921,6 +995,7 @@ nav.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-nav]");
   if (!button || state.busy) return;
   try {
+    rememberView(button.dataset.nav);
     if (button.dataset.nav === "collections") await renderCollections();
     if (button.dataset.nav === "balance") await renderBalance();
     if (button.dataset.nav === "history") await renderHistory();
@@ -928,16 +1003,32 @@ nav.addEventListener("click", async (event) => {
   } catch (error) { toast(error.message, true); }
 });
 
-avatar.addEventListener("click", renderProfile);
-document.getElementById("sheet-backdrop").addEventListener("click", closeSheet);
-tg?.BackButton?.onClick(async () => {
-  if (!state.collection) return tg.close();
-  const returnTo = state.collectionReturn;
-  state.collection = null;
-  if (returnTo === "history") return await renderHistory();
-  if (returnTo === "balance") return await renderBalance();
-  return renderCollections();
+avatar.addEventListener("click", () => {
+  rememberView("profile");
+  renderProfile();
 });
+document.getElementById("sheet-backdrop").addEventListener("click", closeSheet);
+tg?.BackButton?.onClick(() => navigateBack(true));
+
+document.addEventListener("touchstart", (event) => {
+  const touch = event.changedTouches[0];
+  if (!touch || touch.clientX > 28 || event.target.closest("input, textarea, select")) return;
+  state.swipeStart = { x: touch.clientX, y: touch.clientY, at: performance.now() };
+}, { passive: true });
+
+document.addEventListener("touchend", async (event) => {
+  const start = state.swipeStart;
+  state.swipeStart = null;
+  if (!start) return;
+  const touch = event.changedTouches[0];
+  if (!touch) return;
+  const dx = touch.clientX - start.x;
+  const dy = Math.abs(touch.clientY - start.y);
+  if (dx >= 72 && dy <= 64 && performance.now() - start.at <= 700) {
+    haptic();
+    await navigateBack(false);
+  }
+}, { passive: true });
 
 async function init() {
   tg?.ready();

@@ -57,6 +57,7 @@ window.Telegram = {{ WebApp: {{
   requestWriteAccess(callback) {{ callback(true); }},
   showConfirm(message, callback) {{ window.__lastConfirm = message; callback(true); }},
   openTelegramLink(url) {{ window.__lastTelegramLink = url; }},
+  shareMessage(id, callback) {{ window.__lastSharedMessage = id; callback(true); }},
   HapticFeedback: {{ impactOccurred() {{}} }},
   BackButton: {{ show() {{}}, hide() {{}}, onClick(callback) {{ window.__back = callback; }} }}
 }} }};
@@ -86,6 +87,9 @@ async def create_application(database_path: Path) -> web.Application:
         await service.add_expense(
             collection_id, 1, 100 + number, [1, 2, 3], f"Тестовый расход {number + 1}"
         )
+    dinner_id = await service.create_collection(-100500, "Ужин с друзьями", "EUR", 2)
+    await service.join(dinner_id, 1, subscribe=True)
+    await service.add_expense(dinner_id, 2, 5_000, [1], "Общий счёт")
 
     @web.middleware
     async def inject_telegram(request: web.Request, handler):
@@ -106,7 +110,11 @@ async def create_application(database_path: Path) -> web.Application:
         webapp_url="http://127.0.0.1:8765/app",
         main_app_enabled=True,
     )
-    bot = SimpleNamespace(send_message=AsyncMock())
+    bot = SimpleNamespace(
+        send_message=AsyncMock(),
+        delete_message=AsyncMock(),
+        save_prepared_inline_message=AsyncMock(return_value=SimpleNamespace(id="prepared-ui")),
+    )
     setup_webapp_routes(application, bot, service, settings)
     return application
 

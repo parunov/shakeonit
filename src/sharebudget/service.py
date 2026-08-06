@@ -149,6 +149,21 @@ class BudgetService:
         old_message_id = previous["message_id"] if previous else None
         return old_message_id if old_message_id != message_id else None
 
+    async def take_bot_message(self, chat_id: int, kind: str) -> int | None:
+        """Return and forget a tracked bot message in one transaction."""
+        async with self.db.connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            row = await _fetchone(
+                connection,
+                "SELECT message_id FROM bot_messages WHERE chat_id=? AND kind=?",
+                (chat_id, kind),
+            )
+            await connection.execute(
+                "DELETE FROM bot_messages WHERE chat_id=? AND kind=?", (chat_id, kind)
+            )
+            await connection.commit()
+        return row["message_id"] if row else None
+
     async def get_user(self, user_id: int):
         async with self.db.connect() as connection:
             return await _fetchone(connection, "SELECT * FROM users WHERE id=?", (user_id,))
@@ -663,6 +678,20 @@ class BudgetService:
             await connection.commit()
             return int(cursor.lastrowid)
 
+    async def pending_repayments(self, collection_id: int, debtor_id: int) -> dict[int, int]:
+        """Return unconfirmed repayment totals grouped by creditor."""
+        async with self.db.connect() as connection:
+            rows = await connection.execute_fetchall(
+                """
+                SELECT counterparty_id,SUM(amount) amount FROM transactions
+                WHERE collection_id=? AND kind='repayment' AND creator_id=?
+                  AND status='active' AND confirmation_status='pending'
+                GROUP BY counterparty_id
+                """,
+                (collection_id, debtor_id),
+            )
+        return {row["counterparty_id"]: row["amount"] for row in rows}
+
     async def confirm_repayment(self, transaction_id: int, actor_id: int) -> int:
         transaction = await self.transaction(transaction_id)
         if not transaction or transaction["kind"] != "repayment":
@@ -891,7 +920,7 @@ class BudgetService:
         }
 
     async def balance_overview(self, user_id: int) -> dict:
-        """Return collection balances and settlements involving the current user."""
+        """Return balances with a constant number of queries, regardless of collection count."""
         async with self.db.connect() as connection:
             collections = await connection.execute_fetchall(
                 """
@@ -902,34 +931,91 @@ class BudgetService:
                 """,
                 (user_id,),
             )
-            collection_balances = []
-            personal_debts = []
-            for collection in collections:
-                snapshot = await self._snapshot_on(connection, collection["id"])
-                people = {row["id"]: row for row in snapshot.participants}
-                collection_balances.append(
+            if not collections:
+                return {"collections": [], "personal_debts": []}
+            collection_ids = [row["id"] for row in collections]
+            selected_values = ",".join("(?)" for _ in collection_ids)
+            participants = await connection.execute_fetchall(
+                f"""
+                WITH selected(collection_id) AS (VALUES {selected_values})
+                SELECT p.collection_id,p.active,u.id,u.full_name,u.username
+                FROM participants p
+                JOIN selected s ON s.collection_id=p.collection_id
+                JOIN users u ON u.id=p.user_id
+                """,
+                collection_ids,
+            )
+            ledger = await connection.execute_fetchall(
+                f"""
+                WITH selected(collection_id) AS (VALUES {selected_values}),
+                ledger(collection_id,user_id,delta) AS (
+                    SELECT t.collection_id,t.creator_id,t.amount FROM transactions t
+                    JOIN selected s ON s.collection_id=t.collection_id
+                    WHERE t.kind='expense' AND t.status='active'
+                    UNION ALL
+                    SELECT t.collection_id,es.user_id,-es.amount FROM expense_shares es
+                    JOIN transactions t ON t.id=es.transaction_id
+                    JOIN selected s ON s.collection_id=t.collection_id
+                    WHERE t.status='active'
+                    UNION ALL
+                    SELECT t.collection_id,t.creator_id,t.amount FROM transactions t
+                    JOIN selected s ON s.collection_id=t.collection_id
+                    WHERE t.kind='repayment' AND t.status='active'
+                      AND t.confirmation_status='confirmed'
+                    UNION ALL
+                    SELECT t.collection_id,t.counterparty_id,-t.amount FROM transactions t
+                    JOIN selected s ON s.collection_id=t.collection_id
+                    WHERE t.kind='repayment' AND t.status='active'
+                      AND t.confirmation_status='confirmed'
+                )
+                SELECT collection_id,user_id,SUM(delta) balance
+                FROM ledger GROUP BY collection_id,user_id
+                """,
+                collection_ids,
+            )
+
+        people_by_collection: dict[int, dict[int, dict]] = {}
+        for row in participants:
+            people_by_collection.setdefault(row["collection_id"], {})[row["id"]] = dict(row)
+        balances_by_collection: dict[int, dict[int, int]] = {}
+        for row in ledger:
+            balances_by_collection.setdefault(row["collection_id"], {})[row["user_id"]] = row[
+                "balance"
+            ]
+
+        collection_balances = []
+        personal_debts = []
+        for collection in collections:
+            collection_id = collection["id"]
+            people = people_by_collection.get(collection_id, {})
+            ledger_balances = balances_by_collection.get(collection_id, {})
+            balances = {
+                member_id: ledger_balances.get(member_id, 0)
+                for member_id, person in people.items()
+                if person["active"] or ledger_balances.get(member_id, 0)
+            }
+            if sum(balances.values()) != 0:
+                raise RuntimeError(f"Нарушена целостность балансов сбора #{collection_id}")
+            collection_balances.append(
+                {"collection": dict(collection), "amount": balances.get(user_id, 0)}
+            )
+            for debt in simplify_balances(balances):
+                if user_id not in (debt.debtor_id, debt.creditor_id):
+                    continue
+                personal_debts.append(
                     {
-                        "collection": dict(collection),
-                        "amount": snapshot.balances.get(user_id, 0),
+                        "collection_id": collection_id,
+                        "collection_title": collection["title"],
+                        "currency": collection["currency"],
+                        "debtor_id": debt.debtor_id,
+                        "debtor_name": people[debt.debtor_id]["full_name"],
+                        "debtor_username": people[debt.debtor_id]["username"],
+                        "creditor_id": debt.creditor_id,
+                        "creditor_name": people[debt.creditor_id]["full_name"],
+                        "creditor_username": people[debt.creditor_id]["username"],
+                        "amount": debt.amount,
                     }
                 )
-                for debt in snapshot.debts:
-                    if user_id not in (debt.debtor_id, debt.creditor_id):
-                        continue
-                    personal_debts.append(
-                        {
-                            "collection_id": collection["id"],
-                            "collection_title": collection["title"],
-                            "currency": collection["currency"],
-                            "debtor_id": debt.debtor_id,
-                            "debtor_name": people[debt.debtor_id]["full_name"],
-                            "debtor_username": people[debt.debtor_id]["username"],
-                            "creditor_id": debt.creditor_id,
-                            "creditor_name": people[debt.creditor_id]["full_name"],
-                            "creditor_username": people[debt.creditor_id]["username"],
-                            "amount": debt.amount,
-                        }
-                    )
         return {"collections": collection_balances, "personal_debts": personal_debts}
 
     async def collection_events(self, collection_id: int, limit: int = 200):

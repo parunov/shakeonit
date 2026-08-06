@@ -96,10 +96,17 @@ button.card { text-align: left; padding: 17px; cursor: pointer; }
 .segmented { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 14px 0; padding: 4px; border-radius: 15px; background: color-mix(in srgb, var(--muted) 10%, transparent); }
 .segmented button { min-height: 39px; border: 0; border-radius: 11px; color: var(--muted); background: transparent; font-weight: 720; }
 .segmented button.active { color: var(--text); background: var(--surface); box-shadow: 0 3px 12px rgba(0,0,0,.06); }
-.personal-debt { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
-.personal-debt > span { display: grid; gap: 5px; min-width: 0; }
-.personal-debt small { color: var(--muted); font-size: 12px; }
-.personal-debt strong { flex: 0 0 auto; white-space: nowrap; }
+.personal-settlement { display: grid; grid-template-columns: 40px 1fr auto; align-items: center; gap: 11px; margin-bottom: 9px; padding: 13px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: 0 6px 22px rgba(27,39,51,.055); }
+.personal-settlement.outgoing { border-left: 3px solid color-mix(in srgb, var(--bad) 72%, transparent); }
+.personal-settlement.incoming { border-left: 3px solid color-mix(in srgb, var(--good) 72%, transparent); }
+.person-avatar { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 14px; color: var(--accent); background: color-mix(in srgb, var(--accent) 11%, var(--surface)); font-size: 13px; font-weight: 800; }
+.personal-settlement-main { display: grid; min-width: 0; gap: 2px; }
+.personal-settlement-main small { color: var(--muted); font-size: 10px; font-weight: 680; text-transform: uppercase; letter-spacing: .05em; }
+.personal-settlement-main b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.personal-settlement-main .collection-link { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; font-weight: 520; }
+.personal-settlement-side { display: grid; justify-items: end; gap: 6px; }
+.personal-settlement-side strong { font-size: 14px; white-space: nowrap; }
+.pay-small { min-height: 28px; padding: 5px 10px; border: 0; border-radius: 10px; color: var(--accent-text); background: var(--accent); font-size: 11px; font-weight: 760; }
 
 .quick-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 14px 0; }
 .action-button, .primary-button, .secondary-button, .danger-button {
@@ -130,13 +137,22 @@ button:disabled { opacity: .5; cursor: default; }
 .pill.cancelled { color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent); }
 .pill.pending { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
 .share-breakdown { display: grid; gap: 3px; margin-top: 8px; padding: 8px 10px; border-radius: 12px; background: var(--bg); }
-.payment-card { margin: 10px 0; padding: 13px 14px; border-radius: 15px; background: color-mix(in srgb, var(--accent) 8%, var(--surface)); border: 1px solid var(--line); white-space: pre-wrap; }
-.quick-payments { display: grid; gap: 9px; margin: 0 0 14px; }
-.quick-payments.compact { margin-top: 2px; }
-.quick-payment { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px; padding: 13px 14px; border: 1px solid color-mix(in srgb, var(--warn) 24%, var(--line)); border-radius: 17px; background: color-mix(in srgb, var(--warn) 7%, var(--surface)); }
+.payment-card { margin: 10px 0; padding: 13px 14px; border-radius: 15px; background: color-mix(in srgb, var(--accent) 8%, var(--surface)); border: 1px solid var(--line); }
+.payment-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 7px; }
+.payment-card-head b { line-height: 1.35; }
+.payment-value { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
+.copy-payment { flex: 0 0 auto; padding: 6px 9px; border: 0; border-radius: 9px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); font-size: 10px; font-weight: 750; }
+.quick-pay-block { margin: 12px 0 14px; padding: 15px; border: 1px solid color-mix(in srgb, var(--warn) 22%, var(--line)); border-radius: 21px; background: linear-gradient(135deg, color-mix(in srgb, var(--warn) 8%, var(--surface)), var(--surface)); box-shadow: 0 9px 26px rgba(27,39,51,.06); }
+.quick-pay-heading { display: flex; align-items: center; gap: 10px; margin-bottom: 11px; }
+.quick-pay-heading > span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 12px; color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--surface)); font-size: 19px; font-weight: 800; }
+.quick-pay-heading > div { display: grid; gap: 2px; }
+.quick-pay-heading b { font-size: 14px; }
+.quick-pay-heading small { color: var(--muted); font-size: 11px; }
+.quick-payments { display: grid; gap: 7px; }
+.quick-payment { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px; padding: 11px 12px; border: 1px solid color-mix(in srgb, var(--warn) 18%, var(--line)); border-radius: 15px; background: color-mix(in srgb, var(--surface) 94%, transparent); }
 .quick-payment > span { display: grid; gap: 2px; min-width: 0; }
-.quick-payment small, .quick-payment em { color: var(--muted); font-size: 11px; font-style: normal; }
-.quick-payment button { min-height: 37px; padding: 8px 12px; border: 0; border-radius: 12px; color: #fff; background: var(--accent); font-weight: 760; }
+.quick-payment em { color: var(--muted); font-size: 10px; font-style: normal; }
+.quick-payment button { min-height: 34px; padding: 7px 11px; border: 0; border-radius: 11px; color: #fff; background: var(--accent); font-size: 12px; font-weight: 760; }
 .transaction-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .mini-button { border: 0; padding: 7px 10px; border-radius: 10px; background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); font-size: 12px; font-weight: 700; }
 .mini-button.confirm { color: var(--good); background: color-mix(in srgb, var(--good) 11%, transparent); }

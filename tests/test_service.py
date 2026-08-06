@@ -354,6 +354,8 @@ async def test_current_bot_message_replaces_previous_message(service):
     assert await service.replace_bot_message(-100, "app_link", 10) is None
     assert await service.replace_bot_message(-100, "app_link", 15) == 10
     assert await service.replace_bot_message(-200, "app_link", 7) is None
+    assert await service.take_bot_message(-100, "app_link") == 15
+    assert await service.take_bot_message(-100, "app_link") is None
 
 
 @pytest.mark.asyncio

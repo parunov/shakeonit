@@ -16,6 +16,8 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
     KeyboardButton,
     KeyboardButtonRequestChat,
 )
@@ -190,24 +192,12 @@ def _collection_invite_markup(settings: Settings, collection_id: int) -> InlineK
         if settings.main_app_enabled
         else f"https://t.me/{username}?start=app"
     )
-    rows = [
-        [
-            InlineKeyboardButton(
-                text="✅ Принять",
-                callback_data=f"join:{collection_id}",
-            ),
-            InlineKeyboardButton(
-                text="👀 Просмотреть",
-                url=app_url,
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="Отклонить",
-                callback_data=f"decline:{collection_id}",
-            )
-        ],
-    ]
+    rows = [[
+        InlineKeyboardButton(text="📱 Открыть сбор", url=app_url),
+        InlineKeyboardButton(
+            text="🙋 Участвовать в сборе", callback_data=f"join:{collection_id}"
+        ),
+    ]]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -344,6 +334,7 @@ async def collection_details(request: web.Request) -> web.Response:
     events = view.events[:events_limit]
     shares = view.shares
     people = {row["id"]: row for row in snapshot.participants}
+    pending = await service.pending_repayments(collection_id, user["id"])
     return web.json_response(
         {
             "ok": True,
@@ -358,6 +349,11 @@ async def collection_details(request: web.Request) -> web.Response:
                     "debtor_id": debt.debtor_id,
                     "creditor_id": debt.creditor_id,
                     "amount": debt.amount,
+                    "repayable_amount": max(
+                        0,
+                        debt.amount
+                        - (pending.get(debt.creditor_id, 0) if debt.debtor_id == user["id"] else 0),
+                    ),
                     "debtor_name": people[debt.debtor_id]["full_name"],
                     "debtor_username": people[debt.debtor_id]["username"],
                     "creditor_name": people[debt.creditor_id]["full_name"],
@@ -427,11 +423,19 @@ async def create_collection(request: web.Request) -> web.Response:
         bot,
         service,
         collection,
-        f"🧾 {_name(user)} создал(а) сбор <b>«{escape(collection['title'])}»</b> · "
-        f"{collection['currency']}\n\nНажмите «Принять» — регистрация займет один шаг.",
+        f"🧾 <b>Новый общий сбор «{escape(collection['title'])}»</b>\n\n"
+        f"{_name(user)} приглашает вести расходы вместе в {collection['currency']}. "
+        "Добавляйте траты и сразу видьте, кто кому сколько должен(а).",
         _collection_invite_markup(request.app[SETTINGS_KEY], collection_id),
         exclude_user_ids={user["id"]},
     )
+    if not personal and sent:
+        prompt_id = await service.take_bot_message(chat_id, "create_collection_prompt")
+        if prompt_id is not None:
+            try:
+                await bot.delete_message(chat_id, prompt_id)
+            except TelegramAPIError:
+                LOGGER.info("Could not delete collection prompt %s in chat %s", prompt_id, chat_id)
     return web.json_response(
         {
             "ok": True,
@@ -459,6 +463,45 @@ async def prepare_chat_request(request: web.Request) -> web.Response:
         ),
     )
     return web.json_response({"ok": True, "request_id": prepared.id})
+
+
+async def prepare_collection_share(request: web.Request) -> web.Response:
+    service, bot, user = _context(request)
+    collection_id = int(request.match_info["collection_id"])
+    collection = await _require_member(service, collection_id, user["id"])
+    settings = request.app[SETTINGS_KEY]
+    username = settings.bot_username.lstrip("@")
+    invite_url = (
+        f"https://t.me/{username}?startapp=collection_{collection_id}&mode=compact"
+        if settings.main_app_enabled
+        else f"https://t.me/{username}?start=collection_{collection_id}"
+    )
+    prepared = await bot.save_prepared_inline_message(
+        user_id=user["id"],
+        result=InlineQueryResultArticle(
+            id=f"collection-{collection_id}",
+            title=f"Сбор «{collection['title']}»",
+            description="Приглашение вести общие расходы вместе",
+            input_message_content=InputTextMessageContent(
+                message_text=(
+                    f"🧾 <b>Присоединяйтесь к сбору «{escape(collection['title'])}»</b>\n\n"
+                    f"Учитывайте общие расходы в {collection['currency']} и сразу смотрите, "
+                    "кто кому сколько должен(а). Вступление займёт один шаг."
+                ),
+                parse_mode="HTML",
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    InlineKeyboardButton(text="🙋 Присоединиться к сбору", url=invite_url)
+                ]]
+            ),
+        ),
+        allow_user_chats=True,
+        allow_group_chats=True,
+        allow_bot_chats=False,
+        allow_channel_chats=False,
+    )
+    return web.json_response({"ok": True, "prepared_message_id": prepared.id})
 
 
 async def add_expense(request: web.Request) -> web.Response:
@@ -1086,6 +1129,9 @@ def setup_webapp_routes(
     application.router.add_get("/api/collections/{collection_id}", collection_details)
     application.router.add_post("/api/collections", create_collection)
     application.router.add_post("/api/chats/prepare", prepare_chat_request)
+    application.router.add_post(
+        "/api/collections/{collection_id}/prepare-share", prepare_collection_share
+    )
     application.router.add_post("/api/collections/{collection_id}/expenses", add_expense)
     application.router.add_post("/api/collections/{collection_id}/repayments", add_repayment)
     application.router.add_post("/api/collections/{collection_id}/request-funds", request_funds)

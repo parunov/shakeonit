@@ -6,7 +6,7 @@ from aiogram.enums import ChatType
 
 from sharebudget.config import Settings
 from sharebudget.db import Database
-from sharebudget.handlers import app_launch_markup, open_webapp
+from sharebudget.handlers import app_launch_markup, new_collection, open_webapp
 from sharebudget.service import BudgetService
 
 
@@ -50,6 +50,37 @@ def test_create_collection_link_opens_main_mini_app_form():
     button = app_launch_markup(settings, "create").inline_keyboard[0][0]
 
     assert button.url == "https://t.me/ShakeOnIt_bot?startapp=create&mode=compact"
+
+
+@pytest.mark.asyncio
+async def test_group_create_prompt_is_tracked_until_collection_is_created(tmp_path):
+    database = Database(tmp_path / "create-prompt.db")
+    await database.initialize()
+    service = BudgetService(database)
+    bot = SimpleNamespace(delete_message=AsyncMock())
+    chat = SimpleNamespace(type=ChatType.SUPERGROUP, id=-100500)
+    message = SimpleNamespace(
+        chat=chat,
+        message=SimpleNamespace(chat=chat),
+        from_user=SimpleNamespace(id=7, username="owner", full_name="Владелец"),
+        answer=AsyncMock(return_value=SimpleNamespace(message_id=55)),
+        bot=bot,
+    )
+    settings = Settings(
+        bot_token="123456:test-token",
+        webapp_url="https://example.com/app",
+        bot_username="ShakeOnIt_bot",
+        main_app_enabled=True,
+    )
+
+    await new_collection(message, SimpleNamespace(), service, settings)
+
+    sent = message.answer.await_args
+    assert "Откройте форму создания" in sent.args[0]
+    assert sent.kwargs["reply_markup"].inline_keyboard[0][0].text == (
+        "➕ Создать сбор в приложении"
+    )
+    assert await service.take_bot_message(-100500, "create_collection_prompt") == 55
 
 
 @pytest.mark.asyncio

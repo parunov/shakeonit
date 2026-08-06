@@ -434,12 +434,25 @@ async def new_collection(
                     )
                 ]
             )
-        await message.answer(
+        sent_message = await message.answer(
             "➕ <b>Новый сбор</b>\n\nОткройте форму создания в Mini App. Сбор можно "
             "вести в Telegram-группе или без группы.",
             parse_mode=ParseMode.HTML,
             reply_markup=markup,
         )
+        if in_group and isinstance(getattr(sent_message, "message_id", None), int):
+            previous_message_id = await service.replace_bot_message(
+                message.chat.id, "create_collection_prompt", sent_message.message_id
+            )
+            if previous_message_id is not None:
+                try:
+                    await message.bot.delete_message(message.chat.id, previous_message_id)
+                except TelegramAPIError:
+                    LOGGER.info(
+                        "Could not delete previous collection prompt %s in chat %s",
+                        previous_message_id,
+                        message.chat.id,
+                    )
         return
     if not in_group:
         await message.answer(
