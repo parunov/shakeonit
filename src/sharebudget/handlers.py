@@ -270,7 +270,7 @@ async def open_webapp(message: Message, settings: Settings, service: BudgetServi
             chat_param = group_start_param(message.chat.id, settings.bot_token)
             app_url = f"https://t.me/{username}?startapp={chat_param}&mode=compact"
             text = "📱 Откройте сборы этой группы прямо в ShakeOnIt."
-            button_text = "📱 Открыть приложение"
+            button_text = "📱 Запустить приложение"
         else:
             app_url = f"https://t.me/{username}?start=app"
             text = "📱 Перейдите в личный чат и откройте защищённую кнопку ShakeOnIt."

@@ -66,6 +66,7 @@ async def test_open_app_button_returns_group_scoped_main_app_link_and_removes_pr
 
     second.answer.assert_awaited_once()
     button = second.answer.await_args.kwargs["reply_markup"].inline_keyboard[0][0]
+    assert button.text == "📱 Запустить приложение"
     assert button.url.startswith("https://t.me/ShakeOnIt_bot?startapp=chat_n100500_")
     assert button.url.endswith("&mode=compact")
     bot.delete_message.assert_awaited_once_with(-100500, 20)
