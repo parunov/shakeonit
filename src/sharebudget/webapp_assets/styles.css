@@ -112,8 +112,9 @@ button:disabled { opacity: .5; cursor: default; }
 .pill.pending { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
 .share-breakdown { display: grid; gap: 3px; margin-top: 8px; padding: 8px 10px; border-radius: 12px; background: var(--bg); }
 .payment-card { margin: 10px 0; padding: 13px 14px; border-radius: 15px; background: color-mix(in srgb, var(--accent) 8%, var(--surface)); border: 1px solid var(--line); white-space: pre-wrap; }
-.transaction-actions { display: flex; gap: 8px; margin-top: 10px; }
+.transaction-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .mini-button { border: 0; padding: 7px 10px; border-radius: 10px; background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); font-size: 12px; font-weight: 700; }
+.mini-button.confirm { color: var(--good); background: color-mix(in srgb, var(--good) 11%, transparent); }
 .mini-button.danger { color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent); }
 
 .empty { padding: 32px 22px; text-align: center; border: 1px dashed var(--line); border-radius: var(--radius); color: var(--muted); }

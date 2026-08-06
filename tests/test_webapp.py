@@ -248,6 +248,54 @@ async def test_edit_expense_api_replaces_participants(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_repayment_can_be_confirmed_from_global_history(tmp_path):
+    database = Database(tmp_path / "confirm-from-history.db")
+    await database.initialize()
+    service = BudgetService(database)
+    await service.upsert_user(1, "owner", "Получатель")
+    await service.upsert_user(2, "debtor", "Отправитель")
+    collection_id = await service.create_collection(-100500, "Поездка", "EUR", 1)
+    await service.join(collection_id, 2)
+    await service.add_expense(collection_id, 1, 1000, [1, 2], "Билеты")
+    repayment_id = await service.add_repayment(collection_id, 2, 1, 500)
+    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    application = web.Application()
+    setup_webapp_routes(application, bot, service, settings)
+    recipient_auth = signed_init_data(user={"id": 1, "first_name": "Получатель"})
+
+    async with TestClient(TestServer(application)) as client:
+        before = await client.get(
+            "/api/history",
+            headers={"X-Telegram-Init-Data": recipient_auth},
+        )
+        before_payload = await before.json()
+        pending = next(row for row in before_payload["transactions"] if row["id"] == repayment_id)
+
+        response = await client.post(
+            f"/api/transactions/{repayment_id}/confirm",
+            json={},
+            headers={"X-Telegram-Init-Data": recipient_auth},
+        )
+        response_payload = await response.json()
+
+        after = await client.get(
+            "/api/history",
+            headers={"X-Telegram-Init-Data": recipient_auth},
+        )
+        after_payload = await after.json()
+        confirmed = next(row for row in after_payload["transactions"] if row["id"] == repayment_id)
+
+    assert before.status == 200
+    assert pending["confirmation_status"] == "pending"
+    assert pending["counterparty_id"] == 1
+    assert pending["is_participant"] == 1
+    assert response.status == 200
+    assert response_payload["report_sent"] is True
+    assert confirmed["confirmation_status"] == "confirmed"
+
+
+@pytest.mark.asyncio
 async def test_request_funds_notifies_each_debtor_and_reports_to_group(tmp_path):
     database = Database(tmp_path / "request-funds.db")
     await database.initialize()
