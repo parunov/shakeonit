@@ -19,7 +19,6 @@ from aiogram.types import (
     InlineQueryResultArticle,
     InputTextMessageContent,
     Message,
-    WebAppInfo,
 )
 
 from .config import Settings
@@ -89,6 +88,45 @@ MENTION_HINT = """⚡ <b>Быстрая затрата в ShakeOnIt</b>
 
 Остальные действия — сборы, балансы, возвраты и история — удобнее выполнять в Mini App.
 Privacy Mode остается включённым."""
+
+
+def app_launch_markup(
+    settings: Settings,
+    start_param: str = "home",
+    button_text: str = "📱 Открыть приложение",
+    *,
+    in_group: bool = False,
+) -> InlineKeyboardMarkup:
+    """Return a Main Mini App deep link, with a direct Web App fallback."""
+    if settings.main_app_enabled:
+        username = settings.bot_username.lstrip("@")
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=button_text,
+                        url=f"https://t.me/{username}?startapp={start_param}&mode=compact",
+                    )
+                ]
+            ]
+        )
+    if in_group:
+        username = settings.bot_username.lstrip("@")
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=button_text,
+                        url=f"https://t.me/{username}?start=app",
+                    )
+                ]
+            ]
+        )
+    url = settings.webapp_url or ""
+    if start_param == "create":
+        separator = "&" if "?" in url else "?"
+        url = f"{url}{separator}intent=create"
+    return webapp_launch(url)
 
 
 async def sync_user(service: BudgetService, event: Message | CallbackQuery) -> None:
@@ -165,7 +203,7 @@ async def start(
     if command.args == "app" and message.chat.type == ChatType.PRIVATE and settings.webapp_url:
         await message.answer(
             "✅ <b>ShakeOnIt готов</b>\n\nОткройте приложение — вход уже подтвержден Telegram.",
-            reply_markup=webapp_launch(settings.webapp_url),
+            reply_markup=app_launch_markup(settings),
             parse_mode=ParseMode.HTML,
         )
         return
@@ -208,7 +246,7 @@ async def start(
         if settings.webapp_url:
             await message.answer(
                 "📱 Откройте сбор в приложении:",
-                reply_markup=webapp_launch(settings.webapp_url),
+                reply_markup=app_launch_markup(settings, f"collection_{collection['id']}"),
             )
         return
     await message.answer(
@@ -224,7 +262,7 @@ async def start(
     if settings.webapp_url and message.chat.type == ChatType.PRIVATE:
         await message.answer(
             "📱 Или откройте полный интерфейс ShakeOnIt:",
-            reply_markup=webapp_launch(settings.webapp_url),
+            reply_markup=app_launch_markup(settings),
         )
 
 
@@ -259,7 +297,17 @@ async def tutorial(message: Message) -> None:
 
 
 @router.message(Command("app"))
-@router.message(F.text.in_({"📱 Приложение", "📱 Открыть приложение"}))
+@router.message(
+    F.text.in_(
+        {
+            "📱 Приложение",
+            "📱 Открыть приложение",
+            "Открыть приложение",
+            "📱 Запустить приложение",
+            "Запустить приложение",
+        }
+    )
+)
 async def open_webapp(message: Message, settings: Settings, service: BudgetService) -> None:
     if not settings.webapp_url:
         await message.answer("ℹ️ Приложение пока не настроено.")
@@ -286,7 +334,7 @@ async def open_webapp(message: Message, settings: Settings, service: BudgetServi
     else:
         sent_message = await message.answer(
             "📱 <b>ShakeOnIt</b> — все сборы и операции в одном спокойном интерфейсе.",
-            reply_markup=webapp_launch(settings.webapp_url),
+            reply_markup=app_launch_markup(settings),
             parse_mode=ParseMode.HTML,
         )
 
@@ -364,33 +412,31 @@ async def new_collection(
     settings: Settings,
 ) -> None:
     await sync_user(service, message)
-    if message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-        if settings.webapp_url:
-            bot_user = await message.bot.get_me()
-            separator = "&" if "?" in settings.webapp_url else "?"
-            create_url = f"{settings.webapp_url}{separator}intent=create"
-            await message.answer(
-                "➕ <b>Новый сбор</b>\n\nОткройте форму создания. Сбор можно вести "
-                "в Telegram-группе или без группы — тогда уведомления будут приходить лично от бота.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="➕ Открыть форму создания",
-                                web_app=WebAppInfo(url=create_url),
-                            )
-                        ],
-                        [
-                            InlineKeyboardButton(
-                                text="👥 Добавить бота в группу",
-                                url=f"https://t.me/{bot_user.username}?startgroup=shakeonit",
-                            )
-                        ],
-                    ]
-                ),
+    in_group = message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+    if settings.webapp_url:
+        markup = app_launch_markup(
+            settings,
+            "create",
+            "➕ Создать сбор в приложении",
+            in_group=in_group,
+        )
+        if not in_group:
+            markup.inline_keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        text="👥 Добавить бота в группу",
+                        url=f"https://t.me/{settings.bot_username.lstrip('@')}?startgroup=shakeonit",
+                    )
+                ]
             )
-            return
+        await message.answer(
+            "➕ <b>Новый сбор</b>\n\nОткройте форму создания в Mini App. Сбор можно "
+            "вести в Telegram-группе или без группы.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+        )
+        return
+    if not in_group:
         await message.answer(
             "Создавать сбор нужно в общей Telegram-группе. Добавьте туда бота и повторите команду."
         )
@@ -1354,7 +1400,7 @@ async def inline_hint(inline_query: InlineQuery) -> None:
                 ),
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text="📱 Открыть ShakeOnIt", url=app_url)]
+                        [InlineKeyboardButton(text="📱 Открыть приложение", url=app_url)]
                     ]
                 ),
             )

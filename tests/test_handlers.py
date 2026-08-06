@@ -6,7 +6,7 @@ from aiogram.enums import ChatType
 
 from sharebudget.config import Settings
 from sharebudget.db import Database
-from sharebudget.handlers import open_webapp
+from sharebudget.handlers import app_launch_markup, open_webapp
 from sharebudget.service import BudgetService
 
 
@@ -25,14 +25,31 @@ async def test_open_app_button_always_returns_private_mini_app_link(tmp_path):
     settings = Settings(
         bot_token="123456:test-token",
         webapp_url="https://example.com/app",
+        bot_username="ShakeOnIt_bot",
+        main_app_enabled=True,
     )
 
     await open_webapp(message, settings, service)
 
     message.answer.assert_awaited_once()
     markup = message.answer.await_args.kwargs["reply_markup"]
-    assert markup.inline_keyboard[0][0].web_app.url == "https://example.com/app"
+    assert markup.inline_keyboard[0][0].url == (
+        "https://t.me/ShakeOnIt_bot?startapp=home&mode=compact"
+    )
     message.delete.assert_awaited_once()
+
+
+def test_create_collection_link_opens_main_mini_app_form():
+    settings = Settings(
+        bot_token="123456:test-token",
+        webapp_url="https://example.com/app",
+        bot_username="ShakeOnIt_bot",
+        main_app_enabled=True,
+    )
+
+    button = app_launch_markup(settings, "create").inline_keyboard[0][0]
+
+    assert button.url == "https://t.me/ShakeOnIt_bot?startapp=create&mode=compact"
 
 
 @pytest.mark.asyncio
