@@ -25,7 +25,7 @@ from aiogram.types import (
 from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector, web
 
 from .config import Settings
-from .links import collection_app_url, collection_html_link, parse_group_start_param
+from .links import parse_group_start_param
 from .money import CURRENCIES, format_money, parse_amount
 from .notifications import replace_repayment_prompt, report_collection_event
 from .render import telegram_user_link, transaction_update_report
@@ -256,20 +256,9 @@ async def _confirm_private_subscription(
         return False
 
 
-def _collection_invite_markup(settings: Settings, collection_id: int) -> InlineKeyboardMarkup:
-    username = settings.bot_username.lstrip("@")
-    app_url = (
-        f"https://t.me/{username}?startapp=collection_{collection_id}&mode=compact"
-        if settings.main_app_enabled
-        else f"https://t.me/{username}?start=app"
-    )
+def _collection_invite_markup(collection_id: int) -> InlineKeyboardMarkup:
     rows = [
-        [
-            InlineKeyboardButton(text="📱 Открыть сбор", url=app_url),
-            InlineKeyboardButton(
-                text="🙋 Участвовать в сборе", callback_data=f"join:{collection_id}"
-            ),
-        ]
+        [InlineKeyboardButton(text="🙋 Участвовать в сборе", callback_data=f"join:{collection_id}")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -529,7 +518,7 @@ async def create_collection(request: web.Request) -> web.Response:
             f"🧾 <b>Новый общий сбор «{escape(collection['title'])}»</b>\n\n"
             f"{_name(user)} приглашает вести расходы вместе в {collection['currency']}. "
             "Добавляйте траты и сразу видьте, кто кому сколько должен(а).",
-            _collection_invite_markup(request.app[SETTINGS_KEY], collection_id),
+            _collection_invite_markup(collection_id),
             exclude_user_ids={user["id"]},
         )
         if not personal and sent:
@@ -577,17 +566,7 @@ async def prepare_collection_share(request: web.Request) -> web.Response:
     service, bot, user = _context(request)
     collection_id = int(request.match_info["collection_id"])
     collection = await _require_member(service, collection_id, user["id"])
-    settings = request.app[SETTINGS_KEY]
-    invite_url = collection_app_url(
-        settings.bot_username,
-        collection_id,
-        main_app_enabled=settings.main_app_enabled,
-    )
-    invite_collection_link = collection_html_link(
-        collection,
-        settings.bot_username,
-        main_app_enabled=settings.main_app_enabled,
-    )
+    collection_title = f"<b>«{escape(collection['title'])}»</b>"
     prepared = await bot.save_prepared_inline_message(
         user_id=user["id"],
         result=InlineQueryResultArticle(
@@ -596,9 +575,9 @@ async def prepare_collection_share(request: web.Request) -> web.Response:
             description="Приглашение вести общие расходы вместе",
             input_message_content=InputTextMessageContent(
                 message_text=(
-                    f"🧾 Присоединяйтесь к сбору {invite_collection_link}\n\n"
+                    f"🧾 Присоединяйтесь к сбору {collection_title}\n\n"
                     f"Инициатор: {_name(user)}\n"
-                    f"Название сбора: {invite_collection_link}\n\n"
+                    f"Название сбора: {collection_title}\n\n"
                     "Вступайте легко в совместный сбор средств, контролируйте расходы "
                     "и возвраты долгов."
                 ),
@@ -606,7 +585,12 @@ async def prepare_collection_share(request: web.Request) -> web.Response:
             ),
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="🙋 Присоединиться к сбору", url=invite_url)]
+                    [
+                        InlineKeyboardButton(
+                            text="🙋 Присоединиться к сбору",
+                            callback_data=f"join:{collection_id}",
+                        )
+                    ]
                 ]
             ),
         ),
@@ -728,18 +712,7 @@ async def request_funds(request: web.Request) -> web.Response:
     collection_id = int(request.match_info["collection_id"])
     collection = await _require_member(service, collection_id, user["id"])
     debts = await service.request_funds(collection_id, user["id"])
-    settings = request.app[SETTINGS_KEY]
-    app_url = collection_app_url(
-        settings.bot_username,
-        collection_id,
-        main_app_enabled=settings.main_app_enabled,
-    )
     collection_title = f"<b>«{escape(collection['title'])}»</b>"
-    open_markup = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📱 Открыть сбор", url=app_url)],
-        ]
-    )
 
     async def deliver_funds_requests() -> None:
         async def deliver(debt) -> bool:
@@ -750,7 +723,6 @@ async def request_funds(request: web.Request) -> web.Response:
                     f"{_name(user)} просит вас рассчитаться по действующим долгам "
                     f"в сборе {collection_title}.",
                     parse_mode="HTML",
-                    reply_markup=open_markup,
                     request_timeout=5,
                 )
                 return True

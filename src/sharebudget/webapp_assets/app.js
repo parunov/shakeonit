@@ -71,8 +71,9 @@ function openTelegramUser(target) {
   const username = target.dataset.username;
   const url = username
     ? `https://t.me/${encodeURIComponent(username.replace(/^@/, ""))}`
-    : `tg://user?id=${encodeURIComponent(target.dataset.userId)}`;
+    : `https://t.me/${encodeURIComponent(botUsername)}?start=contact_${encodeURIComponent(target.dataset.userId)}`;
   haptic();
+  if (!username) toast("Открываю контакт через бота");
   if (tg?.openTelegramLink) tg.openTelegramLink(url);
   else window.location.href = url;
 }
@@ -518,14 +519,8 @@ async function shareCollection(collection) {
       });
     });
   }
-  const inviteUrl = state.bootstrap.main_app_enabled
-    ? `https://t.me/${state.bootstrap.bot_username}?startapp=collection_${collection.id}&mode=compact`
-    : `https://t.me/${state.bootstrap.bot_username}?start=collection_${collection.id}`;
-  const inviteText = `Присоединяйтесь к сбору «${collection.title}» в ShakeOnIt — расходы и расчёты будут понятны всем участникам.`;
-  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(inviteUrl)}&text=${encodeURIComponent(inviteText)}`;
-  if (tg?.openTelegramLink) tg.openTelegramLink(shareUrl);
-  else window.location.href = shareUrl;
-  return true;
+  toast("Обновите Telegram, чтобы отправлять приглашения без ссылок", true);
+  return false;
 }
 
 function createdCollectionInviteSheet(collection) {

@@ -213,6 +213,26 @@ async def start(
             parse_mode=ParseMode.HTML,
         )
         return
+    contact_match = re.fullmatch(r"contact_(\d+)", command.args or "")
+    if contact_match and message.chat.type == ChatType.PRIVATE:
+        target = await service.get_shared_collection_user(
+            message.from_user.id, int(contact_match.group(1))
+        )
+        if not target:
+            await message.answer(
+                "ℹ️ Контакт недоступен. Открывать можно только участников ваших сборов.",
+                reply_markup=private_menu,
+            )
+            return
+        await message.answer(
+            "👤 <b>Контакт участника</b>\n\n"
+            f"{telegram_user_link(target['id'], target['full_name'], target['username'])}\n"
+            f"Telegram ID: <code>{target['id']}</code>\n\n"
+            "Нажмите на имя, чтобы открыть профиль или личный диалог.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=private_menu,
+        )
+        return
     match = re.fullmatch(r"collection_(\d+)", command.args or "")
     if match and message.chat.type == ChatType.PRIVATE:
         collection = await service.get_collection(int(match.group(1)))
@@ -540,7 +560,8 @@ async def join_collection(callback: CallbackQuery, service: BudgetService) -> No
     await sync_user(service, callback)
     collection_id = int(callback.data.split(":")[1])
     was_member = await service.is_participant(collection_id, callback.from_user.id)
-    subscribe = callback.message.chat.type == ChatType.PRIVATE
+    message = callback.message
+    subscribe = bool(message and message.chat.type == ChatType.PRIVATE)
     await service.join(collection_id, callback.from_user.id, subscribe=subscribe)
     collection = await service.get_collection(collection_id)
     await report_collection_event(
@@ -556,9 +577,9 @@ async def join_collection(callback: CallbackQuery, service: BudgetService) -> No
         else "🎉 Готово! Вы участвуете — без регистрации и переходов.",
         show_alert=True,
     )
-    if callback.message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+    if message is None or message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
-    await show_collection(callback.message, collection_id, callback.from_user.id, service)
+    await show_collection(message, collection_id, callback.from_user.id, service)
 
 
 @router.callback_query(F.data.startswith("decline:"))

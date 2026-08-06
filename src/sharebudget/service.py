@@ -172,6 +172,24 @@ class BudgetService:
         async with self.db.connect() as connection:
             return await _fetchone(connection, "SELECT * FROM users WHERE id=?", (user_id,))
 
+    async def get_shared_collection_user(self, requester_id: int, target_id: int):
+        """Return a user only when both people occur in at least one collection."""
+        async with self.db.connect() as connection:
+            return await _fetchone(
+                connection,
+                """
+                SELECT u.* FROM users u
+                WHERE u.id=? AND EXISTS (
+                    SELECT 1
+                    FROM participants requester
+                    JOIN participants target
+                        ON target.collection_id=requester.collection_id
+                    WHERE requester.user_id=? AND target.user_id=u.id
+                )
+                """,
+                (target_id, requester_id),
+            )
+
     async def set_payment_details(
         self, user_id: int, details: str, bank_name: str | None = None
     ) -> None:

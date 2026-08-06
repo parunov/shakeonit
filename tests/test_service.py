@@ -41,6 +41,15 @@ async def test_user_is_authorized_on_first_telegram_interaction(service):
 
 
 @pytest.mark.asyncio
+async def test_shared_collection_user_cannot_be_enumerated_outside_common_collection(service):
+    collection_id = await service.create_collection(-100, "Общий сбор", "EUR", 1)
+    await service.join(collection_id, 2)
+
+    assert (await service.get_shared_collection_user(1, 2))["full_name"] == "Борис"
+    assert not await service.get_shared_collection_user(1, 3)
+
+
+@pytest.mark.asyncio
 async def test_preferred_balance_currency_is_validated_and_saved(service):
     await service.set_preferred_currency(1, "EUR")
     assert (await service.get_user(1))["preferred_currency"] == "EUR"

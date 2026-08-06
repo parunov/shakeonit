@@ -90,24 +90,20 @@ def test_validate_init_data_rejects_duplicate_fields():
 def test_collection_invite_uses_safe_fallback_or_enabled_main_app():
     settings = Settings(bot_token=TOKEN, main_app_enabled=False)
     buttons = [
-        button for row in _collection_invite_markup(settings, 42).inline_keyboard for button in row
+        button for row in _collection_invite_markup(42).inline_keyboard for button in row
     ]
 
-    assert not any(button.url and "startapp" in button.url for button in buttons)
-    assert any(button.url and "start=app" in button.url for button in buttons)
+    assert not any(button.url for button in buttons)
     assert any(button.callback_data == "join:42" for button in buttons)
     assert not any(button.callback_data == "decline:42" for button in buttons)
-    assert {button.text for button in buttons} == {
-        "📱 Открыть сбор",
-        "🙋 Участвовать в сборе",
-    }
+    assert {button.text for button in buttons} == {"🙋 Участвовать в сборе"}
 
     settings.main_app_enabled = True
     enabled_buttons = [
-        button for row in _collection_invite_markup(settings, 42).inline_keyboard for button in row
+        button for row in _collection_invite_markup(42).inline_keyboard for button in row
     ]
-    assert any(button.url and "startapp=collection_42" in button.url for button in enabled_buttons)
-    assert not any(button.url and "start=app" in button.url for button in enabled_buttons)
+    assert not any(button.url for button in enabled_buttons)
+    assert any(button.callback_data == "join:42" for button in enabled_buttons)
 
 
 @pytest.mark.asyncio
@@ -139,6 +135,10 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert 'data-action="quick-repay"' in script_text
         assert "if (tg?.openTelegramLink) tg.openTelegramLink(url);" in script_text
         assert "if (username && tg?.openTelegramLink)" not in script_text
+        assert "tg://user?id=" not in script_text
+        assert "?start=contact_" in script_text
+        assert "startapp=collection_${collection.id}" not in script_text
+        assert "start=collection_${collection.id}" not in script_text
 
         unauthorized = await client.get("/api/bootstrap")
         assert unauthorized.status == 401
@@ -459,10 +459,7 @@ async def test_request_funds_notifies_each_debtor_and_reports_to_group(tmp_path)
     )
     assert "Личные уведомления" not in bot.send_message.await_args_list[-1].args[1]
     assert "startapp=collection_" not in bot.send_message.await_args_list[-1].args[1]
-    assert (
-        "startapp=collection_"
-        in bot.send_message.await_args_list[0].kwargs["reply_markup"].inline_keyboard[0][0].url
-    )
+    assert "reply_markup" not in bot.send_message.await_args_list[0].kwargs
 
 
 @pytest.mark.asyncio
@@ -905,7 +902,14 @@ async def test_group_collection_creation_posts_actionable_invitation(tmp_path):
         for button in row
         if button.callback_data
     }
+    urls = [
+        button.url
+        for row in call.kwargs["reply_markup"].inline_keyboard
+        for button in row
+        if button.url
+    ]
     assert callbacks == {f"join:{payload['collection_id']}"}
+    assert urls == []
 
 
 @pytest.mark.asyncio
@@ -985,7 +989,11 @@ async def test_collection_share_prepares_message_for_people_and_groups(tmp_path)
     assert "Учитывайте общие расходы" not in (
         call.kwargs["result"].input_message_content.message_text
     )
-    assert "collection_" in call.kwargs["result"].reply_markup.inline_keyboard[0][0].url
+    message_text = call.kwargs["result"].input_message_content.message_text
+    assert "startapp=collection_" not in message_text
+    button = call.kwargs["result"].reply_markup.inline_keyboard[0][0]
+    assert button.url is None
+    assert button.callback_data == f"join:{collection_id}"
 
 
 @pytest.mark.asyncio

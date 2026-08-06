@@ -3,36 +3,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
-from html import escape
-from urllib.parse import quote
-
-
-def collection_app_url(
-    bot_username: str,
-    collection_id: int,
-    *,
-    main_app_enabled: bool = True,
-) -> str:
-    """Build a Telegram link that opens a specific collection."""
-    username = quote(bot_username.lstrip("@"), safe="")
-    if main_app_enabled:
-        return f"https://t.me/{username}?startapp=collection_{int(collection_id)}&mode=compact"
-    return f"https://t.me/{username}?start=collection_{int(collection_id)}"
-
-
-def collection_html_link(
-    collection,
-    bot_username: str,
-    *,
-    main_app_enabled: bool = True,
-) -> str:
-    """Render the collection title as a safe Telegram HTML deep link."""
-    url = collection_app_url(
-        bot_username,
-        collection["id"],
-        main_app_enabled=main_app_enabled,
-    )
-    return f'<b><a href="{escape(url, quote=True)}">«{escape(collection["title"])}»</a></b>'
 
 
 def group_start_param(chat_id: int, bot_token: str) -> str:
