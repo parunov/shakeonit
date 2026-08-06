@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import time
+from time import perf_counter
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import urlencode
@@ -16,6 +17,7 @@ from sharebudget.db import Database
 from sharebudget.links import group_start_param
 from sharebudget.service import BudgetService
 from sharebudget.webapp import (
+    DELIVERY_TASKS_KEY,
     FX_CACHE_KEY,
     FX_CACHE_SECONDS,
     FX_LOCK_KEY,
@@ -27,6 +29,12 @@ from sharebudget.webapp import (
 )
 
 TOKEN = "123456:test-token"
+
+
+async def drain_deliveries(application: web.Application) -> None:
+    tasks = list(application[DELIVERY_TASKS_KEY])
+    if tasks:
+        await asyncio.gather(*tasks)
 
 
 def signed_init_data(
@@ -257,6 +265,7 @@ async def test_edit_expense_api_replaces_participants(tmp_path):
             headers={"X-Telegram-Init-Data": owner_auth},
         )
         response_payload = await response.json()
+        await drain_deliveries(application)
         details = await client.get(
             f"/api/collections/{collection_id}",
             headers={"X-Telegram-Init-Data": owner_auth},
@@ -264,7 +273,8 @@ async def test_edit_expense_api_replaces_participants(tmp_path):
         details_payload = await details.json()
 
     assert response.status == 200
-    assert response_payload["report_sent"] is True
+    assert response_payload["report_sent"] is False
+    assert response_payload["notifications_queued"] is True
     edited = next(row for row in details_payload["history"] if row["id"] == transaction_id)
     assert [(row["user_id"], row["amount"]) for row in edited["shares"]] == [
         (2, 501),
@@ -309,6 +319,7 @@ async def test_repayment_can_be_confirmed_from_global_history(tmp_path):
             headers={"X-Telegram-Init-Data": recipient_auth},
         )
         response_payload = await response.json()
+        await drain_deliveries(application)
 
         after = await client.get(
             "/api/history",
@@ -322,7 +333,8 @@ async def test_repayment_can_be_confirmed_from_global_history(tmp_path):
     assert pending["counterparty_id"] == 1
     assert pending["is_participant"] == 1
     assert response.status == 200
-    assert response_payload["report_sent"] is True
+    assert response_payload["report_sent"] is False
+    assert response_payload["notifications_queued"] is True
     assert confirmed["confirmation_status"] == "confirmed"
     confirmation_message = bot.send_message.await_args_list[0].args[1]
     assert "Отправитель" in confirmation_message
@@ -356,6 +368,7 @@ async def test_repayment_notification_can_be_rejected_by_recipient(tmp_path):
         )
         created_payload = await created.json()
         repayment_id = created_payload["transaction_id"]
+        await drain_deliveries(application)
         private_call = next(call for call in bot.send_message.await_args_list if call.args[0] == 1)
         private_message = private_call.args[1]
         callbacks = {
@@ -370,6 +383,7 @@ async def test_repayment_notification_can_be_rejected_by_recipient(tmp_path):
             headers={"X-Telegram-Init-Data": recipient_auth},
         )
         rejected_payload = await rejected.json()
+        await drain_deliveries(application)
         history = await client.get(
             "/api/history",
             headers={"X-Telegram-Init-Data": recipient_auth},
@@ -387,7 +401,8 @@ async def test_repayment_notification_can_be_rejected_by_recipient(tmp_path):
     assert f"#{repayment_id}" not in private_message
     assert callbacks == {f"repayconfirm:{repayment_id}", f"repayreject:{repayment_id}"}
     assert rejected.status == 200
-    assert rejected_payload["report_sent"] is True
+    assert rejected_payload["report_sent"] is False
+    assert rejected_payload["notifications_queued"] is True
     assert transaction["status"] == "cancelled"
 
 
@@ -418,14 +433,16 @@ async def test_request_funds_notifies_each_debtor_and_reports_to_group(tmp_path)
             headers={"X-Telegram-Init-Data": owner_auth},
         )
         payload = await response.json()
+        await drain_deliveries(application)
 
     assert response.status == 200
     assert payload == {
         "ok": True,
         "debtors_count": 2,
-        "notifications_sent": 2,
+        "notifications_sent": 0,
         "failed_count": 0,
-        "report_sent": True,
+        "report_sent": False,
+        "notifications_queued": True,
     }
     recipients = [call.args[0] for call in bot.send_message.await_args_list]
     assert recipients == [2, 3, -100500]
@@ -584,9 +601,10 @@ async def test_archived_collection_can_be_deleted_by_admin_from_mini_app(tmp_pat
             headers={"X-Telegram-Init-Data": owner_auth},
         )
         payload = await response.json()
+        await drain_deliveries(application)
 
     assert response.status == 200
-    assert payload["report_sent"] is True
+    assert payload["report_sent"] is False
     assert await service.get_collection(collection_id) is None
     assert "безвозвратно удалил" in bot.send_message.await_args.args[1]
 
@@ -611,6 +629,7 @@ async def test_join_can_enable_private_collection_notifications(tmp_path):
             headers={"X-Telegram-Init-Data": member_auth},
         )
         payload = await response.json()
+        await drain_deliveries(application)
 
     assert response.status == 200
     assert payload["notifications_enabled"] is True
@@ -672,10 +691,12 @@ async def test_group_collection_creation_posts_actionable_invitation(tmp_path):
             headers={"X-Telegram-Init-Data": auth},
         )
         payload = await response.json()
+        await drain_deliveries(application)
 
     assert response.status == 200
-    assert payload["report_sent"] is True
-    bot.delete_message.assert_awaited_once_with(-100500, 55)
+    assert payload["report_sent"] is False
+    assert payload["notifications_queued"] is True
+    bot.delete_message.assert_awaited_once_with(-100500, 55, request_timeout=5)
     assert await service.take_bot_message(-100500, "create_collection_prompt") is None
     call = bot.send_message.await_args
     assert call.args[0] == -100500
@@ -688,6 +709,44 @@ async def test_group_collection_creation_posts_actionable_invitation(tmp_path):
         if button.callback_data
     }
     assert callbacks == {f"join:{payload['collection_id']}"}
+
+
+@pytest.mark.asyncio
+async def test_repayment_api_does_not_wait_for_slow_telegram(tmp_path):
+    database = Database(tmp_path / "fast-repayment.db")
+    await database.initialize()
+    service = BudgetService(database)
+    await service.upsert_user(1, "recipient", "Получатель")
+    await service.upsert_user(2, "sender", "Отправитель")
+    collection_id = await service.create_collection(-100500, "Поездка", "EUR", 1)
+    await service.join(collection_id, 2)
+    await service.add_expense(collection_id, 1, 1000, [1, 2], "Билеты")
+
+    async def slow_send(*args, **kwargs):
+        await asyncio.sleep(2)
+        return SimpleNamespace(message_id=99)
+
+    bot = SimpleNamespace(send_message=AsyncMock(side_effect=slow_send))
+    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    application = web.Application()
+    setup_webapp_routes(application, bot, service, settings)
+    auth = signed_init_data(user={"id": 2, "first_name": "Отправитель"})
+
+    async with TestClient(TestServer(application)) as client:
+        started = perf_counter()
+        response = await client.post(
+            f"/api/collections/{collection_id}/repayments",
+            json={"creditor_id": 1, "amount": "5", "comment": "Перевод"},
+            headers={"X-Telegram-Init-Data": auth},
+        )
+        elapsed = perf_counter() - started
+        payload = await response.json()
+        transaction = await service.transaction(payload["transaction_id"])
+
+        assert response.status == 200
+        assert elapsed < 0.5
+        assert payload["notifications_queued"] is True
+        assert transaction["confirmation_status"] == "pending"
 
 
 @pytest.mark.asyncio

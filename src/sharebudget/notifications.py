@@ -39,6 +39,7 @@ async def notify_subscribers(
                 parse_mode="HTML",
                 disable_notification=False,
                 reply_markup=reply_markup,
+                request_timeout=5,
             )
             return True
         except TelegramForbiddenError:
@@ -87,6 +88,7 @@ async def report_collection_event(
                 parse_mode="HTML",
                 disable_notification=True,
                 reply_markup=reply_markup,
+                request_timeout=5,
             )
             return True
         except TelegramAPIError:
@@ -120,7 +122,7 @@ async def replace_repayment_prompt(
     """Remove a repayment prompt and leave one final status message in its place."""
     if message_id is not None:
         try:
-            await bot.delete_message(chat_id, message_id)
+            await bot.delete_message(chat_id, message_id, request_timeout=5)
         except TelegramAPIError:
             try:
                 await bot.edit_message_text(
@@ -129,11 +131,12 @@ async def replace_repayment_prompt(
                     message_id=message_id,
                     parse_mode="HTML",
                     reply_markup=None,
+                    request_timeout=5,
                 )
                 return
             except TelegramAPIError:
                 LOGGER.info("Could not remove repayment prompt %s in chat %s", message_id, chat_id)
     try:
-        await bot.send_message(chat_id, text, parse_mode="HTML")
+        await bot.send_message(chat_id, text, parse_mode="HTML", request_timeout=5)
     except TelegramAPIError:
         LOGGER.info("Could not deliver final repayment status to chat %s", chat_id)

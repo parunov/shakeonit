@@ -641,10 +641,11 @@ class BudgetService:
             raise DomainError("Комментарий не должен быть длиннее 200 символов")
         async with self.db.connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
+            snapshot = await self._snapshot_on(connection, collection_id)
             direct_debt = next(
                 (
                     debt
-                    for debt in await self.settlement(collection_id)
+                    for debt in snapshot.debts
                     if debt.debtor_id == debtor_id and debt.creditor_id == creditor_id
                 ),
                 None,

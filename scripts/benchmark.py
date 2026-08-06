@@ -12,6 +12,7 @@ import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from urllib.parse import urlencode
 
 from aiohttp import web
@@ -105,7 +106,12 @@ async def run(args: argparse.Namespace) -> None:
 
         settings = Settings(bot_token=TOKEN, database_path=database.path)
         application = web.Application()
-        setup_webapp_routes(application, SimpleNamespace(), service, settings)
+        setup_webapp_routes(
+            application,
+            SimpleNamespace(send_message=AsyncMock()),
+            service,
+            settings,
+        )
         auth = [signed_init_data(user_id) for user_id in range(1, args.users + 1)]
 
         async with TestClient(TestServer(application)) as client:
@@ -134,6 +140,20 @@ async def run(args: argparse.Namespace) -> None:
                 await response.read()
                 return response.status == 200
 
+            async def save_expense(index: int) -> bool:
+                user_id = (index % args.users) + 1
+                response = await client.post(
+                    f"/api/collections/{collection_id}/expenses",
+                    json={
+                        "amount": "10.00",
+                        "comment": f"Load write {index}",
+                        "participant_ids": [user_id],
+                    },
+                    headers={"X-Telegram-Init-Data": auth[index % len(auth)]},
+                )
+                await response.read()
+                return response.status == 200
+
             await sync(0)
             await details(0)
             results = [
@@ -149,6 +169,12 @@ async def run(args: argparse.Namespace) -> None:
                     max(50, args.requests // 5),
                     args.concurrency,
                     balance,
+                ),
+                await measure(
+                    "expense_save",
+                    max(50, args.requests // 5),
+                    args.concurrency,
+                    save_expense,
                 ),
             ]
             print(

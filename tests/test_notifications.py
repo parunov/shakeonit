@@ -37,5 +37,7 @@ async def test_repayment_prompt_is_deleted_and_replaced_with_final_status():
 
     await replace_repayment_prompt(bot, 42, 101, "✅ Получение подтверждено")
 
-    bot.delete_message.assert_awaited_once_with(42, 101)
-    bot.send_message.assert_awaited_once_with(42, "✅ Получение подтверждено", parse_mode="HTML")
+    bot.delete_message.assert_awaited_once_with(42, 101, request_timeout=5)
+    bot.send_message.assert_awaited_once_with(
+        42, "✅ Получение подтверждено", parse_mode="HTML", request_timeout=5
+    )

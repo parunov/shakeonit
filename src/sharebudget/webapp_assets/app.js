@@ -155,6 +155,10 @@ function closeSheet() {
 
 function reportToast(result, fallback = "Готово") {
   haptic("light");
+  if (result.notifications_queued) {
+    toast(`${fallback} · уведомления отправляются`);
+    return;
+  }
   if (result.notifications_sent > 0) {
     toast(`${fallback} · подписчики уведомлены: ${result.notifications_sent}`);
   } else {
@@ -221,14 +225,15 @@ async function renderBalance() {
   app.innerHTML = `<section class="loading-card"><div class="spinner"></div><p>Считаем ваш баланс…</p></section>`;
   updateNav();
   const overview = state.balanceData || await api("/api/balance");
-  let exchange = null;
+  state.balanceData = { ...overview, exchange: state.balanceData?.exchange || null };
+  paintBalance();
   try {
-    exchange = await api("/api/rates");
+    const exchange = await api("/api/rates");
+    state.balanceData = { ...overview, exchange };
+    if (state.nav === "balance" && !state.collection) paintBalance();
   } catch (error) {
     toast("Курсы валют временно недоступны — показываю исходные суммы", true);
   }
-  state.balanceData = { ...overview, exchange };
-  paintBalance();
 }
 
 function paintBalance() {
@@ -753,6 +758,10 @@ app.addEventListener("click", async (event) => {
       if (!await confirmAction("Отправить всем вашим должникам вежливое напоминание о расчёте?")) return;
       setBusy(target, true);
       const result = await api(`/api/collections/${state.collection.collection.id}/request-funds`, { method: "POST", body: "{}" });
+      if (result.notifications_queued) {
+        toast(`Напоминания поставлены в отправку · ${result.debtors_count}`);
+        return await refreshCurrent(state.collectionTab);
+      }
       if (result.failed_count) {
         toast(`Отправлено ${result.notifications_sent} из ${result.debtors_count}. Остальные ещё не подключили бота`, true);
       } else {

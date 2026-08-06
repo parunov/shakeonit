@@ -39,6 +39,8 @@ AUTH_KEY = web.RequestKey("telegram_auth", dict)
 NEW_USER_KEY = web.RequestKey("new_user", bool)
 FX_CACHE_KEY = web.AppKey("fx_cache", dict)
 FX_LOCK_KEY = web.AppKey("fx_lock", asyncio.Lock)
+DELIVERY_TASKS_KEY = web.AppKey("delivery_tasks", set)
+DELIVERY_LIMIT_KEY = web.AppKey("delivery_limit", asyncio.Semaphore)
 NBRB_RATES_URL = "https://api.nbrb.by/exrates/rates?periodicity=0"
 FX_CACHE_SECONDS = 30 * 60
 
@@ -168,6 +170,62 @@ async def _report(
     )
 
 
+def _queue_delivery(request: web.Request, awaitable, label: str) -> None:
+    """Run Telegram delivery outside the API response with bounded concurrency and time."""
+
+    async def runner() -> None:
+        try:
+            async with request.app[DELIVERY_LIMIT_KEY]:
+                await asyncio.wait_for(awaitable, timeout=12)
+        except TimeoutError:
+            LOGGER.warning("Telegram delivery timed out: %s", label)
+        except Exception:
+            LOGGER.exception("Telegram delivery failed: %s", label)
+
+    task = asyncio.create_task(runner(), name=f"telegram-delivery:{label}")
+    request.app[DELIVERY_TASKS_KEY].add(task)
+    task.add_done_callback(request.app[DELIVERY_TASKS_KEY].discard)
+
+
+def _queue_report(
+    request: web.Request,
+    collection,
+    text: str,
+    reply_markup=None,
+    *,
+    exclude_user_ids=(),
+    subscriber_reply_markup=None,
+) -> tuple[bool, int]:
+    service, bot, _ = _context(request)
+    _queue_delivery(
+        request,
+        _report(
+            bot,
+            service,
+            collection,
+            text,
+            reply_markup,
+            exclude_user_ids=exclude_user_ids,
+            subscriber_reply_markup=subscriber_reply_markup,
+        ),
+        f"collection-{collection['id']}",
+    )
+    return False, 0
+
+
+async def delivery_context(application: web.Application):
+    application[DELIVERY_TASKS_KEY] = set()
+    application[DELIVERY_LIMIT_KEY] = asyncio.Semaphore(4)
+    yield
+    tasks = list(application[DELIVERY_TASKS_KEY])
+    if tasks:
+        _, pending = await asyncio.wait(tasks, timeout=3)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
 async def _confirm_private_subscription(
     bot: Bot, service: BudgetService, collection, user_id: int
 ) -> bool:
@@ -177,6 +235,7 @@ async def _confirm_private_subscription(
             f"🔔 <b>Уведомления включены</b>\n\nСбор: «{escape(collection['title'])}». "
             "Теперь важные операции будут приходить в этот чат.",
             parse_mode="HTML",
+            request_timeout=5,
         )
         return True
     except TelegramAPIError:
@@ -419,29 +478,35 @@ async def create_collection(request: web.Request) -> web.Response:
         notifications_enabled = await _confirm_private_subscription(
             bot, service, collection, user["id"]
         )
-    sent, notifications_sent = await _report(
-        bot,
-        service,
-        collection,
-        f"🧾 <b>Новый общий сбор «{escape(collection['title'])}»</b>\n\n"
-        f"{_name(user)} приглашает вести расходы вместе в {collection['currency']}. "
-        "Добавляйте траты и сразу видьте, кто кому сколько должен(а).",
-        _collection_invite_markup(request.app[SETTINGS_KEY], collection_id),
-        exclude_user_ids={user["id"]},
-    )
-    if not personal and sent:
-        prompt_id = await service.take_bot_message(chat_id, "create_collection_prompt")
-        if prompt_id is not None:
-            try:
-                await bot.delete_message(chat_id, prompt_id)
-            except TelegramAPIError:
-                LOGGER.info("Could not delete collection prompt %s in chat %s", prompt_id, chat_id)
+    async def deliver_creation() -> None:
+        sent, _ = await _report(
+            bot,
+            service,
+            collection,
+            f"🧾 <b>Новый общий сбор «{escape(collection['title'])}»</b>\n\n"
+            f"{_name(user)} приглашает вести расходы вместе в {collection['currency']}. "
+            "Добавляйте траты и сразу видьте, кто кому сколько должен(а).",
+            _collection_invite_markup(request.app[SETTINGS_KEY], collection_id),
+            exclude_user_ids={user["id"]},
+        )
+        if not personal and sent:
+            prompt_id = await service.take_bot_message(chat_id, "create_collection_prompt")
+            if prompt_id is not None:
+                try:
+                    await bot.delete_message(chat_id, prompt_id, request_timeout=5)
+                except TelegramAPIError:
+                    LOGGER.info(
+                        "Could not delete collection prompt %s in chat %s", prompt_id, chat_id
+                    )
+
+    _queue_delivery(request, deliver_creation(), f"create-collection-{collection_id}")
     return web.json_response(
         {
             "ok": True,
             "collection_id": collection_id,
-            "report_sent": sent,
-            "notifications_sent": notifications_sent,
+            "report_sent": False,
+            "notifications_sent": 0,
+            "notifications_queued": True,
             "notifications_enabled": notifications_enabled,
         }
     )
@@ -518,9 +583,8 @@ async def add_expense(request: web.Request) -> web.Response:
     transaction_id = await service.add_expense(
         collection_id, user["id"], amount, participant_ids, comment
     )
-    sent, notifications_sent = await _report(
-        bot,
-        service,
+    sent, notifications_sent = _queue_report(
+        request,
         collection,
         f"💸 {_name(user)} добавил(а) затрату <b>{format_money(amount, collection['currency'])}</b>"
         f" · {escape(comment) if comment else 'без комментария'} · на {len(participant_ids)} чел.",
@@ -532,6 +596,7 @@ async def add_expense(request: web.Request) -> web.Response:
             "transaction_id": transaction_id,
             "report_sent": sent,
             "notifications_sent": notifications_sent,
+            "notifications_queued": True,
         }
     )
 
@@ -563,37 +628,47 @@ async def add_repayment(request: web.Request) -> web.Response:
             ]
         ]
     )
-    sent, notifications_sent = await _report(
-        bot,
-        service,
-        collection,
-        f"⏳ {_name(user)} сообщил(а) о возврате долга "
-        f"{telegram_user_link(creditor['id'], creditor['full_name'], creditor['username'])}: "
-        f"<b>{format_money(amount, collection['currency'])}</b>. Баланс изменится после "
-        f"подтверждения получателем.{comment_line}",
-        exclude_user_ids={user["id"], creditor_id},
-    )
-    try:
-        confirmation_message = await bot.send_message(
-            creditor_id,
-            "🤝 <b>Подтвердите получение</b>\n\n"
-            f"От: {_name(user)}\n"
-            f"Сумма: <b>{format_money(amount, collection['currency'])}</b>\n"
-            f"Сбор: {escape(collection['title'])}{comment_line}",
-            parse_mode="HTML",
-            reply_markup=confirm_markup,
+    async def deliver_repayment() -> None:
+        async def send_confirmation() -> None:
+            try:
+                confirmation_message = await bot.send_message(
+                    creditor_id,
+                    "🤝 <b>Подтвердите получение</b>\n\n"
+                    f"От: {_name(user)}\n"
+                    f"Сумма: <b>{format_money(amount, collection['currency'])}</b>\n"
+                    f"Сбор: {escape(collection['title'])}{comment_line}",
+                    parse_mode="HTML",
+                    reply_markup=confirm_markup,
+                    request_timeout=5,
+                )
+                message_id = getattr(confirmation_message, "message_id", None)
+                if isinstance(message_id, int):
+                    await service.set_repayment_confirmation_message(transaction_id, message_id)
+            except TelegramAPIError:
+                LOGGER.info("Creditor %s has no private chat with bot", creditor_id)
+
+        await asyncio.gather(
+            _report(
+                bot,
+                service,
+                collection,
+                f"⏳ {_name(user)} сообщил(а) о возврате долга "
+                f"{telegram_user_link(creditor['id'], creditor['full_name'], creditor['username'])}: "
+                f"<b>{format_money(amount, collection['currency'])}</b>. Баланс изменится после "
+                f"подтверждения получателем.{comment_line}",
+                exclude_user_ids={user["id"], creditor_id},
+            ),
+            send_confirmation(),
         )
-        message_id = getattr(confirmation_message, "message_id", None)
-        if isinstance(message_id, int):
-            await service.set_repayment_confirmation_message(transaction_id, message_id)
-    except TelegramAPIError:
-        LOGGER.info("Creditor %s has no private chat with bot", creditor_id)
+
+    _queue_delivery(request, deliver_repayment(), f"repayment-{transaction_id}")
     return web.json_response(
         {
             "ok": True,
             "transaction_id": transaction_id,
-            "report_sent": sent,
-            "notifications_sent": notifications_sent,
+            "report_sent": False,
+            "notifications_sent": 0,
+            "notifications_queued": True,
         }
     )
 
@@ -615,55 +690,59 @@ async def request_funds(request: web.Request) -> web.Response:
             [InlineKeyboardButton(text="📱 Открыть сбор", url=app_url)],
         ]
     )
-    delivered = 0
-    failed = 0
-    for debt in debts:
-        try:
-            await bot.send_message(
-                debt.debtor_id,
-                "🔔 <b>Небольшое напоминание о расчёте</b>\n\n"
-                f"{_name(user)} вежливо просит завершить расчёт по сбору "
-                f"«{escape(collection['title'])}».\n"
-                f"К возврату: <b>{format_money(debt.amount, collection['currency'])}</b>.\n\n"
-                "После перевода отметьте возврат в сборе — получатель подтвердит получение.",
-                parse_mode="HTML",
-                reply_markup=open_markup,
-            )
-            delivered += 1
-        except TelegramAPIError:
-            failed += 1
-            LOGGER.info(
-                "Could not deliver funds request to user %s for collection %s",
-                debt.debtor_id,
-                collection_id,
-            )
+    async def deliver_funds_requests() -> None:
+        async def deliver(debt) -> bool:
+            try:
+                await bot.send_message(
+                    debt.debtor_id,
+                    "🔔 <b>Небольшое напоминание о расчёте</b>\n\n"
+                    f"{_name(user)} вежливо просит завершить расчёт по сбору "
+                    f"«{escape(collection['title'])}».\n"
+                    f"К возврату: <b>{format_money(debt.amount, collection['currency'])}</b>.\n\n"
+                    "После перевода отметьте возврат в сборе — получатель подтвердит получение.",
+                    parse_mode="HTML",
+                    reply_markup=open_markup,
+                    request_timeout=5,
+                )
+                return True
+            except TelegramAPIError:
+                LOGGER.info(
+                    "Could not deliver funds request to user %s for collection %s",
+                    debt.debtor_id,
+                    collection_id,
+                )
+                return False
 
-    report_sent = False
-    if collection["chat_id"]:
-        try:
-            await bot.send_message(
-                collection["chat_id"],
-                f"🔔 {_name(user)} вежливо напомнил(а) о расчёте по сбору "
-                f"<b>«{escape(collection['title'])}»</b>. "
-                f"Личные уведомления: {delivered} из {len(debts)}.",
-                parse_mode="HTML",
-                disable_notification=True,
-            )
-            report_sent = True
-        except TelegramAPIError:
-            LOGGER.warning(
-                "Could not publish funds request report to chat %s",
-                collection["chat_id"],
-                exc_info=True,
-            )
+        results = await asyncio.gather(*(deliver(debt) for debt in debts))
+        delivered = sum(results)
+        if collection["chat_id"]:
+            try:
+                await bot.send_message(
+                    collection["chat_id"],
+                    f"🔔 {_name(user)} вежливо напомнил(а) о расчёте по сбору "
+                    f"<b>«{escape(collection['title'])}»</b>. "
+                    f"Личные уведомления: {delivered} из {len(debts)}.",
+                    parse_mode="HTML",
+                    disable_notification=True,
+                    request_timeout=5,
+                )
+            except TelegramAPIError:
+                LOGGER.warning(
+                    "Could not publish funds request report to chat %s",
+                    collection["chat_id"],
+                    exc_info=True,
+                )
+
+    _queue_delivery(request, deliver_funds_requests(), f"funds-request-{collection_id}")
 
     return web.json_response(
         {
             "ok": True,
             "debtors_count": len(debts),
-            "notifications_sent": delivered,
-            "failed_count": failed,
-            "report_sent": report_sent,
+            "notifications_sent": 0,
+            "failed_count": 0,
+            "report_sent": False,
+            "notifications_queued": True,
         }
     )
 
@@ -680,30 +759,40 @@ async def confirm_repayment(request: web.Request) -> web.Response:
     comment_line = (
         f" Комментарий: {escape(transaction['comment'])}." if transaction["comment"] else ""
     )
-    sent, notifications_sent = await _report(
-        bot,
-        service,
-        collection,
-        f"✅ {_name(user)} подтвердил(а) получение возврата от "
-        f"{telegram_user_link(sender['id'], sender['full_name'], sender['username'])}: "
-        f"<b>{format_money(transaction['amount'], collection['currency'])}</b>. "
-        f"Балансы пересчитаны.{comment_line}",
-        exclude_user_ids={user["id"]},
-    )
     comment_detail = (
         f"\nКомментарий: {escape(transaction['comment'])}" if transaction["comment"] else ""
     )
-    await replace_repayment_prompt(
-        bot,
-        user["id"],
-        transaction["confirmation_message_id"],
-        "✅ <b>Получение подтверждено</b>\n\n"
-        f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
-        f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
-        f"Сбор: {escape(collection['title'])}{comment_detail}",
-    )
+    async def deliver_confirmation() -> None:
+        await asyncio.gather(
+            _report(
+                bot,
+                service,
+                collection,
+                f"✅ {_name(user)} подтвердил(а) получение возврата от "
+                f"{telegram_user_link(sender['id'], sender['full_name'], sender['username'])}: "
+                f"<b>{format_money(transaction['amount'], collection['currency'])}</b>. "
+                f"Балансы пересчитаны.{comment_line}",
+                exclude_user_ids={user["id"]},
+            ),
+            replace_repayment_prompt(
+                bot,
+                user["id"],
+                transaction["confirmation_message_id"],
+                "✅ <b>Получение подтверждено</b>\n\n"
+                f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
+                f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
+                f"Сбор: {escape(collection['title'])}{comment_detail}",
+            ),
+        )
+
+    _queue_delivery(request, deliver_confirmation(), f"confirm-repayment-{transaction_id}")
     return web.json_response(
-        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+        {
+            "ok": True,
+            "report_sent": False,
+            "notifications_sent": 0,
+            "notifications_queued": True,
+        }
     )
 
 
@@ -719,30 +808,40 @@ async def reject_repayment(request: web.Request) -> web.Response:
     comment_line = (
         f" Комментарий: {escape(transaction['comment'])}." if transaction["comment"] else ""
     )
-    sent, notifications_sent = await _report(
-        bot,
-        service,
-        collection,
-        f"❌ {_name(user)} отклонил(а) получение возврата от "
-        f"{telegram_user_link(sender['id'], sender['full_name'], sender['username'])}: "
-        f"<b>{format_money(transaction['amount'], collection['currency'])}</b>. "
-        f"Баланс не изменился.{comment_line}",
-        exclude_user_ids={user["id"]},
-    )
     comment_detail = (
         f"\nКомментарий: {escape(transaction['comment'])}" if transaction["comment"] else ""
     )
-    await replace_repayment_prompt(
-        bot,
-        user["id"],
-        transaction["confirmation_message_id"],
-        "❌ <b>Получение отклонено</b>\n\n"
-        f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
-        f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
-        f"Сбор: {escape(collection['title'])}{comment_detail}",
-    )
+    async def deliver_rejection() -> None:
+        await asyncio.gather(
+            _report(
+                bot,
+                service,
+                collection,
+                f"❌ {_name(user)} отклонил(а) получение возврата от "
+                f"{telegram_user_link(sender['id'], sender['full_name'], sender['username'])}: "
+                f"<b>{format_money(transaction['amount'], collection['currency'])}</b>. "
+                f"Баланс не изменился.{comment_line}",
+                exclude_user_ids={user["id"]},
+            ),
+            replace_repayment_prompt(
+                bot,
+                user["id"],
+                transaction["confirmation_message_id"],
+                "❌ <b>Получение отклонено</b>\n\n"
+                f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
+                f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
+                f"Сбор: {escape(collection['title'])}{comment_detail}",
+            ),
+        )
+
+    _queue_delivery(request, deliver_rejection(), f"reject-repayment-{transaction_id}")
     return web.json_response(
-        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+        {
+            "ok": True,
+            "report_sent": False,
+            "notifications_sent": 0,
+            "notifications_queued": True,
+        }
     )
 
 
@@ -757,9 +856,8 @@ async def join_collection(request: web.Request) -> web.Response:
     await service.join(collection_id, user["id"], subscribe=subscribe)
     if subscribe:
         subscribe = await _confirm_private_subscription(bot, service, collection, user["id"])
-    sent, notifications_sent = await _report(
-        bot,
-        service,
+    sent, notifications_sent = _queue_report(
+        request,
         collection,
         f"🙋 {_name(user)} участвует в сборе <b>«{escape(collection['title'])}»</b>.",
         exclude_user_ids={user["id"]},
@@ -770,6 +868,7 @@ async def join_collection(request: web.Request) -> web.Response:
             "report_sent": sent,
             "notifications_sent": notifications_sent,
             "notifications_enabled": subscribe,
+            "notifications_queued": True,
         }
     )
 
@@ -850,9 +949,8 @@ async def edit_transaction(request: web.Request) -> web.Response:
         if transaction["kind"] == "expense"
         else []
     )
-    sent, notifications_sent = await _report(
-        bot,
-        service,
+    sent, notifications_sent = _queue_report(
+        request,
         collection,
         transaction_update_report(
             _full_name(user),
@@ -867,7 +965,12 @@ async def edit_transaction(request: web.Request) -> web.Response:
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
-        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+        {
+            "ok": True,
+            "report_sent": sent,
+            "notifications_sent": notifications_sent,
+            "notifications_queued": True,
+        }
     )
 
 
@@ -879,15 +982,19 @@ async def cancel_transaction(request: web.Request) -> web.Response:
         raise ApiError("Транзакция не найдена", 404)
     collection = await _require_member(service, transaction["collection_id"], user["id"])
     await service.cancel_transaction(transaction_id, user["id"])
-    sent, notifications_sent = await _report(
-        bot,
-        service,
+    sent, notifications_sent = _queue_report(
+        request,
         collection,
         f"↩️ {_name(user)} отменил(а) транзакцию #{transaction_id}. Балансы пересчитаны.",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
-        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+        {
+            "ok": True,
+            "report_sent": sent,
+            "notifications_sent": notifications_sent,
+            "notifications_queued": True,
+        }
     )
 
 
@@ -896,15 +1003,19 @@ async def leave_collection(request: web.Request) -> web.Response:
     collection_id = int(request.match_info["collection_id"])
     collection = await _require_member(service, collection_id, user["id"])
     await service.remove_participant(collection_id, user["id"], user["id"])
-    sent, notifications_sent = await _report(
-        bot,
-        service,
+    sent, notifications_sent = _queue_report(
+        request,
         collection,
         f"👋 {_name(user)} вышел(ла) из сбора <b>«{escape(collection['title'])}»</b>.",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
-        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+        {
+            "ok": True,
+            "report_sent": sent,
+            "notifications_sent": notifications_sent,
+            "notifications_queued": True,
+        }
     )
 
 
@@ -979,16 +1090,20 @@ async def archive_collection(request: web.Request) -> web.Response:
     collection_id = int(request.match_info["collection_id"])
     collection = await _require_member(service, collection_id, user["id"])
     await service.archive(collection_id, user["id"])
-    sent, notifications_sent = await _report(
-        bot,
-        service,
+    sent, notifications_sent = _queue_report(
+        request,
         collection,
         f"📦 {_name(user)} завершил(а) сбор <b>«{escape(collection['title'])}»</b>. "
         "Архив — 30 дней.",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
-        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+        {
+            "ok": True,
+            "report_sent": sent,
+            "notifications_sent": notifications_sent,
+            "notifications_queued": True,
+        }
     )
 
 
@@ -997,15 +1112,19 @@ async def restore_collection(request: web.Request) -> web.Response:
     collection_id = int(request.match_info["collection_id"])
     collection = await _require_member(service, collection_id, user["id"])
     await service.restore(collection_id, user["id"])
-    sent, notifications_sent = await _report(
-        bot,
-        service,
+    sent, notifications_sent = _queue_report(
+        request,
         collection,
         f"♻️ {_name(user)} восстановил(а) сбор <b>«{escape(collection['title'])}»</b>.",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
-        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+        {
+            "ok": True,
+            "report_sent": sent,
+            "notifications_sent": notifications_sent,
+            "notifications_queued": True,
+        }
     )
 
 
@@ -1015,9 +1134,8 @@ async def delete_collection(request: web.Request) -> web.Response:
     collection = await _require_member(service, collection_id, user["id"])
     if collection["status"] != "archived":
         raise ApiError("Удалить можно только сбор из архива")
-    sent, notifications_sent = await _report(
-        bot,
-        service,
+    sent, notifications_sent = _queue_report(
+        request,
         collection,
         f"🗑 {_name(user)} безвозвратно удалил(а) архивный сбор "
         f"<b>«{escape(collection['title'])}»</b>.",
@@ -1025,7 +1143,12 @@ async def delete_collection(request: web.Request) -> web.Response:
     )
     await service.delete_archived(collection_id, user["id"])
     return web.json_response(
-        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+        {
+            "ok": True,
+            "report_sent": sent,
+            "notifications_sent": notifications_sent,
+            "notifications_queued": True,
+        }
     )
 
 
@@ -1037,16 +1160,20 @@ async def transfer_admin(request: web.Request) -> web.Response:
     new_admin_id = _integer(payload, "user_id", "Выберите участника")
     await service.transfer_admin(collection_id, user["id"], new_admin_id)
     member = await _member(service, collection_id, new_admin_id)
-    sent, notifications_sent = await _report(
-        bot,
-        service,
+    sent, notifications_sent = _queue_report(
+        request,
         collection,
         f"👑 Администратор сбора <b>«{escape(collection['title'])}»</b> — "
         f"{telegram_user_link(member['id'], member['full_name'], member['username'])}.",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
-        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+        {
+            "ok": True,
+            "report_sent": sent,
+            "notifications_sent": notifications_sent,
+            "notifications_queued": True,
+        }
     )
 
 
@@ -1058,9 +1185,8 @@ async def remove_member(request: web.Request) -> web.Response:
     member_id = _integer(payload, "user_id", "Выберите участника")
     member = await _member(service, collection_id, member_id)
     await service.remove_participant(collection_id, user["id"], member_id)
-    sent, notifications_sent = await _report(
-        bot,
-        service,
+    sent, notifications_sent = _queue_report(
+        request,
         collection,
         f"👥 {telegram_user_link(member['id'], member['full_name'], member['username'])} "
         "больше не участвует в сборе "
@@ -1068,7 +1194,12 @@ async def remove_member(request: web.Request) -> web.Response:
         exclude_user_ids={user["id"], member_id},
     )
     return web.json_response(
-        {"ok": True, "report_sent": sent, "notifications_sent": notifications_sent}
+        {
+            "ok": True,
+            "report_sent": sent,
+            "notifications_sent": notifications_sent,
+            "notifications_queued": True,
+        }
     )
 
 
@@ -1117,6 +1248,7 @@ def setup_webapp_routes(
     application[SETTINGS_KEY] = settings
     application[FX_CACHE_KEY] = {}
     application[FX_LOCK_KEY] = asyncio.Lock()
+    application.cleanup_ctx.append(delivery_context)
     application.middlewares.extend([security_headers, api_middleware])
     application.router.add_get("/app", app_index)
     application.router.add_get("/app/", app_index)
