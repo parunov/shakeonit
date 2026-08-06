@@ -138,8 +138,9 @@ button:disabled { opacity: .5; cursor: default; }
 .pill.pending { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
 .share-breakdown { display: grid; gap: 3px; margin-top: 8px; padding: 8px 10px; border-radius: 12px; background: var(--bg); }
 .payment-card { margin: 10px 0; padding: 13px 14px; border-radius: 15px; background: color-mix(in srgb, var(--accent) 8%, var(--surface)); border: 1px solid var(--line); }
-.payment-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 7px; }
+.payment-card-head { margin-bottom: 7px; }
 .payment-card-head b { line-height: 1.35; }
+.payment-value-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; }
 .payment-value { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
 .copy-payment { flex: 0 0 auto; padding: 6px 9px; border: 0; border-radius: 9px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); font-size: 10px; font-weight: 750; }
 .quick-pay-block { margin: 12px 0 14px; padding: 15px; border: 1px solid color-mix(in srgb, var(--warn) 22%, var(--line)); border-radius: 21px; background: linear-gradient(135deg, color-mix(in srgb, var(--warn) 8%, var(--surface)), var(--surface)); box-shadow: 0 9px 26px rgba(27,39,51,.06); }

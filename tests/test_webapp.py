@@ -397,7 +397,9 @@ async def test_repayment_notification_can_be_rejected_by_recipient(tmp_path):
     assert "Отправитель" in private_message
     assert 'href="tg://user?id=2"' in private_message
     assert "Комментарий: Перевод на карту" in private_message
-    assert "Сбор: Поездка" in private_message
+    assert "Сбор:" in private_message
+    assert "Поездка" in private_message
+    assert 'href="https://t.me/ShakeOnIt_bot?start=collection_' in private_message
     assert f"#{repayment_id}" not in private_message
     assert callbacks == {f"repayconfirm:{repayment_id}", f"repayreject:{repayment_id}"}
     assert rejected.status == 200
@@ -447,6 +449,13 @@ async def test_request_funds_notifies_each_debtor_and_reports_to_group(tmp_path)
     recipients = [call.args[0] for call in bot.send_message.await_args_list]
     assert recipients == [2, 3, -100500]
     assert "Карта •• 1234" not in bot.send_message.await_args_list[0].args[1]
+    assert "К возврату" not in bot.send_message.await_args_list[0].args[1]
+    assert (
+        "просит вас рассчитаться по действующим долгам"
+        in (bot.send_message.await_args_list[0].args[1])
+    )
+    assert "Личные уведомления" not in bot.send_message.await_args_list[-1].args[1]
+    assert "startapp=collection_" in bot.send_message.await_args_list[-1].args[1]
     assert (
         "startapp=collection_"
         in bot.send_message.await_args_list[0].kwargs["reply_markup"].inline_keyboard[0][0].url
@@ -467,14 +476,10 @@ async def test_history_is_paginated_and_balance_has_personal_debts(tmp_path):
     settings = Settings(bot_token=TOKEN, database_path=database.path)
     application = web.Application()
     setup_webapp_routes(application, SimpleNamespace(send_message=AsyncMock()), service, settings)
-    owner_auth = signed_init_data(
-        user={"id": 1, "first_name": "Организатор", "username": "owner"}
-    )
+    owner_auth = signed_init_data(user={"id": 1, "first_name": "Организатор", "username": "owner"})
 
     async with TestClient(TestServer(application)) as client:
-        first = await client.get(
-            "/api/history", headers={"X-Telegram-Init-Data": owner_auth}
-        )
+        first = await client.get("/api/history", headers={"X-Telegram-Init-Data": owner_auth})
         first_payload = await first.json()
         second = await client.get(
             "/api/history?transaction_offset=20",
@@ -486,9 +491,7 @@ async def test_history_is_paginated_and_balance_has_personal_debts(tmp_path):
             headers={"X-Telegram-Init-Data": owner_auth},
         )
         details_payload = await details.json()
-        balance = await client.get(
-            "/api/balance", headers={"X-Telegram-Init-Data": owner_auth}
-        )
+        balance = await client.get("/api/balance", headers={"X-Telegram-Init-Data": owner_auth})
         balance_payload = await balance.json()
 
     assert len(first_payload["transactions"]) == 20
@@ -521,9 +524,7 @@ async def test_profile_saves_bank_and_payment_details(tmp_path):
             json={"bank_name": "Альфа-Банк", "payment_details": "Карта •• 1234"},
             headers={"X-Telegram-Init-Data": auth},
         )
-        bootstrap = await client.get(
-            "/api/bootstrap", headers={"X-Telegram-Init-Data": auth}
-        )
+        bootstrap = await client.get("/api/bootstrap", headers={"X-Telegram-Init-Data": auth})
         payload = await bootstrap.json()
 
     assert response.status == 200
@@ -779,6 +780,15 @@ async def test_collection_share_prepares_message_for_people_and_groups(tmp_path)
     assert call.kwargs["allow_group_chats"] is True
     assert call.kwargs["allow_bot_chats"] is False
     assert "Летний отпуск" in call.kwargs["result"].input_message_content.message_text
+    assert "Инициатор:" in call.kwargs["result"].input_message_content.message_text
+    assert "Владелец" in call.kwargs["result"].input_message_content.message_text
+    assert (
+        "Вступайте легко в совместный сбор средств, контролируйте расходы и возвраты долгов"
+        in call.kwargs["result"].input_message_content.message_text
+    )
+    assert "Учитывайте общие расходы" not in (
+        call.kwargs["result"].input_message_content.message_text
+    )
     assert "collection_" in call.kwargs["result"].reply_markup.inline_keyboard[0][0].url
 
 

@@ -6,8 +6,17 @@ from aiogram.enums import ChatType
 
 from sharebudget.config import Settings
 from sharebudget.db import Database
-from sharebudget.handlers import app_launch_markup, new_collection, open_webapp
+from sharebudget.handlers import app_launch_markup, new_collection, open_webapp, unknown_action
 from sharebudget.service import BudgetService
+
+
+@pytest.mark.asyncio
+async def test_unknown_message_is_silently_ignored():
+    message = SimpleNamespace(answer=AsyncMock())
+
+    await unknown_action(message)
+
+    message.answer.assert_not_awaited()
 
 
 @pytest.mark.asyncio

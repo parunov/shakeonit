@@ -201,6 +201,7 @@ async function renderCollections() {
   if (!state.balanceData) state.balanceData = await api("/api/balance");
   const oweTotals = debtTotals(state.balanceData.personal_debts, "debtor_id");
   const owedTotals = debtTotals(state.balanceData.personal_debts, "creditor_id");
+  const quickPayments = quickPaymentRows(state.balanceData.personal_debts);
   const emptySummary = money(0, state.bootstrap.user.preferred_currency);
   const owe = Object.keys(oweTotals).length ? moneyMap(oweTotals) : emptySummary;
   const owed = Object.keys(owedTotals).length ? moneyMap(owedTotals) : emptySummary;
@@ -211,6 +212,7 @@ async function renderCollections() {
       <button class="summary-tile summary-owe" type="button" data-action="collections-summary"><small>Сколько я должен(а)</small><b>${owe}</b></button>
       <button class="summary-tile summary-owed" type="button" data-action="collections-summary"><small>Сколько мне должны</small><b>${owed}</b></button>
     </div>
+    ${quickPayments ? `<section class="quick-pay-block"><div class="quick-pay-heading"><span>↗</span><div><b>Быстрая оплата</b><small>Погасить долг без лишних шагов</small></div></div>${quickPayments}</section>` : ""}
     <div class="section-head"><h2>Текущие</h2><button class="text-button" type="button" data-action="create">+ Новый</button></div>
     ${collectionCards(active)}
     ${archived.length ? `<div class="section-head"><h2>Архив</h2></div>${collectionCards(archived)}` : ""}`;
@@ -268,14 +270,12 @@ function paintBalance() {
       <span class="personal-settlement-side"><strong class="${iOwe ? "negative" : "positive"}">${money(debt.amount, debt.currency)}</strong>${iOwe ? `<button class="pay-small" type="button" data-action="quick-repay" data-collection-id="${debt.collection_id}" data-creditor-id="${debt.creditor_id}">Оплатить</button>` : ""}</span>
     </article>`;
   }).join("");
-  const quickPayments = quickPaymentRows(data.personal_debts);
   app.innerHTML = `
     <section class="hero">
       <div class="hero-label">ОБЩИЙ БАЛАНС · ${e(preferred)}</div>
       <div class="hero-value">${netLabel}</div>
       <div class="hero-meta">${data.exchange ? `≈ по официальному курсу НБРБ · ${e(originalLabel)}` : "По активным сборам · без конвертации"}</div>
     </section>
-    ${quickPayments ? `<section class="quick-pay-block"><div class="quick-pay-heading"><span>↗</span><div><b>Быстрая оплата</b><small>Погасить долг без лишних шагов</small></div></div>${quickPayments}</section>` : ""}
     <div class="segmented"><button type="button" data-action="balance-mode" data-mode="collections" class="${state.balanceMode === "collections" ? "active" : ""}">По сборам</button><button type="button" data-action="balance-mode" data-mode="personal" class="${state.balanceMode === "personal" ? "active" : ""}">Персональный</button></div>
     ${state.balanceMode === "collections"
     ? (cards.length ? `<div class="card-list">${cards.join("")}</div>` : empty("✅", "Активных долгов нет"))
@@ -558,7 +558,7 @@ function repaySheet(preferredCreditorId = null) {
     const member = data.participants.find((item) => item.id === debt.creditor_id);
     const payment = member?.payment_details || "Получатель пока не добавил(а) платежные данные";
     const bank = member?.bank_name ? `<span class="row-note">Банк: ${e(member.bank_name)}</span><br>` : "";
-    return `<div class="payment-card" data-payment="${debt.creditor_id}" ${index === selectedIndex ? "" : "hidden"}><div class="payment-card-head"><b>💳 Данные для перевода · ${userLink(member?.id, member?.full_name, member?.username)}</b><button class="copy-payment" type="button" data-action="copy-payment" data-value="${encodeURIComponent(payment)}">Копировать</button></div>${bank}<span class="payment-value">${e(payment)}</span></div>`;
+    return `<div class="payment-card" data-payment="${debt.creditor_id}" ${index === selectedIndex ? "" : "hidden"}><div class="payment-card-head"><b>💳 Данные для перевода · ${userLink(member?.id, member?.full_name, member?.username)}</b></div>${bank}<div class="payment-value-row"><span class="payment-value">${e(payment)}</span><button class="copy-payment" type="button" data-action="copy-payment" data-value="${encodeURIComponent(payment)}">Копировать</button></div></div>`;
   }).join("");
   showSheet(`<h2>Вернуть долг</h2><p class="sheet-intro">После записи получатель должен(а) подтвердить деньги. До этого баланс не изменится.</p><form id="repay-form"><label class="field"><span>Получатель</span><select name="creditor_id" data-action="repay-creditor">${debts.map((debt, index) => `<option value="${debt.creditor_id}" data-max="${debt.repayable_amount}" ${index === selectedIndex ? "selected" : ""}>${e(debt.creditor_name)} · доступно ${money(debt.repayable_amount, data.collection.currency)}</option>`).join("")}</select></label>${cards}<label class="field"><span>Переведено · ${e(data.collection.currency)}</span><span class="amount-input"><input name="amount" inputmode="decimal" placeholder="0,00" required><button type="button" data-action="repay-max">MAX</button></span></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" placeholder="Необязательно"></label><div class="sheet-actions"><button class="primary-button" type="submit">Отправить на подтверждение</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }

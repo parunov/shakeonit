@@ -24,7 +24,7 @@ from aiogram.types import (
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
 from .config import Settings
-from .links import parse_group_start_param
+from .links import collection_app_url, collection_html_link, parse_group_start_param
 from .money import CURRENCIES, format_money, parse_amount
 from .notifications import replace_repayment_prompt, report_collection_event
 from .render import telegram_user_link, transaction_update_report
@@ -227,12 +227,17 @@ async def delivery_context(application: web.Application):
 
 
 async def _confirm_private_subscription(
-    bot: Bot, service: BudgetService, collection, user_id: int
+    bot: Bot,
+    service: BudgetService,
+    settings: Settings,
+    collection,
+    user_id: int,
 ) -> bool:
     try:
         await bot.send_message(
             user_id,
-            f"🔔 <b>Уведомления включены</b>\n\nСбор: «{escape(collection['title'])}». "
+            "🔔 <b>Уведомления включены</b>\n\n"
+            f"Сбор: {collection_html_link(collection, settings.bot_username, main_app_enabled=settings.main_app_enabled)}. "
             "Теперь важные операции будут приходить в этот чат.",
             parse_mode="HTML",
             request_timeout=5,
@@ -251,12 +256,14 @@ def _collection_invite_markup(settings: Settings, collection_id: int) -> InlineK
         if settings.main_app_enabled
         else f"https://t.me/{username}?start=app"
     )
-    rows = [[
-        InlineKeyboardButton(text="📱 Открыть сбор", url=app_url),
-        InlineKeyboardButton(
-            text="🙋 Участвовать в сборе", callback_data=f"join:{collection_id}"
-        ),
-    ]]
+    rows = [
+        [
+            InlineKeyboardButton(text="📱 Открыть сбор", url=app_url),
+            InlineKeyboardButton(
+                text="🙋 Участвовать в сборе", callback_data=f"join:{collection_id}"
+            ),
+        ]
+    ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -266,6 +273,15 @@ def _full_name(user: dict) -> str:
 
 def _name(user: dict) -> str:
     return telegram_user_link(user["id"], _full_name(user), user.get("username"))
+
+
+def _collection_link(request: web.Request, collection) -> str:
+    settings = request.app[SETTINGS_KEY]
+    return collection_html_link(
+        collection,
+        settings.bot_username,
+        main_app_enabled=settings.main_app_enabled,
+    )
 
 
 @web.middleware
@@ -476,14 +492,15 @@ async def create_collection(request: web.Request) -> web.Response:
     if personal and payload.get("subscribe") is True:
         await service.set_notification_subscription(collection_id, user["id"], True)
         notifications_enabled = await _confirm_private_subscription(
-            bot, service, collection, user["id"]
+            bot, service, request.app[SETTINGS_KEY], collection, user["id"]
         )
+
     async def deliver_creation() -> None:
         sent, _ = await _report(
             bot,
             service,
             collection,
-            f"🧾 <b>Новый общий сбор «{escape(collection['title'])}»</b>\n\n"
+            f"🧾 <b>Новый общий сбор</b> {_collection_link(request, collection)}\n\n"
             f"{_name(user)} приглашает вести расходы вместе в {collection['currency']}. "
             "Добавляйте траты и сразу видьте, кто кому сколько должен(а).",
             _collection_invite_markup(request.app[SETTINGS_KEY], collection_id),
@@ -535,11 +552,15 @@ async def prepare_collection_share(request: web.Request) -> web.Response:
     collection_id = int(request.match_info["collection_id"])
     collection = await _require_member(service, collection_id, user["id"])
     settings = request.app[SETTINGS_KEY]
-    username = settings.bot_username.lstrip("@")
-    invite_url = (
-        f"https://t.me/{username}?startapp=collection_{collection_id}&mode=compact"
-        if settings.main_app_enabled
-        else f"https://t.me/{username}?start=collection_{collection_id}"
+    invite_url = collection_app_url(
+        settings.bot_username,
+        collection_id,
+        main_app_enabled=settings.main_app_enabled,
+    )
+    invite_collection_link = collection_html_link(
+        collection,
+        settings.bot_username,
+        main_app_enabled=settings.main_app_enabled,
     )
     prepared = await bot.save_prepared_inline_message(
         user_id=user["id"],
@@ -549,16 +570,18 @@ async def prepare_collection_share(request: web.Request) -> web.Response:
             description="Приглашение вести общие расходы вместе",
             input_message_content=InputTextMessageContent(
                 message_text=(
-                    f"🧾 <b>Присоединяйтесь к сбору «{escape(collection['title'])}»</b>\n\n"
-                    f"Учитывайте общие расходы в {collection['currency']} и сразу смотрите, "
-                    "кто кому сколько должен(а). Вступление займёт один шаг."
+                    f"🧾 Присоединяйтесь к сбору {invite_collection_link}\n\n"
+                    f"Инициатор: {_name(user)}\n"
+                    f"Название сбора: {invite_collection_link}\n\n"
+                    "Вступайте легко в совместный сбор средств, контролируйте расходы "
+                    "и возвраты долгов."
                 ),
                 parse_mode="HTML",
             ),
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[
-                    InlineKeyboardButton(text="🙋 Присоединиться к сбору", url=invite_url)
-                ]]
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🙋 Присоединиться к сбору", url=invite_url)]
+                ]
             ),
         ),
         allow_user_chats=True,
@@ -628,6 +651,7 @@ async def add_repayment(request: web.Request) -> web.Response:
             ]
         ]
     )
+
     async def deliver_repayment() -> None:
         async def send_confirmation() -> None:
             try:
@@ -636,7 +660,7 @@ async def add_repayment(request: web.Request) -> web.Response:
                     "🤝 <b>Подтвердите получение</b>\n\n"
                     f"От: {_name(user)}\n"
                     f"Сумма: <b>{format_money(amount, collection['currency'])}</b>\n"
-                    f"Сбор: {escape(collection['title'])}{comment_line}",
+                    f"Сбор: {_collection_link(request, collection)}{comment_line}",
                     parse_mode="HTML",
                     reply_markup=confirm_markup,
                     request_timeout=5,
@@ -679,27 +703,26 @@ async def request_funds(request: web.Request) -> web.Response:
     collection = await _require_member(service, collection_id, user["id"])
     debts = await service.request_funds(collection_id, user["id"])
     settings = request.app[SETTINGS_KEY]
-    username = settings.bot_username.lstrip("@")
-    app_url = (
-        f"https://t.me/{username}?startapp=collection_{collection_id}&mode=compact"
-        if settings.main_app_enabled
-        else f"https://t.me/{username}?start=app"
+    app_url = collection_app_url(
+        settings.bot_username,
+        collection_id,
+        main_app_enabled=settings.main_app_enabled,
     )
+    collection_link = _collection_link(request, collection)
     open_markup = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📱 Открыть сбор", url=app_url)],
         ]
     )
+
     async def deliver_funds_requests() -> None:
         async def deliver(debt) -> bool:
             try:
                 await bot.send_message(
                     debt.debtor_id,
-                    "🔔 <b>Небольшое напоминание о расчёте</b>\n\n"
-                    f"{_name(user)} вежливо просит завершить расчёт по сбору "
-                    f"«{escape(collection['title'])}».\n"
-                    f"К возврату: <b>{format_money(debt.amount, collection['currency'])}</b>.\n\n"
-                    "После перевода отметьте возврат в сборе — получатель подтвердит получение.",
+                    "🔔 <b>Просьба рассчитаться</b>\n\n"
+                    f"{_name(user)} просит вас рассчитаться по действующим долгам "
+                    f"в сборе {collection_link}.",
                     parse_mode="HTML",
                     reply_markup=open_markup,
                     request_timeout=5,
@@ -713,15 +736,13 @@ async def request_funds(request: web.Request) -> web.Response:
                 )
                 return False
 
-        results = await asyncio.gather(*(deliver(debt) for debt in debts))
-        delivered = sum(results)
+        await asyncio.gather(*(deliver(debt) for debt in debts))
         if collection["chat_id"]:
             try:
                 await bot.send_message(
                     collection["chat_id"],
-                    f"🔔 {_name(user)} вежливо напомнил(а) о расчёте по сбору "
-                    f"<b>«{escape(collection['title'])}»</b>. "
-                    f"Личные уведомления: {delivered} из {len(debts)}.",
+                    f"🔔 {_name(user)} просит рассчитаться по действующим долгам "
+                    f"в сборе {collection_link}.",
                     parse_mode="HTML",
                     disable_notification=True,
                     request_timeout=5,
@@ -762,6 +783,7 @@ async def confirm_repayment(request: web.Request) -> web.Response:
     comment_detail = (
         f"\nКомментарий: {escape(transaction['comment'])}" if transaction["comment"] else ""
     )
+
     async def deliver_confirmation() -> None:
         await asyncio.gather(
             _report(
@@ -781,7 +803,7 @@ async def confirm_repayment(request: web.Request) -> web.Response:
                 "✅ <b>Получение подтверждено</b>\n\n"
                 f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
                 f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
-                f"Сбор: {escape(collection['title'])}{comment_detail}",
+                f"Сбор: {_collection_link(request, collection)}{comment_detail}",
             ),
         )
 
@@ -811,6 +833,7 @@ async def reject_repayment(request: web.Request) -> web.Response:
     comment_detail = (
         f"\nКомментарий: {escape(transaction['comment'])}" if transaction["comment"] else ""
     )
+
     async def deliver_rejection() -> None:
         await asyncio.gather(
             _report(
@@ -830,7 +853,7 @@ async def reject_repayment(request: web.Request) -> web.Response:
                 "❌ <b>Получение отклонено</b>\n\n"
                 f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
                 f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
-                f"Сбор: {escape(collection['title'])}{comment_detail}",
+                f"Сбор: {_collection_link(request, collection)}{comment_detail}",
             ),
         )
 
@@ -855,11 +878,13 @@ async def join_collection(request: web.Request) -> web.Response:
     subscribe = payload.get("subscribe") is True
     await service.join(collection_id, user["id"], subscribe=subscribe)
     if subscribe:
-        subscribe = await _confirm_private_subscription(bot, service, collection, user["id"])
+        subscribe = await _confirm_private_subscription(
+            bot, service, request.app[SETTINGS_KEY], collection, user["id"]
+        )
     sent, notifications_sent = _queue_report(
         request,
         collection,
-        f"🙋 {_name(user)} участвует в сборе <b>«{escape(collection['title'])}»</b>.",
+        f"🙋 {_name(user)} участвует в сборе {_collection_link(request, collection)}.",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
@@ -961,6 +986,8 @@ async def edit_transaction(request: web.Request) -> web.Response:
             after_shares,
             actor_id=user["id"],
             actor_username=user.get("username"),
+            bot_username=request.app[SETTINGS_KEY].bot_username,
+            main_app_enabled=request.app[SETTINGS_KEY].main_app_enabled,
         ),
         exclude_user_ids={user["id"]},
     )
@@ -1006,7 +1033,7 @@ async def leave_collection(request: web.Request) -> web.Response:
     sent, notifications_sent = _queue_report(
         request,
         collection,
-        f"👋 {_name(user)} вышел(ла) из сбора <b>«{escape(collection['title'])}»</b>.",
+        f"👋 {_name(user)} вышел(ла) из сбора {_collection_link(request, collection)}.",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
@@ -1047,7 +1074,9 @@ async def save_notification_subscription(request: web.Request) -> web.Response:
         raise ApiError("Некорректная настройка уведомлений")
     await service.set_notification_subscription(collection_id, user["id"], enabled)
     if enabled:
-        enabled = await _confirm_private_subscription(bot, service, collection, user["id"])
+        enabled = await _confirm_private_subscription(
+            bot, service, request.app[SETTINGS_KEY], collection, user["id"]
+        )
     return web.json_response({"ok": True, "notifications_enabled": enabled})
 
 
@@ -1093,7 +1122,7 @@ async def archive_collection(request: web.Request) -> web.Response:
     sent, notifications_sent = _queue_report(
         request,
         collection,
-        f"📦 {_name(user)} завершил(а) сбор <b>«{escape(collection['title'])}»</b>. "
+        f"📦 {_name(user)} завершил(а) сбор {_collection_link(request, collection)}. "
         "Архив — 30 дней.",
         exclude_user_ids={user["id"]},
     )
@@ -1115,7 +1144,7 @@ async def restore_collection(request: web.Request) -> web.Response:
     sent, notifications_sent = _queue_report(
         request,
         collection,
-        f"♻️ {_name(user)} восстановил(а) сбор <b>«{escape(collection['title'])}»</b>.",
+        f"♻️ {_name(user)} восстановил(а) сбор {_collection_link(request, collection)}.",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
@@ -1138,7 +1167,7 @@ async def delete_collection(request: web.Request) -> web.Response:
         request,
         collection,
         f"🗑 {_name(user)} безвозвратно удалил(а) архивный сбор "
-        f"<b>«{escape(collection['title'])}»</b>.",
+        f"{_collection_link(request, collection)}.",
         exclude_user_ids={user["id"]},
     )
     await service.delete_archived(collection_id, user["id"])
@@ -1163,7 +1192,7 @@ async def transfer_admin(request: web.Request) -> web.Response:
     sent, notifications_sent = _queue_report(
         request,
         collection,
-        f"👑 Администратор сбора <b>«{escape(collection['title'])}»</b> — "
+        f"👑 Администратор сбора {_collection_link(request, collection)} — "
         f"{telegram_user_link(member['id'], member['full_name'], member['username'])}.",
         exclude_user_ids={user["id"]},
     )
@@ -1190,7 +1219,7 @@ async def remove_member(request: web.Request) -> web.Response:
         collection,
         f"👥 {telegram_user_link(member['id'], member['full_name'], member['username'])} "
         "больше не участвует в сборе "
-        f"<b>«{escape(collection['title'])}»</b>.",
+        f"{_collection_link(request, collection)}.",
         exclude_user_ids={user["id"], member_id},
     )
     return web.json_response(

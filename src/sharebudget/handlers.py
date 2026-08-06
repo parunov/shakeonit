@@ -35,7 +35,7 @@ from .keyboards import (
     transaction_actions,
     webapp_launch,
 )
-from .links import group_start_param
+from .links import collection_html_link, group_start_param
 from .money import format_money, parse_amount
 from .notifications import replace_repayment_prompt, report_collection_event
 from .render import (
@@ -56,6 +56,16 @@ router = Router()
 
 def event_user_link(user) -> str:
     return telegram_user_link(user.id, user.full_name, user.username)
+
+
+def event_collection_link(bot, collection) -> str:
+    bot_user = getattr(bot, "_me", None)
+    return collection_html_link(
+        collection,
+        getattr(bot_user, "username", None) or "ShakeOnIt_bot",
+        main_app_enabled=bool(getattr(bot_user, "has_main_web_app", True)),
+    )
+
 
 HELP_TEXT = """<b>❓ Помощь</b>
 
@@ -232,7 +242,8 @@ async def start(
             (
                 "✅ <b>Подключение завершено</b>\n\n"
                 f"Вы {'уже участвовали' if was_member else 'теперь участвуете'} в сборе "
-                f"«{escape(collection['title'])}». Бот запомнил ваш Telegram ID.\n\n"
+                f"{event_collection_link(message.bot, collection)}. "
+                "Бот запомнил ваш Telegram ID.\n\n"
                 "🔔 Личные уведомления по этому сбору включены."
             ),
             reply_markup=private_menu,
@@ -561,7 +572,9 @@ async def join_collection(callback: CallbackQuery, service: BudgetService) -> No
 
 @router.callback_query(F.data.startswith("decline:"))
 async def decline_collection_invitation(callback: CallbackQuery) -> None:
-    await callback.answer("Приглашение отклонено. Вы сможете присоединиться позже.", show_alert=True)
+    await callback.answer(
+        "Приглашение отклонено. Вы сможете присоединиться позже.", show_alert=True
+    )
 
 
 async def choose_collection(message: Message, service, action: str, empty_text: str) -> None:
@@ -806,7 +819,7 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
             "🤝 <b>Подтвердите получение</b>\n\n"
             f"От: {event_user_link(message.from_user)}\n"
             f"Сумма: <b>{format_money(amount, collection['currency'])}</b>\n"
-            f"Сбор: {escape(collection['title'])}",
+            f"Сбор: {event_collection_link(message.bot, collection)}",
             parse_mode=ParseMode.HTML,
             reply_markup=confirm_markup,
         )
@@ -854,7 +867,7 @@ async def repayment_confirm(callback: CallbackQuery, service: BudgetService) -> 
         "✅ <b>Получение подтверждено</b>\n\n"
         f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
         f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
-        f"Сбор: {escape(collection['title'])}"
+        f"Сбор: {event_collection_link(callback.bot, collection)}"
         f"{comment_detail}"
     )
     if callback.message.chat.type == ChatType.PRIVATE:
@@ -1078,7 +1091,7 @@ async def repayment_reject(callback: CallbackQuery, service: BudgetService) -> N
         "❌ <b>Получение отклонено</b>\n\n"
         f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
         f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
-        f"Сбор: {escape(collection['title'])}"
+        f"Сбор: {event_collection_link(callback.bot, collection)}"
         f"{comment_detail}"
     )
     if callback.message.chat.type == ChatType.PRIVATE:
@@ -1394,7 +1407,7 @@ async def quick_expense(
         exclude_user_ids={actor_id},
     )
     await message.reply(
-        f"✅ Затрата #{transaction_id} добавлена в «{escape(collection['title'])}»: "
+        f"✅ Затрата #{transaction_id} добавлена в {event_collection_link(message.bot, collection)}: "
         f"<b>{format_money(amount, collection['currency'])}</b> на "
         f"{', '.join('@' + escape(name) for name in usernames)}.",
         parse_mode="HTML",
@@ -1455,11 +1468,8 @@ async def mention_hint(message: Message) -> None:
 
 
 @router.message(StateFilter(None))
-async def unknown_action(message: Message) -> None:
-    await message.answer(
-        "ℹ️ Не удалось распознать действие. Выберите нужный пункт в меню — так быстрее и надежнее.",
-        reply_markup=main_menu(),
-    )
+async def unknown_action(_: Message) -> None:
+    """Silently consume messages that do not match a supported bot action."""
 
 
 @router.error()
