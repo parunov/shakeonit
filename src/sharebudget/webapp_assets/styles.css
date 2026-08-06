@@ -78,11 +78,22 @@ button.card { text-align: left; padding: 17px; cursor: pointer; }
 .collection-icon { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 16px; background: color-mix(in srgb, var(--accent) 12%, var(--surface)); font-size: 21px; }
 .collection-icon.status-icon { font-size: 30px; line-height: 1; }
 .card-title { display: block; font-weight: 730; line-height: 1.25; }
+.owner-mark { display: inline-flex; margin-left: 7px; padding: 3px 6px; border-radius: 7px; color: var(--accent); background: color-mix(in srgb, var(--accent) 11%, transparent); font-size: 9px; font-weight: 780; vertical-align: 2px; }
 .card-subtitle { display: block; margin-top: 5px; color: var(--muted); font-size: 13px; }
 .amount { text-align: right; font-weight: 750; white-space: nowrap; }
 .amount.positive { color: var(--good); }
 .amount.negative { color: var(--bad); }
+.positive { color: var(--good); }
+.negative { color: var(--bad); }
 .chevron { color: var(--muted); font-size: 20px; }
+
+.segmented { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 14px 0; padding: 4px; border-radius: 15px; background: color-mix(in srgb, var(--muted) 10%, transparent); }
+.segmented button { min-height: 39px; border: 0; border-radius: 11px; color: var(--muted); background: transparent; font-weight: 720; }
+.segmented button.active { color: var(--text); background: var(--surface); box-shadow: 0 3px 12px rgba(0,0,0,.06); }
+.personal-debt { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.personal-debt > span { display: grid; gap: 5px; min-width: 0; }
+.personal-debt small { color: var(--muted); font-size: 12px; }
+.personal-debt strong { flex: 0 0 auto; white-space: nowrap; }
 
 .quick-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 14px 0; }
 .action-button, .primary-button, .secondary-button, .danger-button {
@@ -142,6 +153,19 @@ button:disabled { opacity: .5; cursor: default; }
 .request-funds > span:nth-child(2) { display: grid; gap: 3px; }
 .request-funds small { color: var(--muted); font-size: 12px; font-weight: 400; }
 .request-funds > i { color: var(--accent); font-size: 22px; font-style: normal; }
+.statistics-button { display: grid; grid-template-columns: 34px 1fr auto; align-items: center; gap: 10px; width: 100%; margin: 12px 0; padding: 13px 14px; border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line)); border-radius: 16px; color: var(--text); background: color-mix(in srgb, var(--accent) 7%, var(--surface)); text-align: left; }
+.statistics-button > span:nth-child(2) { display: grid; gap: 3px; }
+.statistics-button small { color: var(--muted); font-size: 12px; font-weight: 400; }
+.statistics-button > i { color: var(--accent); font-size: 22px; font-style: normal; }
+.load-more { display: block; width: max-content; margin: 12px auto 4px; padding: 9px 15px; border: 0; border-radius: 13px; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--surface)); font-weight: 720; }
+.stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 16px 0; }
+.stats-grid > div, .created-collection { padding: 14px; border: 1px solid var(--line); border-radius: 16px; background: var(--bg); }
+.stats-grid small, .stats-grid b { display: block; }
+.stats-grid b { margin-top: 6px; overflow-wrap: anywhere; }
+.stats-grid span, .created-collection span { display: block; margin-top: 5px; color: var(--muted); font-size: 12px; }
+.success-mark { display: grid; place-items: center; width: 58px; height: 58px; margin: 0 auto 14px; border-radius: 20px; color: #fff; background: var(--good); box-shadow: 0 10px 25px color-mix(in srgb, var(--good) 30%, transparent); font-size: 28px; font-weight: 850; }
+.created-collection { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 15px 0; }
+.created-collection span { margin: 0; }
 
 .bottom-nav {
   position: fixed; z-index: 20; left: 10px; right: 10px; bottom: calc(8px + env(safe-area-inset-bottom));
@@ -174,6 +198,8 @@ button:disabled { opacity: .5; cursor: default; }
   outline: none; color: var(--text); background: var(--bg);
 }
 .field textarea { min-height: 82px; resize: vertical; }
+.amount-input { display: grid !important; grid-template-columns: 1fr auto; gap: 8px; margin: 0 !important; }
+.amount-input button { min-width: 60px; border: 0; border-radius: 14px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); font-weight: 800; }
 .compact-field { margin-bottom: 0; }
 .field input:focus, .field textarea:focus, .field select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 13%, transparent); }
 .check-list { display: grid; gap: 8px; margin: 12px 0 18px; }

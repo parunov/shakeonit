@@ -87,6 +87,8 @@ def test_collection_invite_uses_safe_fallback_or_enabled_main_app():
     assert not any(button.url and "startapp" in button.url for button in buttons)
     assert any(button.url and "start=app" in button.url for button in buttons)
     assert any(button.callback_data == "join:42" for button in buttons)
+    assert any(button.callback_data == "decline:42" for button in buttons)
+    assert {button.text for button in buttons} >= {"✅ Принять", "👀 Просмотреть", "Отклонить"}
 
     settings.main_app_enabled = True
     enabled_buttons = [
@@ -131,6 +133,7 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert authorized.status == 200
         assert payload["user"]["id"] == 42
         assert payload["user"]["preferred_currency"] == "BYN"
+        assert payload["user"]["bank_name"] == ""
         assert payload["main_app_enabled"] is False
         assert payload["is_new_user"] is True
         assert payload["sync_version"]
@@ -418,11 +421,85 @@ async def test_request_funds_notifies_each_debtor_and_reports_to_group(tmp_path)
     }
     recipients = [call.args[0] for call in bot.send_message.await_args_list]
     assert recipients == [2, 3, -100500]
-    assert "Карта •• 1234" in bot.send_message.await_args_list[0].args[1]
+    assert "Карта •• 1234" not in bot.send_message.await_args_list[0].args[1]
     assert (
         "startapp=collection_"
         in bot.send_message.await_args_list[0].kwargs["reply_markup"].inline_keyboard[0][0].url
     )
+
+
+@pytest.mark.asyncio
+async def test_history_is_paginated_and_balance_has_personal_debts(tmp_path):
+    database = Database(tmp_path / "history-pages.db")
+    await database.initialize()
+    service = BudgetService(database)
+    await service.upsert_user(1, "owner", "Организатор")
+    await service.upsert_user(2, "member", "Участник")
+    collection_id = await service.create_collection(-100500, "Поездка", "EUR", 1)
+    await service.join(collection_id, 2)
+    for number in range(25):
+        await service.add_expense(collection_id, 1, 100, [1, 2], f"Расход {number}")
+    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    application = web.Application()
+    setup_webapp_routes(application, SimpleNamespace(send_message=AsyncMock()), service, settings)
+    owner_auth = signed_init_data(user={"id": 1, "first_name": "Организатор"})
+
+    async with TestClient(TestServer(application)) as client:
+        first = await client.get(
+            "/api/history", headers={"X-Telegram-Init-Data": owner_auth}
+        )
+        first_payload = await first.json()
+        second = await client.get(
+            "/api/history?transaction_offset=20",
+            headers={"X-Telegram-Init-Data": owner_auth},
+        )
+        second_payload = await second.json()
+        details = await client.get(
+            f"/api/collections/{collection_id}",
+            headers={"X-Telegram-Init-Data": owner_auth},
+        )
+        details_payload = await details.json()
+        balance = await client.get(
+            "/api/balance", headers={"X-Telegram-Init-Data": owner_auth}
+        )
+        balance_payload = await balance.json()
+
+    assert len(first_payload["transactions"]) == 20
+    assert first_payload["transaction_has_more"] is True
+    assert len(second_payload["transactions"]) == 5
+    assert second_payload["transaction_has_more"] is False
+    assert first_payload["expense_stats"]["monthly_by_currency"] == {"EUR": 2500}
+    assert len(details_payload["history"]) == 20
+    assert details_payload["history_has_more"] is True
+    assert balance_payload["collections"][0]["amount"] == 1250
+    assert balance_payload["personal_debts"][0]["debtor_name"] == "Участник"
+    assert balance_payload["personal_debts"][0]["creditor_name"] == "Организатор"
+
+
+@pytest.mark.asyncio
+async def test_profile_saves_bank_and_payment_details(tmp_path):
+    database = Database(tmp_path / "bank-details.db")
+    await database.initialize()
+    service = BudgetService(database)
+    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    application = web.Application()
+    setup_webapp_routes(application, object(), service, settings)
+    auth = signed_init_data(user={"id": 7, "first_name": "Анна"})
+
+    async with TestClient(TestServer(application)) as client:
+        response = await client.patch(
+            "/api/me/payment",
+            json={"bank_name": "Альфа-Банк", "payment_details": "Карта •• 1234"},
+            headers={"X-Telegram-Init-Data": auth},
+        )
+        bootstrap = await client.get(
+            "/api/bootstrap", headers={"X-Telegram-Init-Data": auth}
+        )
+        payload = await bootstrap.json()
+
+    assert response.status == 200
+    assert payload["user"]["bank_name"] == "Альфа-Банк"
+    assert payload["user"]["payment_details"] == "Карта •• 1234"
 
 
 @pytest.mark.asyncio
@@ -559,3 +636,43 @@ async def test_personal_collection_uses_bot_notifications_without_group(tmp_path
     assert details_payload["collection"]["is_personal"] is True
     assert details_payload["events"][0]["kind"] == "created"
     bot.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_group_collection_creation_posts_actionable_invitation(tmp_path):
+    database = Database(tmp_path / "group-collection.db")
+    await database.initialize()
+    service = BudgetService(database)
+    settings = Settings(bot_token=TOKEN, database_path=database.path, main_app_enabled=True)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    application = web.Application()
+    setup_webapp_routes(application, bot, service, settings)
+    auth = signed_init_data(
+        user={"id": 7, "first_name": "Владелец"},
+        start_param=group_start_param(-100500, TOKEN),
+    )
+
+    async with TestClient(TestServer(application)) as client:
+        response = await client.post(
+            "/api/collections",
+            json={"chat_id": -100500, "title": "День рождения", "currency": "BYN"},
+            headers={"X-Telegram-Init-Data": auth},
+        )
+        payload = await response.json()
+
+    assert response.status == 200
+    assert payload["report_sent"] is True
+    call = bot.send_message.await_args
+    assert call.args[0] == -100500
+    assert "День рождения" in call.args[1]
+    assert "Принять" in call.args[1]
+    callbacks = {
+        button.callback_data
+        for row in call.kwargs["reply_markup"].inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+    assert callbacks == {
+        f"join:{payload['collection_id']}",
+        f"decline:{payload['collection_id']}",
+    }

@@ -49,6 +49,16 @@ async def test_preferred_balance_currency_is_validated_and_saved(service):
 
 
 @pytest.mark.asyncio
+async def test_legacy_payment_update_preserves_bank_name(service):
+    await service.set_payment_details(1, "Телефон", "Мой банк")
+    await service.set_payment_details(1, "Новая карта")
+
+    user = await service.get_user(1)
+    assert user["bank_name"] == "Мой банк"
+    assert user["payment_details"] == "Новая карта"
+
+
+@pytest.mark.asyncio
 async def test_shared_group_becomes_available_for_mini_app_collection(service):
     await service.upsert_user(1, "anna", "Анна", private_started=True)
     await service.register_user_chat(1, -100123, "Друзья")

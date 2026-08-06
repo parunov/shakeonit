@@ -20,6 +20,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from sharebudget.config import Settings  # noqa: E402
 from sharebudget.db import Database  # noqa: E402
+from sharebudget.links import group_start_param  # noqa: E402
 from sharebudget.service import BudgetService  # noqa: E402
 from sharebudget.webapp import setup_webapp_routes  # noqa: E402
 
@@ -36,6 +37,7 @@ def signed_init_data() -> str:
             ensure_ascii=False,
             separators=(",", ":"),
         ),
+        "start_param": group_start_param(-100500, TOKEN),
     }
     check_string = "\n".join(f"{key}={value}" for key, value in sorted(data.items()))
     secret = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
@@ -72,13 +74,18 @@ async def create_application(database_path: Path) -> web.Application:
     await service.upsert_user(1, "anna", "Анна", private_started=True)
     await service.upsert_user(2, "boris", "Борис", private_started=True)
     await service.upsert_user(3, "max", "Максим", private_started=True)
-    await service.set_payment_details(1, "Карта •• 1111")
+    await service.set_payment_details(1, "Карта •• 1111", "Альфа-Банк")
+    await service.set_payment_details(2, "Телефон +375 29 000-00-00", "Беларусбанк")
     collection_id = await service.create_collection(-100500, "Берлин", "EUR", 1)
     await service.join(collection_id, 2, subscribe=True)
     await service.join(collection_id, 3, subscribe=True)
     await service.add_expense(collection_id, 1, 12_000, [1, 2, 3], "Отель")
     await service.add_repayment(collection_id, 2, 1, 1_000, "Первая часть долга")
     await service.add_repayment(collection_id, 2, 1, 1_000, "Вторая часть долга")
+    for number in range(23):
+        await service.add_expense(
+            collection_id, 1, 100 + number, [1, 2, 3], f"Тестовый расход {number + 1}"
+        )
 
     @web.middleware
     async def inject_telegram(request: web.Request, handler):

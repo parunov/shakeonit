@@ -536,7 +536,14 @@ async def join_collection(callback: CallbackQuery, service: BudgetService) -> No
         else "🎉 Готово! Вы участвуете — без регистрации и переходов.",
         show_alert=True,
     )
+    if callback.message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        return
     await show_collection(callback.message, collection_id, callback.from_user.id, service)
+
+
+@router.callback_query(F.data.startswith("decline:"))
+async def decline_collection_invitation(callback: CallbackQuery) -> None:
+    await callback.answer("Приглашение отклонено. Вы сможете присоединиться позже.", show_alert=True)
 
 
 async def choose_collection(message: Message, service, action: str, empty_text: str) -> None:

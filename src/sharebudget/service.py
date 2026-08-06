@@ -153,14 +153,27 @@ class BudgetService:
         async with self.db.connect() as connection:
             return await _fetchone(connection, "SELECT * FROM users WHERE id=?", (user_id,))
 
-    async def set_payment_details(self, user_id: int, details: str) -> None:
+    async def set_payment_details(
+        self, user_id: int, details: str, bank_name: str | None = None
+    ) -> None:
         if len(details) > 500:
             raise DomainError("Платежные данные не должны быть длиннее 500 символов")
+        if bank_name is not None and len(bank_name) > 100:
+            raise DomainError("Название банка не должно быть длиннее 100 символов")
         async with self.db.connect() as connection:
-            await connection.execute(
-                "UPDATE users SET payment_details=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                (details.strip(), user_id),
-            )
+            if bank_name is None:
+                await connection.execute(
+                    "UPDATE users SET payment_details=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (details.strip(), user_id),
+                )
+            else:
+                await connection.execute(
+                    """
+                    UPDATE users SET payment_details=?,bank_name=?,updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    """,
+                    (details.strip(), bank_name.strip(), user_id),
+                )
             await connection.commit()
 
     async def set_preferred_currency(self, user_id: int, currency: str) -> None:
@@ -427,7 +440,7 @@ class BudgetService:
         async with self.db.connect() as connection:
             return await connection.execute_fetchall(
                 """
-                SELECT u.id,u.username,u.full_name,u.payment_details,p.joined_at,
+                SELECT u.id,u.username,u.full_name,u.payment_details,u.bank_name,p.joined_at,
                        c.admin_id=u.id AS is_admin
                 FROM participants p JOIN users u ON u.id=p.user_id
                 JOIN collections c ON c.id=p.collection_id
@@ -439,7 +452,7 @@ class BudgetService:
     async def _snapshot_on(self, connection, collection_id: int) -> CollectionSnapshot:
         participants = await connection.execute_fetchall(
             """
-            SELECT u.id,u.username,u.full_name,u.payment_details,p.joined_at,p.active,
+            SELECT u.id,u.username,u.full_name,u.payment_details,u.bank_name,p.joined_at,p.active,
                    c.admin_id=u.id AS is_admin
             FROM participants p JOIN users u ON u.id=p.user_id
             JOIN collections c ON c.id=p.collection_id
@@ -794,7 +807,13 @@ class BudgetService:
             result.setdefault(row["transaction_id"], []).append(dict(row))
         return result
 
-    async def global_history(self, user_id: int, limit: int = 200):
+    async def global_history(
+        self,
+        user_id: int,
+        limit: int = 20,
+        transaction_offset: int = 0,
+        event_offset: int = 0,
+    ):
         async with self.db.connect() as connection:
             transactions = await connection.execute_fetchall(
                 """
@@ -808,9 +827,9 @@ class BudgetService:
                 JOIN participants p ON p.collection_id=c.id AND p.user_id=?
                 JOIN users creator ON creator.id=t.creator_id
                 LEFT JOIN users counterparty ON counterparty.id=t.counterparty_id
-                ORDER BY t.created_at DESC,t.id DESC LIMIT ?
+                ORDER BY t.created_at DESC,t.id DESC LIMIT ? OFFSET ?
                 """,
-                (user_id, limit),
+                (user_id, limit, transaction_offset),
             )
             events = await connection.execute_fetchall(
                 """
@@ -822,11 +841,89 @@ class BudgetService:
                 JOIN participants p ON p.collection_id=c.id AND p.user_id=?
                 JOIN users actor ON actor.id=e.actor_id
                 LEFT JOIN users target ON target.id=e.target_user_id
-                ORDER BY e.created_at DESC,e.id DESC LIMIT ?
+                ORDER BY e.created_at DESC,e.id DESC LIMIT ? OFFSET ?
                 """,
-                (user_id, limit),
+                (user_id, limit, event_offset),
             )
         return transactions, events
+
+    async def expense_statistics(self, user_id: int) -> dict:
+        async with self.db.connect() as connection:
+            currency_rows = await connection.execute_fetchall(
+                """
+                SELECT c.currency,
+                       SUM(t.amount) total_amount,
+                       SUM(CASE WHEN t.created_at >= datetime('now','start of month')
+                                THEN t.amount ELSE 0 END) monthly_amount,
+                       COUNT(*) total_count,
+                       SUM(t.created_at >= datetime('now','start of month')) monthly_count
+                FROM transactions t JOIN collections c ON c.id=t.collection_id
+                WHERE t.creator_id=? AND t.kind='expense' AND t.status='active'
+                GROUP BY c.currency ORDER BY c.currency
+                """,
+                (user_id,),
+            )
+            collection_rows = await connection.execute_fetchall(
+                """
+                SELECT c.id collection_id,c.title,c.currency,SUM(t.amount) amount,COUNT(*) count
+                FROM transactions t JOIN collections c ON c.id=t.collection_id
+                WHERE t.creator_id=? AND t.kind='expense' AND t.status='active'
+                GROUP BY c.id,c.title,c.currency
+                ORDER BY amount DESC,c.title LIMIT 10
+                """,
+                (user_id,),
+            )
+        return {
+            "monthly_by_currency": {
+                row["currency"]: row["monthly_amount"] or 0 for row in currency_rows
+            },
+            "total_by_currency": {
+                row["currency"]: row["total_amount"] or 0 for row in currency_rows
+            },
+            "monthly_count": sum(row["monthly_count"] or 0 for row in currency_rows),
+            "total_count": sum(row["total_count"] or 0 for row in currency_rows),
+            "by_collection": [dict(row) for row in collection_rows],
+        }
+
+    async def balance_overview(self, user_id: int) -> dict:
+        """Return collection balances and settlements involving the current user."""
+        async with self.db.connect() as connection:
+            collections = await connection.execute_fetchall(
+                """
+                SELECT c.* FROM collections c
+                JOIN participants p ON p.collection_id=c.id
+                WHERE p.user_id=? AND p.active=1 AND c.status='active'
+                ORDER BY c.created_at DESC,c.id DESC
+                """,
+                (user_id,),
+            )
+            collection_balances = []
+            personal_debts = []
+            for collection in collections:
+                snapshot = await self._snapshot_on(connection, collection["id"])
+                names = {row["id"]: row["full_name"] for row in snapshot.participants}
+                collection_balances.append(
+                    {
+                        "collection": dict(collection),
+                        "amount": snapshot.balances.get(user_id, 0),
+                    }
+                )
+                for debt in snapshot.debts:
+                    if user_id not in (debt.debtor_id, debt.creditor_id):
+                        continue
+                    personal_debts.append(
+                        {
+                            "collection_id": collection["id"],
+                            "collection_title": collection["title"],
+                            "currency": collection["currency"],
+                            "debtor_id": debt.debtor_id,
+                            "debtor_name": names[debt.debtor_id],
+                            "creditor_id": debt.creditor_id,
+                            "creditor_name": names[debt.creditor_id],
+                            "amount": debt.amount,
+                        }
+                    )
+        return {"collections": collection_balances, "personal_debts": personal_debts}
 
     async def collection_events(self, collection_id: int, limit: int = 200):
         await self._collection(collection_id)

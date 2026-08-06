@@ -25,6 +25,11 @@ const state = {
   syncTimer: null,
   lastSyncCheck: 0,
   refreshInFlight: false,
+  balanceMode: "collections",
+  balanceData: null,
+  globalHistory: null,
+  collectionHistoryLimit: 20,
+  collectionEventsLimit: 20,
   launchIntent: launchParams.get("intent")
     || launchParams.get("tgWebAppStartParam")
     || tg?.initDataUnsafe?.start_param,
@@ -46,6 +51,13 @@ function money(amount, currency) {
     }));
   }
   return moneyFormatters.get(currency).format((amount || 0) / 100);
+}
+
+function moneyMap(values) {
+  const entries = Object.entries(values || {}).filter(([, amount]) => amount);
+  return entries.length
+    ? entries.map(([currency, amount]) => money(amount, currency)).join(" · ")
+    : "0";
 }
 
 function balanceStatus(amount) {
@@ -142,7 +154,7 @@ function collectionCards(rows) {
     <button class="card collection-card" type="button" data-action="${item.is_participant === false ? "preview-collection" : "open-collection"}" data-id="${item.id}">
       <span class="collection-icon">${item.status === "archived" ? "📦" : "🧾"}</span>
       <span>
-        <span class="card-title">${e(item.title)}</span>
+        <span class="card-title">${e(item.title)}${item.admin_id === state.bootstrap.user.id ? '<span class="owner-mark">Ваш сбор</span>' : ""}</span>
         <span class="card-subtitle">${e(item.currency)} · ${item.participants_count ?? "—"} участников${item.is_personal ? " · без группы" : ""}${item.status === "archived" ? " · архив" : item.is_participant === false ? " · можно участвовать" : ""}</span>
       </span>
       <span class="chevron">›</span>
@@ -157,11 +169,6 @@ function renderCollections() {
   const active = state.bootstrap.collections.filter((item) => item.status === "active");
   const archived = state.bootstrap.collections.filter((item) => item.status === "archived");
   app.innerHTML = `
-    <section class="hero">
-      <div class="hero-label">${state.bootstrap.context_chat_id ? "ЭТА TELEGRAM-ГРУППА" : "АКТИВНЫЕ СБОРЫ"}</div>
-      <div class="hero-value">${active.length}</div>
-      <div class="hero-meta">${state.bootstrap.context_chat_id ? "Можно открыть сбор или участвовать в один шаг" : "Все расчёты синхронизированы"}</div>
-    </section>
     <div class="section-head"><h2>Текущие</h2><button class="text-button" type="button" data-action="create">+ Новый</button></div>
     ${collectionCards(active)}
     ${archived.length ? `<div class="section-head"><h2>Архив</h2></div>${collectionCards(archived)}` : ""}`;
@@ -175,38 +182,54 @@ async function renderBalance() {
   tg?.BackButton?.hide();
   app.innerHTML = `<section class="loading-card"><div class="spinner"></div><p>Считаем ваш баланс…</p></section>`;
   updateNav();
-  const rows = state.bootstrap.collections.filter((item) => item.status === "active");
-  const details = await Promise.all(rows.map((item) => loadDetails(item.id)));
+  const overview = await api("/api/balance");
   let exchange = null;
   try {
     exchange = await api("/api/rates");
   } catch (error) {
     toast("Курсы валют временно недоступны — показываю исходные суммы", true);
   }
+  state.balanceData = { ...overview, exchange };
+  paintBalance();
+}
+
+function paintBalance() {
+  const data = state.balanceData;
+  if (!data) return;
   const totals = new Map();
-  const cards = details.map((data) => {
-    const mine = data.balances.find((item) => item.user_id === state.bootstrap.user.id)?.amount || 0;
+  const cards = data.collections.map((item) => {
+    const collection = item.collection;
+    const mine = item.amount;
     const status = balanceStatus(mine);
-    totals.set(data.collection.currency, (totals.get(data.collection.currency) || 0) + mine);
+    totals.set(collection.currency, (totals.get(collection.currency) || 0) + mine);
     return `
-      <button class="card collection-card" type="button" data-action="open-collection" data-id="${data.collection.id}">
+      <button class="card collection-card" type="button" data-action="open-collection" data-id="${collection.id}">
         <span class="collection-icon status-icon" aria-hidden="true">${status.icon}</span>
-        <span><span class="card-title">${e(data.collection.title)}</span><span class="card-subtitle">${status.label}</span></span>
-        <span class="amount ${mine > 0 ? "positive" : mine < 0 ? "negative" : ""}">${money(Math.abs(mine), data.collection.currency)}</span>
+        <span><span class="card-title">${e(collection.title)}</span><span class="card-subtitle">${status.label}</span></span>
+        <span class="amount ${mine > 0 ? "positive" : mine < 0 ? "negative" : ""}">${money(Math.abs(mine), collection.currency)}</span>
       </button>`;
   });
   const preferred = state.bootstrap.user.preferred_currency;
-  const convertedTotal = exchange ? Math.round([...totals.entries()].reduce((sum, [currency, amount]) => sum + amount * exchange.rates[currency] / exchange.rates[preferred], 0)) : null;
-  const originalLabel = [...totals.entries()].map(([currency, amount]) => `${amount >= 0 ? "+" : "−"}${money(Math.abs(amount), currency)}`).join(" · ") || "0";
+  const convertedTotal = data.exchange ? Math.round([...totals.entries()].reduce((sum, [currency, amount]) => sum + amount * data.exchange.rates[currency] / data.exchange.rates[preferred], 0)) : null;
+  const originalLabel = [...totals.entries()].filter(([, amount]) => amount).map(([currency, amount]) => `${amount >= 0 ? "+" : "−"}${money(Math.abs(amount), currency)}`).join(" · ") || "0";
   const netLabel = convertedTotal === null ? originalLabel : `${convertedTotal >= 0 ? "+" : "−"}${money(Math.abs(convertedTotal), preferred)}`;
+  const personal = data.personal_debts.map((debt) => {
+    const iOwe = debt.debtor_id === state.bootstrap.user.id;
+    const label = iOwe
+      ? `Вы должны ${e(debt.creditor_name)}`
+      : `${e(debt.debtor_name)} должен вам`;
+    return `<button class="card personal-debt" type="button" data-action="open-collection" data-id="${debt.collection_id}"><span><b>${label}</b><small>Сбор «${e(debt.collection_title)}»</small></span><strong class="${iOwe ? "negative" : "positive"}">${money(debt.amount, debt.currency)}</strong></button>`;
+  }).join("");
   app.innerHTML = `
     <section class="hero">
       <div class="hero-label">ОБЩИЙ БАЛАНС · ${e(preferred)}</div>
       <div class="hero-value">${netLabel}</div>
-      <div class="hero-meta">${exchange ? `≈ по официальному курсу НБРБ · ${e(originalLabel)}` : "По активным сборам · без конвертации"}</div>
+      <div class="hero-meta">${data.exchange ? `≈ по официальному курсу НБРБ · ${e(originalLabel)}` : "По активным сборам · без конвертации"}</div>
     </section>
-    <div class="section-head"><h2>По сборам</h2></div>
-    ${cards.length ? `<div class="card-list">${cards.join("")}</div>` : empty("✅", "Активных долгов нет")}`;
+    <div class="segmented"><button type="button" data-action="balance-mode" data-mode="collections" class="${state.balanceMode === "collections" ? "active" : ""}">По сборам</button><button type="button" data-action="balance-mode" data-mode="personal" class="${state.balanceMode === "personal" ? "active" : ""}">Персональный</button></div>
+    ${state.balanceMode === "collections"
+    ? (cards.length ? `<div class="card-list">${cards.join("")}</div>` : empty("✅", "Активных долгов нет"))
+    : (personal || empty("🤝", "Личных расчётов сейчас нет"))}`;
 }
 
 function renderProfile() {
@@ -226,21 +249,36 @@ function renderProfile() {
     </section>
     <div class="section-head"><h2>Платежные данные</h2><button class="text-button" type="button" data-action="payment">Изменить</button></div>
     <section class="card member-row">
-      <div class="row-note">Участники ваших сборов увидят эти данные рядом с именем.</div>
-      <div class="row-title">${e(user.payment_details || "Пока не добавлены")}</div>
+      <div class="row-note">Реквизиты доступны другим пользователям только при оформлении возврата долга.</div>
+      <div class="row-title">${user.bank_name ? `${e(user.bank_name)}<br>` : ""}${e(user.payment_details || "Пока не добавлены")}</div>
     </section>
     <div class="status-banner">🔒 Вход подтверждается Telegram. Пароли и отдельная регистрация не нужны.</div>`;
   updateNav();
 }
 
-async function renderHistory() {
+async function renderHistory(loadKind = null) {
   state.nav = "history";
   state.collection = null;
   title.textContent = "История";
   tg?.BackButton?.hide();
-  app.innerHTML = `<section class="loading-card"><div class="spinner"></div><p>Собираем всю историю…</p></section>`;
+  if (!loadKind) app.innerHTML = `<section class="loading-card"><div class="spinner"></div><p>Собираем всю историю…</p></section>`;
   updateNav();
-  const data = await api("/api/history");
+  const current = state.globalHistory;
+  const transactionOffset = loadKind === "transactions" ? current.transactions.length : 0;
+  const eventOffset = loadKind === "events" ? current.events.length : 0;
+  const page = await api(`/api/history?transaction_offset=${transactionOffset}&event_offset=${eventOffset}`);
+  if (!loadKind) {
+    state.globalHistory = page;
+  } else if (loadKind === "transactions") {
+    current.transactions.push(...page.transactions);
+    current.transaction_has_more = page.transaction_has_more;
+    current.expense_stats = page.expense_stats;
+  } else {
+    current.events.push(...page.events);
+    current.event_has_more = page.event_has_more;
+    current.expense_stats = page.expense_stats;
+  }
+  const data = state.globalHistory;
   const eventLabels = {
     created: "создал сбор", joined: "вступил в сбор", left: "вышел из сбора",
     member_removed: "удалил участника", admin_transferred: "передал роль администратора",
@@ -260,7 +298,14 @@ async function renderHistory() {
     return `<article class="history-row"><div class="row-between"><div><div class="row-title history-collection-title"><span>${item.kind === "expense" ? "💸" : "🤝"}</span>${collectionTitle}</div><div class="row-note">${e(item.creator_name)} · ${shortDate(item.created_at)}</div></div><div class="amount">${money(item.amount, item.currency)}</div></div><div class="row-note">${e(item.comment || (item.kind === "expense" ? "Затрата" : `Возврат → ${item.counterparty_name}`))} ${status}</div>${shares}${actions}</article>`;
   }).join("");
   const events = data.events.map((item) => `<article class="history-row"><div class="row-title">${item.is_participant ? `<button class="collection-link" type="button" data-action="open-collection" data-id="${item.collection_id}">${e(item.collection_title)}</button>` : e(item.collection_title)}</div><div class="row-note">${shortDate(item.created_at)} · ${e(item.actor_name)} ${e(eventLabels[item.kind] || item.kind)}${item.target_name && item.target_name !== item.actor_name ? ` · ${e(item.target_name)}` : ""}</div></article>`).join("");
-  app.innerHTML = `<section class="hero"><div class="hero-label">ЛЕНТА ДЕЙСТВИЙ</div><div class="hero-value">${data.transactions.length}</div><div class="hero-meta">операций во всех ваших сборах</div></section><div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}<div class="section-head"><h2>История сборов</h2></div>${events ? `<div class="card">${events}</div>` : empty("🧾", "Событий пока нет")}`;
+  app.innerHTML = `<section class="hero"><div class="hero-label">МОИ ЗАТРАТЫ С НАЧАЛА МЕСЯЦА</div><div class="hero-value">${moneyMap(data.expense_stats.monthly_by_currency)}</div><div class="hero-meta">${data.expense_stats.monthly_count} операций</div></section><button class="statistics-button" type="button" data-action="expense-statistics"><span>📊</span><span><b>Статистика моих затрат</b><small>По валютам и сборам</small></span><i>›</i></button><div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}${data.transaction_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="transactions">Загрузить ещё</button>' : ""}<div class="section-head"><h2>История сборов</h2></div>${events ? `<div class="card">${events}</div>` : empty("🧾", "Событий пока нет")}${data.event_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="events">Загрузить ещё</button>' : ""}`;
+}
+
+function expenseStatisticsSheet() {
+  const stats = state.globalHistory?.expense_stats;
+  if (!stats) return;
+  const collections = stats.by_collection.map((item) => `<div class="debt-row"><div><div class="row-title">${e(item.title)}</div><div class="row-note">${item.count} операций</div></div><div class="amount">${money(item.amount, item.currency)}</div></div>`).join("");
+  showSheet(`<h2>Мои затраты</h2><p class="sheet-intro">Учитываются активные затраты, которые добавили вы.</p><div class="stats-grid"><div><small>Этот месяц</small><b>${moneyMap(stats.monthly_by_currency)}</b><span>${stats.monthly_count} операций</span></div><div><small>За всё время</small><b>${moneyMap(stats.total_by_currency)}</b><span>${stats.total_count} операций</span></div></div><div class="section-head"><h2>По сборам</h2></div><div class="card">${collections || '<div class="debt-row">Затрат пока нет</div>'}</div><div class="sheet-actions"><button class="secondary-button" type="button" data-action="close-sheet">Закрыть</button></div>`);
 }
 
 function renderInvitation() {
@@ -310,12 +355,16 @@ function updateNav() {
 
 async function loadDetails(id, force = false) {
   if (!force && state.details.has(Number(id))) return state.details.get(Number(id));
-  const data = await api(`/api/collections/${id}`);
+  const data = await api(`/api/collections/${id}?history_limit=${state.collectionHistoryLimit}&events_limit=${state.collectionEventsLimit}`);
   state.details.set(Number(id), data);
   return data;
 }
 
 async function openCollection(id, tab = "overview", force = false) {
+  if (state.collection?.collection?.id !== Number(id)) {
+    state.collectionHistoryLimit = 20;
+    state.collectionEventsLimit = 20;
+  }
   if (!state.collection) state.collectionReturn = state.nav;
   state.collectionTab = tab;
   app.innerHTML = `<section class="loading-card"><div class="spinner"></div><p>Обновляем сбор…</p></section>`;
@@ -386,24 +435,38 @@ function renderCollectionPanel(data, isAdmin) {
     };
     const events = data.events.map((item) => `<article class="history-row"><div class="row-title">${shortDate(item.created_at)} · ${e(item.actor_name)} ${e(eventLabels[item.kind] || item.kind)}</div>${item.target_name && item.target_name !== item.actor_name ? `<div class="row-note">Участник: ${e(item.target_name)}</div>` : ""}</article>`).join("");
     if (!transactions && !events) return empty("📜", "История пока пуста");
-    return `<div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}<div class="section-head"><h2>Участники и сбор</h2></div>${events ? `<div class="card">${events}</div>` : empty("👥", "Событий пока нет")}`;
+    return `<div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}${data.history_has_more ? '<button class="load-more" type="button" data-action="load-collection-history" data-kind="transactions">Загрузить ещё</button>' : ""}<div class="section-head"><h2>Участники и сбор</h2></div>${events ? `<div class="card">${events}</div>` : empty("👥", "Событий пока нет")}${data.events_has_more ? '<button class="load-more" type="button" data-action="load-collection-history" data-kind="events">Загрузить ещё</button>' : ""}`;
   }
   if (state.collectionTab === "members") {
     const invite = collection.status === "active" ? `<button class="invite-button" type="button" data-action="share-invite">👥<span><b>Пригласить друзей</b><small>Выбрать человека или Telegram-группу</small></span><i>›</i></button>` : "";
     const activeParticipants = data.participants.filter((member) => member.active !== false);
-    const members = activeParticipants.map((member) => `<div class="member-row"><div class="row-between"><div><div class="row-title">${e(member.full_name)} ${member.is_admin ? "👑" : ""}</div><div class="row-note">${member.username ? `@${e(member.username)}` : `ID ${member.id}`}${member.payment_details ? `<br>💳 ${e(member.payment_details)}` : ""}</div></div></div></div>`).join("");
+    const members = activeParticipants.map((member) => `<div class="member-row"><div class="row-between"><div><div class="row-title">${e(member.full_name)} ${member.is_admin ? "👑" : ""}</div><div class="row-note">${member.username ? `@${e(member.username)}` : `ID ${member.id}`}</div></div></div></div>`).join("");
     return `${invite}<div class="section-head"><h2>Участники · ${activeParticipants.length}</h2></div><div class="card">${members}</div>${collection.status === "active" && !isAdmin ? '<div class="sheet-actions"><button class="danger-button" type="button" data-action="leave">Выйти из сбора</button></div>' : ""}`;
   }
   return `<div class="card member-row"><div class="row-title">Администратор сбора</div><div class="row-note">Передача роли и удаление участников доступны только при соблюдении балансов.</div></div><div class="sheet-actions">${collection.status === "active" ? '<button class="secondary-button" type="button" data-action="transfer">Передать администратора</button><button class="secondary-button" type="button" data-action="remove-member">Удалить участника</button><button class="danger-button" type="button" data-action="archive">Завершить и архивировать</button>' : '<button class="primary-button" type="button" data-action="restore">Восстановить сбор</button><button class="danger-button" type="button" data-action="delete-collection">Удалить сбор навсегда</button>'}</div>`;
 }
 
+function shareCollection(collection) {
+  const inviteUrl = state.bootstrap.main_app_enabled
+    ? `https://t.me/${state.bootstrap.bot_username}?startapp=collection_${collection.id}&mode=compact`
+    : `https://t.me/${state.bootstrap.bot_username}?start=collection_${collection.id}`;
+  const inviteText = `Присоединяйся к сбору «${collection.title}» в ShakeOnIt.`;
+  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(inviteUrl)}&text=${encodeURIComponent(inviteText)}`;
+  haptic();
+  if (tg?.openTelegramLink) tg.openTelegramLink(shareUrl);
+  else window.location.href = shareUrl;
+}
+
+function createdCollectionInviteSheet(collection) {
+  showSheet(`<div class="success-mark">✓</div><h2>Сбор создан</h2><p class="sheet-intro">Сразу пригласите друзей — Telegram предложит выбрать человека или группу. Это окно показывается только сейчас.</p><div class="created-collection"><b>${e(collection.title)}</b><span>${e(collection.currency)}</span></div><div class="sheet-actions"><button class="primary-button" type="button" data-action="share-created">👥 Поделиться ссылкой</button><button class="secondary-button" type="button" data-action="close-sheet">Не сейчас</button></div>`);
+}
+
 function createSheet() {
-  const chats = [...state.bootstrap.chats];
-  if (state.bootstrap.context_chat_id && !chats.some((chat) => chat.chat_id === state.bootstrap.context_chat_id)) {
-    chats.unshift({ chat_id: state.bootstrap.context_chat_id, label: "Текущая Telegram-группа" });
-  }
-  const destinations = [...chats, { chat_id: 0, label: "Без Telegram-группы · уведомления в боте" }];
-  showSheet(`<h2>Новый сбор</h2><p class="sheet-intro">Можно связать сбор с Telegram-группой или вести его только через личные уведомления бота.</p><form id="create-form"><label class="field"><span>Где вести сбор</span><select name="chat_id" required>${destinations.map((chat) => `<option value="${chat.chat_id}">${e(chat.label)}</option>`).join("")}</select></label><label class="field"><span>Название</span><input name="title" minlength="2" maxlength="80" placeholder="Например, Поездка в Варшаву" required></label><label class="field"><span>Валюта</span><select name="currency">${state.bootstrap.currencies.map((currency) => `<option>${currency}</option>`).join("")}</select></label><div class="sheet-actions"><button class="primary-button" type="submit">Создать сбор</button><button class="secondary-button" type="button" data-action="add-bot-group">Добавить бота в новую группу</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+  const chatId = state.bootstrap.context_chat_id || 0;
+  const intro = chatId
+    ? "Сбор будет связан с текущей Telegram-группой, и приглашение появится в её чате."
+    : "Сбор будет работать без Telegram-группы — уведомления придут лично от бота.";
+  showSheet(`<h2>Новый сбор</h2><p class="sheet-intro">${intro}</p><form id="create-form"><input type="hidden" name="chat_id" value="${chatId}"><label class="field"><span>Название</span><input name="title" minlength="2" maxlength="80" placeholder="Например, Поездка в Варшаву" required></label><label class="field"><span>Валюта</span><select name="currency">${state.bootstrap.currencies.map((currency) => `<option>${currency}</option>`).join("")}</select></label><div class="sheet-actions"><button class="primary-button" type="submit">Создать сбор</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
 
 function expenseSheet() {
@@ -421,9 +484,11 @@ function repaySheet() {
   }
   const cards = debts.map((debt, index) => {
     const member = data.participants.find((item) => item.id === debt.creditor_id);
-    return `<div class="payment-card" data-payment="${debt.creditor_id}" ${index ? "hidden" : ""}><b>💳 Данные для перевода</b><br>${e(member?.payment_details || "Получатель пока не добавил платежные данные")}</div>`;
+    const payment = member?.payment_details || "Получатель пока не добавил платежные данные";
+    const bank = member?.bank_name ? `<span class="row-note">Банк: ${e(member.bank_name)}</span><br>` : "";
+    return `<div class="payment-card" data-payment="${debt.creditor_id}" ${index ? "hidden" : ""}><b>💳 Данные для перевода</b><br>${bank}${e(payment)}</div>`;
   }).join("");
-  showSheet(`<h2>Вернуть долг</h2><p class="sheet-intro">После записи получатель должен подтвердить деньги. До этого баланс не изменится.</p><form id="repay-form"><label class="field"><span>Получатель</span><select name="creditor_id" data-action="repay-creditor">${debts.map((debt) => `<option value="${debt.creditor_id}">${e(debt.creditor_name)} · до ${money(debt.amount, data.collection.currency)}</option>`).join("")}</select></label>${cards}<label class="field"><span>Переведено · ${e(data.collection.currency)}</span><input name="amount" inputmode="decimal" placeholder="0,00" required></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" placeholder="Необязательно"></label><div class="sheet-actions"><button class="primary-button" type="submit">Отправить на подтверждение</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+  showSheet(`<h2>Вернуть долг</h2><p class="sheet-intro">После записи получатель должен подтвердить деньги. До этого баланс не изменится.</p><form id="repay-form"><label class="field"><span>Получатель</span><select name="creditor_id" data-action="repay-creditor">${debts.map((debt) => `<option value="${debt.creditor_id}" data-max="${debt.amount}">${e(debt.creditor_name)} · до ${money(debt.amount, data.collection.currency)}</option>`).join("")}</select></label>${cards}<label class="field"><span>Переведено · ${e(data.collection.currency)}</span><span class="amount-input"><input name="amount" inputmode="decimal" placeholder="0,00" required><button type="button" data-action="repay-max">MAX</button></span></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" placeholder="Необязательно"></label><div class="sheet-actions"><button class="primary-button" type="submit">Отправить на подтверждение</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
 
 function editSheet(transactionId, collectionData = state.collection, returnTo = "collection") {
@@ -445,7 +510,7 @@ function editSheet(transactionId, collectionData = state.collection, returnTo = 
 }
 
 function paymentSheet() {
-  showSheet(`<h2>Платежные данные</h2><p class="sheet-intro">Например, телефон СБП или последние цифры карты. Не указывайте секретные коды.</p><form id="payment-form"><label class="field"><span>Реквизиты</span><textarea name="payment_details" maxlength="500" placeholder="Можно оставить пустым">${e(state.bootstrap.user.payment_details)}</textarea></label><div class="sheet-actions"><button class="primary-button" type="submit">Сохранить</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+  showSheet(`<h2>Платежные данные</h2><p class="sheet-intro">Например, телефон СБП или последние цифры карты. Не указывайте секретные коды.</p><form id="payment-form"><label class="field"><span>Банк</span><input name="bank_name" maxlength="100" placeholder="Например, Альфа-Банк" value="${e(state.bootstrap.user.bank_name)}"></label><label class="field"><span>Реквизиты</span><textarea name="payment_details" maxlength="500" placeholder="Можно оставить пустым">${e(state.bootstrap.user.payment_details)}</textarea></label><div class="sheet-actions"><button class="primary-button" type="submit">Сохранить</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
 
 function memberActionSheet(type) {
@@ -513,6 +578,18 @@ app.addEventListener("click", async (event) => {
   if (!target || state.busy) return;
   const action = target.dataset.action;
   try {
+    if (action === "balance-mode") {
+      state.balanceMode = target.dataset.mode;
+      paintBalance();
+      return;
+    }
+    if (action === "load-history") return await renderHistory(target.dataset.kind);
+    if (action === "expense-statistics") return expenseStatisticsSheet();
+    if (action === "load-collection-history") {
+      if (target.dataset.kind === "transactions") state.collectionHistoryLimit += 20;
+      else state.collectionEventsLimit += 20;
+      return await openCollection(state.collection.collection.id, "history", true);
+    }
     if (action === "open-collection") return await openCollection(target.dataset.id);
     if (action === "preview-collection") {
       const collection = state.bootstrap.collections.find((item) => item.id === Number(target.dataset.id));
@@ -536,7 +613,10 @@ app.addEventListener("click", async (event) => {
     if (action === "tab") { state.collectionTab = target.dataset.tab; renderCollection(); return; }
     if (action === "edit-transaction") return editSheet(target.dataset.id);
     if (action === "edit-history-transaction") {
+      const previousLimit = state.collectionHistoryLimit;
+      state.collectionHistoryLimit = 500;
       const details = await loadDetails(target.dataset.collectionId, true);
+      state.collectionHistoryLimit = previousLimit;
       return editSheet(target.dataset.id, details, "global");
     }
     if (action === "request-funds") {
@@ -564,17 +644,7 @@ app.addEventListener("click", async (event) => {
       return await openCollection(id, state.collectionTab, true);
     }
     if (action === "share-invite") {
-      const collection = state.collection.collection;
-      const inviteUrl = state.bootstrap.main_app_enabled
-        ? `https://t.me/${state.bootstrap.bot_username}?startapp=collection_${collection.id}&mode=compact`
-        : `https://t.me/${state.bootstrap.bot_username}?start=collection_${collection.id}`;
-      const inviteText = state.bootstrap.main_app_enabled
-        ? `Присоединяйся к сбору «${collection.title}» в ShakeOnIt. Ссылка сразу откроет приложение.`
-        : `Присоединяйся к сбору «${collection.title}» в ShakeOnIt. Открой ссылку — бот добавит тебя автоматически.`;
-      const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(inviteUrl)}&text=${encodeURIComponent(inviteText)}`;
-      haptic();
-      if (tg?.openTelegramLink) tg.openTelegramLink(shareUrl);
-      else window.location.href = shareUrl;
+      shareCollection(state.collection.collection);
       return;
     }
     if (action === "transfer" || action === "remove-member") return memberActionSheet(action === "transfer" ? "transfer" : "remove");
@@ -665,6 +735,19 @@ sheet.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-action]");
   if (!target || state.busy) return;
   if (target.dataset.action === "close-sheet") closeSheet();
+  if (target.dataset.action === "share-created") {
+    const collection = state.collection?.collection;
+    closeSheet();
+    if (collection) shareCollection(collection);
+    return;
+  }
+  if (target.dataset.action === "repay-max") {
+    const option = sheet.querySelector('[name="creditor_id"] option:checked');
+    const amount = sheet.querySelector('[name="amount"]');
+    if (option && amount) amount.value = (Number(option.dataset.max) / 100).toFixed(2).replace(".", ",");
+    haptic();
+    return;
+  }
   if (target.dataset.action === "select-all") {
     sheet.querySelectorAll('input[name="participant"]').forEach((input) => { input.checked = true; });
     haptic();
@@ -718,7 +801,9 @@ sheet.addEventListener("submit", async (event) => {
       if (chatId === 0) toast(result.notifications_enabled ? "Личный сбор создан · уведомления включены" : "Сбор создан, но уведомления не включены", !result.notifications_enabled);
       else reportToast(result, "Сбор создан");
       await reloadBootstrap();
-      return await openCollection(result.collection_id, "overview", true);
+      await openCollection(result.collection_id, "overview", true);
+      createdCollectionInviteSheet(state.collection.collection);
+      return;
     }
     if (form.id === "expense-form") {
       const participantIds = [...form.querySelectorAll('input[name="participant"]:checked')].map((input) => Number(input.value));
@@ -744,7 +829,7 @@ sheet.addEventListener("submit", async (event) => {
       return await refreshCurrent("history");
     }
     if (form.id === "payment-form") {
-      await api("/api/me/payment", { method: "PATCH", body: JSON.stringify({ payment_details: values.get("payment_details") }) });
+      await api("/api/me/payment", { method: "PATCH", body: JSON.stringify({ bank_name: values.get("bank_name"), payment_details: values.get("payment_details") }) });
       closeSheet(); haptic(); toast("Платежные данные сохранены"); await reloadBootstrap(); return renderProfile();
     }
     if (form.id === "member-action-form") {

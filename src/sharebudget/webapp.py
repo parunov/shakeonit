@@ -87,6 +87,7 @@ def _participant(row) -> dict:
         "username": row["username"],
         "full_name": row["full_name"],
         "payment_details": row["payment_details"],
+        "bank_name": row["bank_name"],
         "is_admin": bool(row["is_admin"]),
         "active": bool(row["active"]),
     }
@@ -192,14 +193,18 @@ def _collection_invite_markup(settings: Settings, collection_id: int) -> InlineK
     rows = [
         [
             InlineKeyboardButton(
-                text="📱 Открыть сбор",
+                text="✅ Принять",
+                callback_data=f"join:{collection_id}",
+            ),
+            InlineKeyboardButton(
+                text="👀 Просмотреть",
                 url=app_url,
-            )
+            ),
         ],
         [
             InlineKeyboardButton(
-                text="🙋 Участвовать в сборе",
-                callback_data=f"join:{collection_id}",
+                text="Отклонить",
+                callback_data=f"decline:{collection_id}",
             )
         ],
     ]
@@ -282,6 +287,7 @@ async def bootstrap(request: web.Request) -> web.Response:
                 "full_name": user["full_name"],
                 "username": user["username"],
                 "payment_details": user["payment_details"],
+                "bank_name": user["bank_name"],
                 "preferred_currency": user["preferred_currency"],
             },
             "collections": [_collection(row) for row in rows],
@@ -320,10 +326,22 @@ async def collection_details(request: web.Request) -> web.Response:
     service, _, user = _context(request)
     collection_id = int(request.match_info["collection_id"])
     collection = await _require_member(service, collection_id, user["id"])
-    view = await service.collection_view(collection_id, user["id"])
+    try:
+        history_limit = min(500, max(20, int(request.query.get("history_limit", "20"))))
+        events_limit = min(500, max(20, int(request.query.get("events_limit", "20"))))
+    except ValueError as exc:
+        raise ApiError("Некорректный размер страницы") from exc
+    view = await service.collection_view(
+        collection_id,
+        user["id"],
+        history_limit=history_limit + 1,
+        events_limit=events_limit + 1,
+    )
     snapshot = view.snapshot
-    history = view.history
-    events = view.events
+    history_has_more = len(view.history) > history_limit
+    events_has_more = len(view.events) > events_limit
+    history = view.history[:history_limit]
+    events = view.events[:events_limit]
     shares = view.shares
     names = {row["id"]: row["full_name"] for row in snapshot.participants}
     return web.json_response(
@@ -347,6 +365,8 @@ async def collection_details(request: web.Request) -> web.Response:
             ],
             "total": snapshot.total,
             "notifications_enabled": view.notifications_enabled,
+            "history_has_more": history_has_more,
+            "events_has_more": events_has_more,
             "events": [dict(row) for row in events],
             "history": [
                 {
@@ -404,7 +424,7 @@ async def create_collection(request: web.Request) -> web.Response:
         service,
         collection,
         f"🧾 {_name(user)} создал сбор <b>«{escape(collection['title'])}»</b> · "
-        f"{collection['currency']}\n\nНажмите «Участвовать» — регистрация займет один шаг.",
+        f"{collection['currency']}\n\nНажмите «Принять» — регистрация займет один шаг.",
         _collection_invite_markup(request.app[SETTINGS_KEY], collection_id),
         exclude_user_ids={user["id"]},
     )
@@ -547,12 +567,6 @@ async def request_funds(request: web.Request) -> web.Response:
             [InlineKeyboardButton(text="📱 Открыть сбор", url=app_url)],
         ]
     )
-    creditor = await service.get_user(user["id"])
-    payment_details = (
-        f"\n\n💳 <b>Реквизиты:</b> {escape(creditor['payment_details'])}"
-        if creditor["payment_details"]
-        else ""
-    )
     delivered = 0
     failed = 0
     for debt in debts:
@@ -562,8 +576,7 @@ async def request_funds(request: web.Request) -> web.Response:
                 "🔔 <b>Небольшое напоминание о расчёте</b>\n\n"
                 f"{_name(user)} вежливо просит завершить расчёт по сбору "
                 f"«{escape(collection['title'])}».\n"
-                f"К возврату: <b>{format_money(debt.amount, collection['currency'])}</b>."
-                f"{payment_details}\n\n"
+                f"К возврату: <b>{format_money(debt.amount, collection['currency'])}</b>.\n\n"
                 "После перевода отметьте возврат в сборе — получатель подтвердит получение.",
                 parse_mode="HTML",
                 reply_markup=open_markup,
@@ -713,7 +726,19 @@ async def join_collection(request: web.Request) -> web.Response:
 
 async def global_history(request: web.Request) -> web.Response:
     service, _, user = _context(request)
-    transactions, events = await service.global_history(user["id"])
+    try:
+        transaction_offset = max(0, int(request.query.get("transaction_offset", "0")))
+        event_offset = max(0, int(request.query.get("event_offset", "0")))
+    except ValueError as exc:
+        raise ApiError("Некорректная страница истории") from exc
+    page_size = 20
+    transactions, events = await service.global_history(
+        user["id"], page_size + 1, transaction_offset, event_offset
+    )
+    transaction_has_more = len(transactions) > page_size
+    event_has_more = len(events) > page_size
+    transactions = transactions[:page_size]
+    events = events[:page_size]
     shares = await service.expense_shares_for_transactions(
         row["id"] for row in transactions if row["kind"] == "expense"
     )
@@ -728,8 +753,17 @@ async def global_history(request: web.Request) -> web.Response:
                 for row in transactions
             ],
             "events": [dict(row) for row in events],
+            "transaction_has_more": transaction_has_more,
+            "event_has_more": event_has_more,
+            "expense_stats": await service.expense_statistics(user["id"]),
         }
     )
+
+
+async def balance_overview(request: web.Request) -> web.Response:
+    service, _, user = _context(request)
+    overview = await service.balance_overview(user["id"])
+    return web.json_response({"ok": True, **overview})
 
 
 async def edit_transaction(request: web.Request) -> web.Response:
@@ -825,7 +859,11 @@ async def leave_collection(request: web.Request) -> web.Response:
 async def save_payment(request: web.Request) -> web.Response:
     service, _, user = _context(request)
     payload = await _json_body(request)
-    await service.set_payment_details(user["id"], str(payload.get("payment_details", "")))
+    await service.set_payment_details(
+        user["id"],
+        str(payload.get("payment_details", "")),
+        str(payload.get("bank_name", "")),
+    )
     return web.json_response({"ok": True})
 
 
@@ -1032,6 +1070,7 @@ def setup_webapp_routes(
     application.router.add_get("/api/bootstrap", bootstrap)
     application.router.add_get("/api/sync", sync_status)
     application.router.add_get("/api/history", global_history)
+    application.router.add_get("/api/balance", balance_overview)
     application.router.add_get("/api/rates", exchange_rates)
     application.router.add_get("/api/collections/{collection_id}", collection_details)
     application.router.add_post("/api/collections", create_collection)
