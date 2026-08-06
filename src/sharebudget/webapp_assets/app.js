@@ -60,6 +60,30 @@ function moneyMap(values) {
     : "0";
 }
 
+function userLink(id, fullName, username = "") {
+  if (!id || !fullName) return e(fullName || "");
+  return `<button class="user-link" type="button" data-action="open-user" data-user-id="${Number(id)}" data-username="${e(username || "")}">${e(fullName)}</button>`;
+}
+
+function openTelegramUser(target) {
+  const username = target.dataset.username;
+  const url = username
+    ? `https://t.me/${encodeURIComponent(username.replace(/^@/, ""))}`
+    : `tg://user?id=${encodeURIComponent(target.dataset.userId)}`;
+  haptic();
+  if (username && tg?.openTelegramLink) tg.openTelegramLink(url);
+  else window.location.href = url;
+}
+
+function debtTotals(debts, key) {
+  return (debts || []).reduce((result, debt) => {
+    if (debt[key] === state.bootstrap.user.id) {
+      result[debt.currency] = (result[debt.currency] || 0) + debt.amount;
+    }
+    return result;
+  }, {});
+}
+
 function balanceStatus(amount) {
   if (amount > 0) return { icon: "💰", label: "ожидаете возврат" };
   if (amount < 0) return { icon: "💸", label: "нужно вернуть долг" };
@@ -140,6 +164,8 @@ async function reloadBootstrap() {
   state.bootstrap = await api("/api/bootstrap");
   state.syncVersion = state.bootstrap.sync_version;
   state.details.clear();
+  state.balanceData = null;
+  state.globalHistory = null;
   const initials = state.bootstrap.user.full_name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2);
   avatar.textContent = initials || "S";
 }
@@ -161,14 +187,24 @@ function collectionCards(rows) {
     </button>`).join("")}</div>`;
 }
 
-function renderCollections() {
+async function renderCollections() {
   state.nav = "collections";
   state.collection = null;
   title.textContent = state.bootstrap.context_chat_id ? "Сборы группы" : "Сборы";
   tg?.BackButton?.hide();
+  if (!state.balanceData) state.balanceData = await api("/api/balance");
+  const oweTotals = debtTotals(state.balanceData.personal_debts, "debtor_id");
+  const owedTotals = debtTotals(state.balanceData.personal_debts, "creditor_id");
+  const emptySummary = money(0, state.bootstrap.user.preferred_currency);
+  const owe = Object.keys(oweTotals).length ? moneyMap(oweTotals) : emptySummary;
+  const owed = Object.keys(owedTotals).length ? moneyMap(owedTotals) : emptySummary;
   const active = state.bootstrap.collections.filter((item) => item.status === "active");
   const archived = state.bootstrap.collections.filter((item) => item.status === "archived");
   app.innerHTML = `
+    <div class="collection-summaries">
+      <button class="summary-tile summary-owe" type="button" data-action="collections-summary"><small>Сколько я должен(а)</small><b>${owe}</b></button>
+      <button class="summary-tile summary-owed" type="button" data-action="collections-summary"><small>Сколько мне должны</small><b>${owed}</b></button>
+    </div>
     <div class="section-head"><h2>Текущие</h2><button class="text-button" type="button" data-action="create">+ Новый</button></div>
     ${collectionCards(active)}
     ${archived.length ? `<div class="section-head"><h2>Архив</h2></div>${collectionCards(archived)}` : ""}`;
@@ -182,7 +218,7 @@ async function renderBalance() {
   tg?.BackButton?.hide();
   app.innerHTML = `<section class="loading-card"><div class="spinner"></div><p>Считаем ваш баланс…</p></section>`;
   updateNav();
-  const overview = await api("/api/balance");
+  const overview = state.balanceData || await api("/api/balance");
   let exchange = null;
   try {
     exchange = await api("/api/rates");
@@ -216,9 +252,9 @@ function paintBalance() {
   const personal = data.personal_debts.map((debt) => {
     const iOwe = debt.debtor_id === state.bootstrap.user.id;
     const label = iOwe
-      ? `Вы должны ${e(debt.creditor_name)}`
-      : `${e(debt.debtor_name)} должен вам`;
-    return `<button class="card personal-debt" type="button" data-action="open-collection" data-id="${debt.collection_id}"><span><b>${label}</b><small>Сбор «${e(debt.collection_title)}»</small></span><strong class="${iOwe ? "negative" : "positive"}">${money(debt.amount, debt.currency)}</strong></button>`;
+      ? `Вы должны ${userLink(debt.creditor_id, debt.creditor_name, debt.creditor_username)}`
+      : `${userLink(debt.debtor_id, debt.debtor_name, debt.debtor_username)} должен(а) вам`;
+    return `<div class="card personal-debt"><span><b>${label}</b><button class="collection-link" type="button" data-action="open-collection" data-id="${debt.collection_id}">Сбор «${e(debt.collection_title)}»</button></span><strong class="${iOwe ? "negative" : "positive"}">${money(debt.amount, debt.currency)}</strong></div>`;
   }).join("");
   app.innerHTML = `
     <section class="hero">
@@ -240,7 +276,7 @@ function renderProfile() {
   const user = state.bootstrap.user;
   app.innerHTML = `
     <section class="card member-row">
-      <div class="row-between"><div><div class="row-title">${e(user.full_name)}</div><div class="row-note">${user.username ? `@${e(user.username)}` : `Telegram ID ${user.id}`}</div></div><span class="pill">Подключён</span></div>
+      <div class="row-between"><div><div class="row-title">${userLink(user.id, user.full_name, user.username)}</div><div class="row-note">${user.username ? `@${e(user.username)}` : `Telegram ID ${user.id}`}</div></div><span class="pill">Подключён</span></div>
     </section>
     <div class="section-head"><h2>Общая валюта баланса</h2></div>
     <section class="card member-row">
@@ -256,6 +292,12 @@ function renderProfile() {
   updateNav();
 }
 
+function quickPaymentRows(debts, compact = false) {
+  const mine = (debts || []).filter((debt) => debt.debtor_id === state.bootstrap.user.id);
+  if (!mine.length) return "";
+  return `<div class="quick-payments ${compact ? "compact" : ""}">${mine.map((debt) => `<div class="quick-payment"><span><small>Вернуть</small><b>${userLink(debt.creditor_id, debt.creditor_name, debt.creditor_username)}</b><em>${money(debt.amount, debt.currency)} · ${e(debt.collection_title || "")}</em></span><button type="button" data-action="quick-repay" data-collection-id="${debt.collection_id}" data-creditor-id="${debt.creditor_id}">Оплатить</button></div>`).join("")}</div>`;
+}
+
 async function renderHistory(loadKind = null) {
   state.nav = "history";
   state.collection = null;
@@ -266,7 +308,15 @@ async function renderHistory(loadKind = null) {
   const current = state.globalHistory;
   const transactionOffset = loadKind === "transactions" ? current.transactions.length : 0;
   const eventOffset = loadKind === "events" ? current.events.length : 0;
-  const page = await api(`/api/history?transaction_offset=${transactionOffset}&event_offset=${eventOffset}`);
+  let page;
+  if (!loadKind && !state.balanceData) {
+    [page, state.balanceData] = await Promise.all([
+      api(`/api/history?transaction_offset=${transactionOffset}&event_offset=${eventOffset}`),
+      api("/api/balance"),
+    ]);
+  } else {
+    page = await api(`/api/history?transaction_offset=${transactionOffset}&event_offset=${eventOffset}`);
+  }
   if (!loadKind) {
     state.globalHistory = page;
   } else if (loadKind === "transactions") {
@@ -280,10 +330,10 @@ async function renderHistory(loadKind = null) {
   }
   const data = state.globalHistory;
   const eventLabels = {
-    created: "создал сбор", joined: "вступил в сбор", left: "вышел из сбора",
-    member_removed: "удалил участника", admin_transferred: "передал роль администратора",
-    archived: "завершил сбор", restored: "восстановил сбор",
-    funds_requested: "вежливо запросил завершить расчёт",
+    created: "создал(а) сбор", joined: "вступил(а) в сбор", left: "вышел(ла) из сбора",
+    member_removed: "удалил(а) участника", admin_transferred: "передал(а) роль администратора",
+    archived: "завершил(а) сбор", restored: "восстановил(а) сбор",
+    funds_requested: "вежливо запросил(а) завершить расчёт",
   };
   const transactions = data.transactions.map((item) => {
     const isConfirmedRepayment = item.kind === "repayment" && item.confirmation_status === "confirmed";
@@ -292,13 +342,15 @@ async function renderHistory(loadKind = null) {
     const canEdit = item.is_participant && item.status === "active" && !isConfirmedRepayment && item.collection_status === "active" && (item.creator_id === state.bootstrap.user.id || item.collection_admin_id === state.bootstrap.user.id);
     const canCancel = item.is_participant && item.status === "active" && item.collection_status === "active" && (item.collection_admin_id === state.bootstrap.user.id || (item.creator_id === state.bootstrap.user.id && !isConfirmedRepayment));
     const status = item.status === "cancelled" ? `<span class="pill cancelled">${isRejectedRepayment ? "отклонено" : "отменено"}</span>` : item.kind === "repayment" && item.confirmation_status === "pending" ? '<span class="pill pending">ожидает</span>' : item.kind === "repayment" ? '<span class="pill">подтверждено</span>' : "";
-    const shares = item.kind === "expense" && item.shares.length ? `<div class="share-breakdown">${item.shares.map((share) => `<div class="row-note">${e(share.full_name)} — ${money(share.amount, item.currency)}</div>`).join("")}</div>` : "";
+    const shares = item.kind === "expense" && item.shares.length ? `<div class="share-breakdown">${item.shares.map((share) => `<div class="row-note">${userLink(share.user_id, share.full_name, share.username)} — ${money(share.amount, item.currency)}</div>`).join("")}</div>` : "";
     const collectionTitle = item.is_participant ? `<button class="collection-link" type="button" data-action="open-collection" data-id="${item.collection_id}">${e(item.collection_title)}</button>` : `<span>${e(item.collection_title)}</span>`;
     const actions = canConfirm || canEdit || canCancel ? `<div class="transaction-actions">${canConfirm ? `<button class="mini-button confirm" type="button" data-action="confirm-repayment" data-id="${item.id}" data-return="global">✅ Подтвердить получение</button><button class="mini-button danger" type="button" data-action="reject-repayment" data-id="${item.id}" data-return="global">❌ Отклонить</button>` : ""}${canEdit ? `<button class="mini-button" type="button" data-action="edit-history-transaction" data-id="${item.id}" data-collection-id="${item.collection_id}">Изменить</button>` : ""}${canCancel ? `<button class="mini-button danger" type="button" data-action="cancel-transaction" data-id="${item.id}" data-return="global">Удалить</button>` : ""}</div>` : "";
-    return `<article class="history-row"><div class="row-between"><div><div class="row-title history-collection-title"><span>${item.kind === "expense" ? "💸" : "🤝"}</span>${collectionTitle}</div><div class="row-note">${e(item.creator_name)} · ${shortDate(item.created_at)}</div></div><div class="amount">${money(item.amount, item.currency)}</div></div><div class="row-note">${e(item.comment || (item.kind === "expense" ? "Затрата" : `Возврат → ${item.counterparty_name}`))} ${status}</div>${shares}${actions}</article>`;
+    const description = item.comment ? e(item.comment) : item.kind === "expense" ? "Затрата" : `Возврат → ${userLink(item.counterparty_id, item.counterparty_name, item.counterparty_username)}`;
+    return `<article class="history-row"><div class="row-between"><div><div class="row-title history-collection-title"><span>${item.kind === "expense" ? "💸" : "🤝"}</span>${collectionTitle}</div><div class="row-note">${userLink(item.creator_id, item.creator_name, item.creator_username)} · ${shortDate(item.created_at)}</div></div><div class="amount">${money(item.amount, item.currency)}</div></div><div class="row-note">${description} ${status}</div>${shares}${actions}</article>`;
   }).join("");
-  const events = data.events.map((item) => `<article class="history-row"><div class="row-title">${item.is_participant ? `<button class="collection-link" type="button" data-action="open-collection" data-id="${item.collection_id}">${e(item.collection_title)}</button>` : e(item.collection_title)}</div><div class="row-note">${shortDate(item.created_at)} · ${e(item.actor_name)} ${e(eventLabels[item.kind] || item.kind)}${item.target_name && item.target_name !== item.actor_name ? ` · ${e(item.target_name)}` : ""}</div></article>`).join("");
-  app.innerHTML = `<section class="hero"><div class="hero-label">МОИ ЗАТРАТЫ С НАЧАЛА МЕСЯЦА</div><div class="hero-value">${moneyMap(data.expense_stats.monthly_by_currency)}</div><div class="hero-meta">${data.expense_stats.monthly_count} операций</div></section><button class="statistics-button" type="button" data-action="expense-statistics"><span>📊</span><span><b>Статистика моих затрат</b><small>По валютам и сборам</small></span><i>›</i></button><div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}${data.transaction_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="transactions">Загрузить ещё</button>' : ""}<div class="section-head"><h2>История сборов</h2></div>${events ? `<div class="card">${events}</div>` : empty("🧾", "Событий пока нет")}${data.event_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="events">Загрузить ещё</button>' : ""}`;
+  const events = data.events.map((item) => `<article class="history-row"><div class="row-title">${item.is_participant ? `<button class="collection-link" type="button" data-action="open-collection" data-id="${item.collection_id}">${e(item.collection_title)}</button>` : e(item.collection_title)}</div><div class="row-note">${shortDate(item.created_at)} · ${userLink(item.actor_id, item.actor_name, item.actor_username)} ${e(eventLabels[item.kind] || item.kind)}${item.target_name && item.target_name !== item.actor_name ? ` · ${userLink(item.target_user_id, item.target_name, item.target_username)}` : ""}</div></article>`).join("");
+  const quickPayments = quickPaymentRows(state.balanceData?.personal_debts);
+  app.innerHTML = `<section class="hero"><div class="hero-label">МОИ ЗАТРАТЫ С НАЧАЛА МЕСЯЦА</div><div class="hero-value">${moneyMap(data.expense_stats.monthly_by_currency)}</div><div class="hero-meta">${data.expense_stats.monthly_count} операций</div></section>${quickPayments ? `<div class="section-head"><h2>Быстрая оплата</h2></div>${quickPayments}` : ""}<button class="statistics-button" type="button" data-action="expense-statistics"><span>📊</span><span><b>Статистика моих затрат</b><small>По валютам и сборам</small></span><i>›</i></button><div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}${data.transaction_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="transactions">Загрузить ещё</button>' : ""}<div class="section-head"><h2>История сборов</h2></div>${events ? `<div class="card">${events}</div>` : empty("🧾", "Событий пока нет")}${data.event_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="events">Загрузить ещё</button>' : ""}`;
 }
 
 function expenseStatisticsSheet() {
@@ -399,7 +451,7 @@ function renderCollection() {
       <div class="hero-meta">${activeParticipants.length} участников · ${collection.is_personal ? "уведомления через бота" : "Telegram-группа"} · ${collection.status === "active" ? "активен" : "в архиве"}</div>
     </section>
     ${collection.status === "active" ? `<div class="quick-actions"><button class="action-button" type="button" data-action="expense">💸 Добавить затрату</button><button class="action-button" type="button" data-action="repay">🤝 Вернуть долг</button></div>` : `<div class="status-banner">📦 Сбор находится в архиве. Балансы и история доступны без изменений.</div>`}
-    ${collection.status === "active" ? `<button class="request-funds" type="button" data-action="request-funds" ${myDebtors.length ? "" : "disabled"}><span>🔔</span><span><b>Запросить средства</b><small>${myDebtors.length ? `Вежливо напомнить должникам · ${myDebtors.length}` : "Сейчас вам никто не должен"}</small></span><i>›</i></button>` : ""}
+    ${collection.status === "active" ? `<button class="request-funds" type="button" data-action="request-funds" ${myDebtors.length ? "" : "disabled"}><span>🔔</span><span><b>Запросить средства</b><small>${myDebtors.length ? `Вежливо напомнить должникам · ${myDebtors.length}` : "Сейчас вам никто не должен(а)"}</small></span><i>›</i></button>` : ""}
     ${collection.status === "active" ? `<button class="notification-toggle ${data.notifications_enabled ? "enabled" : ""}" type="button" data-action="toggle-notifications" data-enabled="${data.notifications_enabled}"><span>${data.notifications_enabled ? "🔔" : "🔕"}</span><span><b>${data.notifications_enabled ? "Уведомления включены" : "Получать уведомления"}</b><small>${data.notifications_enabled ? "Бот сообщит о новых операциях в личном чате" : "Даже если вас нет в Telegram-группе"}</small></span><i>›</i></button>` : ""}
     <div class="tabs">${tabs.map(([key, label]) => `<button type="button" data-action="tab" data-tab="${key}" class="${state.collectionTab === key ? "active" : ""}">${label}</button>`).join("")}</div>
     <section class="panel">${renderCollectionPanel(data, isAdmin)}</section>`;
@@ -410,10 +462,10 @@ function renderCollectionPanel(data, isAdmin) {
   if (state.collectionTab === "overview") {
     const balances = data.participants.map((member) => {
       const amount = data.balances.find((item) => item.user_id === member.id)?.amount || 0;
-      return `<div class="balance-row"><div class="row-between"><div><div class="row-title">${e(member.full_name)}${member.id === state.bootstrap.user.id ? " · вы" : ""}${member.active === false ? " · вышел" : ""}</div><div class="row-note">${amount > 0 ? "должны участники" : amount < 0 ? "должен участникам" : "расчёт закрыт"}</div></div><div class="amount ${amount > 0 ? "positive" : amount < 0 ? "negative" : ""}">${amount > 0 ? "+" : amount < 0 ? "−" : ""}${money(Math.abs(amount), collection.currency)}</div></div></div>`;
+      return `<div class="balance-row"><div class="row-between"><div><div class="row-title">${userLink(member.id, member.full_name, member.username)}${member.id === state.bootstrap.user.id ? " · вы" : ""}${member.active === false ? " · вышел(ла)" : ""}</div><div class="row-note">${amount > 0 ? "должны участники" : amount < 0 ? "должен(а) участникам" : "расчёт закрыт"}</div></div><div class="amount ${amount > 0 ? "positive" : amount < 0 ? "negative" : ""}">${amount > 0 ? "+" : amount < 0 ? "−" : ""}${money(Math.abs(amount), collection.currency)}</div></div></div>`;
     }).join("");
-    const debts = data.debts.map((debt) => `<div class="debt-row"><div class="row-title">${e(debt.debtor_name)} → ${e(debt.creditor_name)}</div><div class="row-note">Перевести ${money(debt.amount, collection.currency)}</div></div>`).join("");
-    return `<div class="section-head"><h2>Балансы</h2></div><div class="card">${balances}</div><div class="section-head"><h2>Кто кому</h2></div><div class="card">${debts || `<div class="debt-row">✅ Никто никому не должен</div>`}</div>`;
+    const debts = data.debts.map((debt) => `<div class="debt-row"><div class="row-title">${userLink(debt.debtor_id, debt.debtor_name, debt.debtor_username)} → ${userLink(debt.creditor_id, debt.creditor_name, debt.creditor_username)}</div><div class="row-note">Перевести ${money(debt.amount, collection.currency)}</div></div>`).join("");
+    return `<div class="section-head"><h2>Балансы</h2></div><div class="card">${balances}</div><div class="section-head"><h2>Кто кому</h2></div><div class="card">${debts || `<div class="debt-row">✅ Никто никому не должен(а)</div>`}</div>`;
   }
   if (state.collectionTab === "history") {
     const transactions = data.history.map((item) => {
@@ -422,25 +474,25 @@ function renderCollectionPanel(data, isAdmin) {
       const canEdit = item.status === "active" && !isConfirmedRepayment && collection.status === "active" && (isAdmin || item.creator_id === state.bootstrap.user.id);
       const canCancel = item.status === "active" && collection.status === "active" && (isAdmin || (item.creator_id === state.bootstrap.user.id && !isConfirmedRepayment));
       const canConfirm = item.kind === "repayment" && item.status === "active" && item.confirmation_status === "pending" && item.counterparty_id === state.bootstrap.user.id;
-      const subject = item.kind === "expense" ? (item.comment || "Затрата") : `Возврат → ${item.counterparty_name}`;
+      const subject = item.kind === "expense" ? e(item.comment || "Затрата") : `Возврат → ${userLink(item.counterparty_id, item.counterparty_name, item.counterparty_username)}`;
       const status = item.status === "cancelled" ? `<span class="pill cancelled">${isRejectedRepayment ? "отклонено" : "отменено"}</span>` : item.kind === "repayment" && item.confirmation_status === "pending" ? '<span class="pill pending">ожидает подтверждения</span>' : item.kind === "repayment" ? '<span class="pill">подтверждено</span>' : "";
-      const shares = item.kind === "expense" ? `<div class="share-breakdown">${item.shares.map((share) => `<div class="row-note">${e(share.full_name)} — ${money(share.amount, collection.currency)}</div>`).join("")}</div>` : "";
-      return `<article class="history-row"><div class="row-between"><div><div class="row-title">${item.kind === "expense" ? "💸" : "🤝"} ${e(subject)}</div><div class="row-note">${e(item.creator_name)} · ${shortDate(item.created_at)}</div></div><div class="amount">${money(item.amount, collection.currency)}</div></div><div class="row-note">${item.kind === "expense" ? "Распределение по людям" : "Фактический перевод"} ${status}</div>${shares}${canConfirm ? `<div class="transaction-actions"><button class="mini-button confirm" type="button" data-action="confirm-repayment" data-id="${item.id}">✅ Подтвердить получение</button><button class="mini-button danger" type="button" data-action="reject-repayment" data-id="${item.id}">❌ Отклонить</button></div>` : ""}${canEdit || canCancel ? `<div class="transaction-actions">${canEdit ? `<button class="mini-button" type="button" data-action="edit-transaction" data-id="${item.id}">Изменить</button>` : ""}${canCancel ? `<button class="mini-button danger" type="button" data-action="cancel-transaction" data-id="${item.id}">Отменить</button>` : ""}</div>` : ""}</article>`;
+      const shares = item.kind === "expense" ? `<div class="share-breakdown">${item.shares.map((share) => `<div class="row-note">${userLink(share.user_id, share.full_name, share.username)} — ${money(share.amount, collection.currency)}</div>`).join("")}</div>` : "";
+      return `<article class="history-row"><div class="row-between"><div><div class="row-title">${item.kind === "expense" ? "💸" : "🤝"} ${subject}</div><div class="row-note">${userLink(item.creator_id, item.creator_name, item.creator_username)} · ${shortDate(item.created_at)}</div></div><div class="amount">${money(item.amount, collection.currency)}</div></div><div class="row-note">${item.kind === "expense" ? "Распределение по людям" : "Фактический перевод"} ${status}</div>${shares}${canConfirm ? `<div class="transaction-actions"><button class="mini-button confirm" type="button" data-action="confirm-repayment" data-id="${item.id}">✅ Подтвердить получение</button><button class="mini-button danger" type="button" data-action="reject-repayment" data-id="${item.id}">❌ Отклонить</button></div>` : ""}${canEdit || canCancel ? `<div class="transaction-actions">${canEdit ? `<button class="mini-button" type="button" data-action="edit-transaction" data-id="${item.id}">Изменить</button>` : ""}${canCancel ? `<button class="mini-button danger" type="button" data-action="cancel-transaction" data-id="${item.id}">Отменить</button>` : ""}</div>` : ""}</article>`;
     }).join("");
     const eventLabels = {
-      created: "создал сбор", joined: "вступил в сбор", left: "вышел из сбора",
-      member_removed: "удалил участника", admin_transferred: "передал роль администратора",
-      archived: "завершил сбор", restored: "восстановил сбор",
-      funds_requested: "вежливо запросил завершить расчёт",
+      created: "создал(а) сбор", joined: "вступил(а) в сбор", left: "вышел(ла) из сбора",
+      member_removed: "удалил(а) участника", admin_transferred: "передал(а) роль администратора",
+      archived: "завершил(а) сбор", restored: "восстановил(а) сбор",
+      funds_requested: "вежливо запросил(а) завершить расчёт",
     };
-    const events = data.events.map((item) => `<article class="history-row"><div class="row-title">${shortDate(item.created_at)} · ${e(item.actor_name)} ${e(eventLabels[item.kind] || item.kind)}</div>${item.target_name && item.target_name !== item.actor_name ? `<div class="row-note">Участник: ${e(item.target_name)}</div>` : ""}</article>`).join("");
+    const events = data.events.map((item) => `<article class="history-row"><div class="row-title">${shortDate(item.created_at)} · ${userLink(item.actor_id, item.actor_name, item.actor_username)} ${e(eventLabels[item.kind] || item.kind)}</div>${item.target_name && item.target_name !== item.actor_name ? `<div class="row-note">Участник: ${userLink(item.target_user_id, item.target_name, item.target_username)}</div>` : ""}</article>`).join("");
     if (!transactions && !events) return empty("📜", "История пока пуста");
-    return `<div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}${data.history_has_more ? '<button class="load-more" type="button" data-action="load-collection-history" data-kind="transactions">Загрузить ещё</button>' : ""}<div class="section-head"><h2>Участники и сбор</h2></div>${events ? `<div class="card">${events}</div>` : empty("👥", "Событий пока нет")}${data.events_has_more ? '<button class="load-more" type="button" data-action="load-collection-history" data-kind="events">Загрузить ещё</button>' : ""}`;
+    return `${quickPaymentRows(data.debts.map((debt) => ({ ...debt, collection_id: collection.id, collection_title: collection.title, currency: collection.currency })), true)}<div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}${data.history_has_more ? '<button class="load-more" type="button" data-action="load-collection-history" data-kind="transactions">Загрузить ещё</button>' : ""}<div class="section-head"><h2>Участники и сбор</h2></div>${events ? `<div class="card">${events}</div>` : empty("👥", "Событий пока нет")}${data.events_has_more ? '<button class="load-more" type="button" data-action="load-collection-history" data-kind="events">Загрузить ещё</button>' : ""}`;
   }
   if (state.collectionTab === "members") {
     const invite = collection.status === "active" ? `<button class="invite-button" type="button" data-action="share-invite">👥<span><b>Пригласить друзей</b><small>Выбрать человека или Telegram-группу</small></span><i>›</i></button>` : "";
     const activeParticipants = data.participants.filter((member) => member.active !== false);
-    const members = activeParticipants.map((member) => `<div class="member-row"><div class="row-between"><div><div class="row-title">${e(member.full_name)} ${member.is_admin ? "👑" : ""}</div><div class="row-note">${member.username ? `@${e(member.username)}` : `ID ${member.id}`}</div></div></div></div>`).join("");
+    const members = activeParticipants.map((member) => `<div class="member-row"><div class="row-between"><div><div class="row-title">${userLink(member.id, member.full_name, member.username)} ${member.is_admin ? "👑" : ""}</div><div class="row-note">${member.username ? `@${e(member.username)}` : `ID ${member.id}`}</div></div></div></div>`).join("");
     return `${invite}<div class="section-head"><h2>Участники · ${activeParticipants.length}</h2></div><div class="card">${members}</div>${collection.status === "active" && !isAdmin ? '<div class="sheet-actions"><button class="danger-button" type="button" data-action="leave">Выйти из сбора</button></div>' : ""}`;
   }
   return `<div class="card member-row"><div class="row-title">Администратор сбора</div><div class="row-note">Передача роли и удаление участников доступны только при соблюдении балансов.</div></div><div class="sheet-actions">${collection.status === "active" ? '<button class="secondary-button" type="button" data-action="transfer">Передать администратора</button><button class="secondary-button" type="button" data-action="remove-member">Удалить участника</button><button class="danger-button" type="button" data-action="archive">Завершить и архивировать</button>' : '<button class="primary-button" type="button" data-action="restore">Восстановить сбор</button><button class="danger-button" type="button" data-action="delete-collection">Удалить сбор навсегда</button>'}</div>`;
@@ -472,23 +524,24 @@ function createSheet() {
 function expenseSheet() {
   const data = state.collection;
   const activeParticipants = data.participants.filter((member) => member.active !== false);
-  showSheet(`<h2>Добавить затрату</h2><p class="sheet-intro">Сумма будет поровну распределена между отмеченными людьми.</p><form id="expense-form"><label class="field"><span>Сумма · ${e(data.collection.currency)}</span><input name="amount" inputmode="decimal" placeholder="0,00" required></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" placeholder="Например, билеты"></label><div class="row-between"><span class="row-title">На кого делим</span><button class="text-button" type="button" data-action="select-all">Выбрать всех</button></div><div class="check-list">${activeParticipants.map((member) => `<label class="check-row"><input type="checkbox" name="participant" value="${member.id}"><span>${e(member.full_name)}${member.id === state.bootstrap.user.id ? " · вы" : ""}</span></label>`).join("")}</div><div class="sheet-actions"><button class="primary-button" type="submit">Добавить затрату</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+  showSheet(`<h2>Добавить затрату</h2><p class="sheet-intro">Сумма будет поровну распределена между отмеченными людьми.</p><form id="expense-form"><label class="field"><span>Сумма · ${e(data.collection.currency)}</span><input name="amount" inputmode="decimal" placeholder="0,00" required></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" placeholder="Например, билеты"></label><div class="row-between"><span class="row-title">На кого делим</span><button class="text-button" type="button" data-action="select-all">Выбрать всех</button></div><div class="check-list">${activeParticipants.map((member) => `<label class="check-row"><input type="checkbox" name="participant" value="${member.id}"><span>${userLink(member.id, member.full_name, member.username)}${member.id === state.bootstrap.user.id ? " · вы" : ""}</span></label>`).join("")}</div><div class="sheet-actions"><button class="primary-button" type="submit">Добавить затрату</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
 
-function repaySheet() {
+function repaySheet(preferredCreditorId = null) {
   const data = state.collection;
   const debts = data.debts.filter((debt) => debt.debtor_id === state.bootstrap.user.id);
   if (!debts.length) {
     toast("По текущему балансу у вас нет долгов");
     return;
   }
+  const selectedIndex = Math.max(0, debts.findIndex((debt) => debt.creditor_id === Number(preferredCreditorId)));
   const cards = debts.map((debt, index) => {
     const member = data.participants.find((item) => item.id === debt.creditor_id);
-    const payment = member?.payment_details || "Получатель пока не добавил платежные данные";
+    const payment = member?.payment_details || "Получатель пока не добавил(а) платежные данные";
     const bank = member?.bank_name ? `<span class="row-note">Банк: ${e(member.bank_name)}</span><br>` : "";
-    return `<div class="payment-card" data-payment="${debt.creditor_id}" ${index ? "hidden" : ""}><b>💳 Данные для перевода</b><br>${bank}${e(payment)}</div>`;
+    return `<div class="payment-card" data-payment="${debt.creditor_id}" ${index === selectedIndex ? "" : "hidden"}><b>💳 Данные для перевода · ${userLink(member?.id, member?.full_name, member?.username)}</b><br>${bank}${e(payment)}</div>`;
   }).join("");
-  showSheet(`<h2>Вернуть долг</h2><p class="sheet-intro">После записи получатель должен подтвердить деньги. До этого баланс не изменится.</p><form id="repay-form"><label class="field"><span>Получатель</span><select name="creditor_id" data-action="repay-creditor">${debts.map((debt) => `<option value="${debt.creditor_id}" data-max="${debt.amount}">${e(debt.creditor_name)} · до ${money(debt.amount, data.collection.currency)}</option>`).join("")}</select></label>${cards}<label class="field"><span>Переведено · ${e(data.collection.currency)}</span><span class="amount-input"><input name="amount" inputmode="decimal" placeholder="0,00" required><button type="button" data-action="repay-max">MAX</button></span></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" placeholder="Необязательно"></label><div class="sheet-actions"><button class="primary-button" type="submit">Отправить на подтверждение</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+  showSheet(`<h2>Вернуть долг</h2><p class="sheet-intro">После записи получатель должен(а) подтвердить деньги. До этого баланс не изменится.</p><form id="repay-form"><label class="field"><span>Получатель</span><select name="creditor_id" data-action="repay-creditor">${debts.map((debt, index) => `<option value="${debt.creditor_id}" data-max="${debt.amount}" ${index === selectedIndex ? "selected" : ""}>${e(debt.creditor_name)} · до ${money(debt.amount, data.collection.currency)}</option>`).join("")}</select></label>${cards}<label class="field"><span>Переведено · ${e(data.collection.currency)}</span><span class="amount-input"><input name="amount" inputmode="decimal" placeholder="0,00" required><button type="button" data-action="repay-max">MAX</button></span></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" placeholder="Необязательно"></label><div class="sheet-actions"><button class="primary-button" type="submit">Отправить на подтверждение</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
 
 function editSheet(transactionId, collectionData = state.collection, returnTo = "collection") {
@@ -499,10 +552,10 @@ function editSheet(transactionId, collectionData = state.collection, returnTo = 
     .map((member) => ({ ...member, active: true }));
   item.shares.forEach((share) => {
     if (!candidates.some((member) => member.id === share.user_id)) {
-      candidates.push({ id: share.user_id, full_name: share.full_name, active: false });
+      candidates.push({ id: share.user_id, username: share.username, full_name: share.full_name, active: false });
     }
   });
-  const participantEditor = item.kind === "expense" ? `<div class="row-between"><span class="row-title">На кого делим</span><button class="text-button" type="button" data-action="select-all">Выбрать всех</button></div><div class="check-list">${candidates.map((member) => `<label class="check-row"><input type="checkbox" name="participant" value="${member.id}" ${selectedIds.has(member.id) ? "checked" : ""}><span>${e(member.full_name)}${member.id === state.bootstrap.user.id ? " · вы" : ""}${member.active ? "" : " · вышел из сбора"}</span></label>`).join("")}</div>` : "";
+  const participantEditor = item.kind === "expense" ? `<div class="row-between"><span class="row-title">На кого делим</span><button class="text-button" type="button" data-action="select-all">Выбрать всех</button></div><div class="check-list">${candidates.map((member) => `<label class="check-row"><input type="checkbox" name="participant" value="${member.id}" ${selectedIds.has(member.id) ? "checked" : ""}><span>${userLink(member.id, member.full_name, member.username)}${member.id === state.bootstrap.user.id ? " · вы" : ""}${member.active ? "" : " · вышел(ла) из сбора"}</span></label>`).join("")}</div>` : "";
   const intro = item.kind === "expense"
     ? "После сохранения сумма будет поровну распределена между отмеченными людьми, а балансы пересчитаются."
     : "Изменённый возврат останется на подтверждении у получателя.";
@@ -578,6 +631,19 @@ app.addEventListener("click", async (event) => {
   if (!target || state.busy) return;
   const action = target.dataset.action;
   try {
+    if (action === "open-user") {
+      openTelegramUser(target);
+      return;
+    }
+    if (action === "collections-summary") {
+      state.balanceMode = "personal";
+      return await renderBalance();
+    }
+    if (action === "quick-repay") {
+      await openCollection(target.dataset.collectionId, "history", true);
+      repaySheet(target.dataset.creditorId);
+      return;
+    }
     if (action === "balance-mode") {
       state.balanceMode = target.dataset.mode;
       paintBalance();
@@ -693,7 +759,7 @@ app.addEventListener("click", async (event) => {
       const result = await api(`/api/collections/${id}/${action}`, { method: "POST", body: "{}" });
       reportToast(result, action === "leave" ? "Вы вышли из сбора" : action === "archive" ? "Сбор в архиве" : "Сбор восстановлен");
       await reloadBootstrap();
-      renderCollections();
+      await renderCollections();
     }
     if (action === "delete-collection") {
       if (!await confirmAction("Удалить архивный сбор навсегда? Все затраты, возвраты и история этого сбора будут удалены без возможности восстановления.")) return;
@@ -703,7 +769,7 @@ app.addEventListener("click", async (event) => {
       reportToast(result, "Сбор удалён");
       state.collection = null;
       await reloadBootstrap();
-      renderCollections();
+      await renderCollections();
     }
   } catch (error) {
     haptic("heavy");
@@ -734,6 +800,11 @@ app.addEventListener("change", async (event) => {
 sheet.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-action]");
   if (!target || state.busy) return;
+  if (target.dataset.action === "open-user") {
+    event.preventDefault();
+    openTelegramUser(target);
+    return;
+  }
   if (target.dataset.action === "close-sheet") closeSheet();
   if (target.dataset.action === "share-created") {
     const collection = state.collection?.collection;
@@ -850,7 +921,7 @@ nav.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-nav]");
   if (!button || state.busy) return;
   try {
-    if (button.dataset.nav === "collections") renderCollections();
+    if (button.dataset.nav === "collections") await renderCollections();
     if (button.dataset.nav === "balance") await renderBalance();
     if (button.dataset.nav === "history") await renderHistory();
     if (button.dataset.nav === "profile") renderProfile();

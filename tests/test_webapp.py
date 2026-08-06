@@ -120,7 +120,11 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         script = await client.get("/app/static/app.js")
         assert script.status == 200
         assert script.headers["Cache-Control"] == "no-cache"
-        assert "delete-collection" in await script.text()
+        script_text = await script.text()
+        assert "delete-collection" in script_text
+        assert "Сколько я должен(а)" in script_text
+        assert 'data-action="open-user"' in script_text
+        assert 'data-action="quick-repay"' in script_text
 
         unauthorized = await client.get("/api/bootstrap")
         assert unauthorized.status == 401
@@ -373,7 +377,8 @@ async def test_repayment_notification_can_be_rejected_by_recipient(tmp_path):
         )
 
     assert created.status == 200
-    assert "От: Отправитель" in private_message
+    assert "Отправитель" in private_message
+    assert 'href="tg://user?id=2"' in private_message
     assert "Комментарий: Перевод на карту" in private_message
     assert "Сбор: Поездка" in private_message
     assert f"#{repayment_id}" not in private_message
@@ -442,7 +447,9 @@ async def test_history_is_paginated_and_balance_has_personal_debts(tmp_path):
     settings = Settings(bot_token=TOKEN, database_path=database.path)
     application = web.Application()
     setup_webapp_routes(application, SimpleNamespace(send_message=AsyncMock()), service, settings)
-    owner_auth = signed_init_data(user={"id": 1, "first_name": "Организатор"})
+    owner_auth = signed_init_data(
+        user={"id": 1, "first_name": "Организатор", "username": "owner"}
+    )
 
     async with TestClient(TestServer(application)) as client:
         first = await client.get(
@@ -473,7 +480,9 @@ async def test_history_is_paginated_and_balance_has_personal_debts(tmp_path):
     assert details_payload["history_has_more"] is True
     assert balance_payload["collections"][0]["amount"] == 1250
     assert balance_payload["personal_debts"][0]["debtor_name"] == "Участник"
+    assert balance_payload["personal_debts"][0]["debtor_username"] == "member"
     assert balance_payload["personal_debts"][0]["creditor_name"] == "Организатор"
+    assert balance_payload["personal_debts"][0]["creditor_username"] == "owner"
 
 
 @pytest.mark.asyncio

@@ -519,6 +519,7 @@ class BudgetService:
                 """
                 SELECT t.*, creator.full_name creator_name, creator.username creator_username,
                     counterparty.full_name counterparty_name,
+                    counterparty.username counterparty_username,
                     (SELECT GROUP_CONCAT(u.full_name, ', ')
                      FROM expense_shares s JOIN users u ON u.id=s.user_id
                      WHERE s.transaction_id=t.id) shared_with
@@ -532,7 +533,8 @@ class BudgetService:
             )
             events = await connection.execute_fetchall(
                 """
-                SELECT e.*,actor.full_name actor_name,target.full_name target_name
+                SELECT e.*,actor.full_name actor_name,actor.username actor_username,
+                       target.full_name target_name,target.username target_username
                 FROM collection_events e
                 JOIN users actor ON actor.id=e.actor_id
                 LEFT JOIN users target ON target.id=e.target_user_id
@@ -555,7 +557,7 @@ class BudgetService:
                 placeholders = ",".join("?" for _ in expense_ids)
                 share_rows = await connection.execute_fetchall(
                     f"""
-                    SELECT s.transaction_id,s.user_id,s.amount,u.full_name
+                    SELECT s.transaction_id,s.user_id,s.amount,u.full_name,u.username
                     FROM expense_shares s JOIN users u ON u.id=s.user_id
                     WHERE s.transaction_id IN ({placeholders})
                     ORDER BY s.transaction_id,u.full_name,u.id
@@ -736,7 +738,7 @@ class BudgetService:
             debt for debt in await self.settlement(collection_id) if debt.creditor_id == creditor_id
         ]
         if not debts:
-            raise DomainError("Сейчас вам никто не должен по этому сбору")
+            raise DomainError("Сейчас вам никто не должен(а) по этому сбору")
 
         async with self.db.connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
@@ -775,6 +777,7 @@ class BudgetService:
                 """
                 SELECT t.*, creator.full_name creator_name, creator.username creator_username,
                     counterparty.full_name counterparty_name,
+                    counterparty.username counterparty_username,
                     (SELECT GROUP_CONCAT(u.full_name, ', ')
                      FROM expense_shares s JOIN users u ON u.id=s.user_id
                      WHERE s.transaction_id=t.id) shared_with
@@ -795,7 +798,7 @@ class BudgetService:
         async with self.db.connect() as connection:
             rows = await connection.execute_fetchall(
                 f"""
-                SELECT s.transaction_id,s.user_id,s.amount,u.full_name
+                    SELECT s.transaction_id,s.user_id,s.amount,u.full_name,u.username
                 FROM expense_shares s JOIN users u ON u.id=s.user_id
                 WHERE s.transaction_id IN ({placeholders})
                 ORDER BY s.transaction_id,u.full_name,u.id
@@ -820,8 +823,9 @@ class BudgetService:
                 SELECT t.*,c.title collection_title,c.currency,
                        c.admin_id collection_admin_id,c.status collection_status,
                        p.active is_participant,
-                       creator.full_name creator_name,
-                       counterparty.full_name counterparty_name
+                       creator.full_name creator_name,creator.username creator_username,
+                       counterparty.full_name counterparty_name,
+                       counterparty.username counterparty_username
                 FROM transactions t
                 JOIN collections c ON c.id=t.collection_id
                 JOIN participants p ON p.collection_id=c.id AND p.user_id=?
@@ -835,7 +839,8 @@ class BudgetService:
                 """
                 SELECT e.*,c.title collection_title,c.currency,
                        p.active is_participant,
-                       actor.full_name actor_name,target.full_name target_name
+                       actor.full_name actor_name,actor.username actor_username,
+                       target.full_name target_name,target.username target_username
                 FROM collection_events e
                 JOIN collections c ON c.id=e.collection_id
                 JOIN participants p ON p.collection_id=c.id AND p.user_id=?
@@ -901,7 +906,7 @@ class BudgetService:
             personal_debts = []
             for collection in collections:
                 snapshot = await self._snapshot_on(connection, collection["id"])
-                names = {row["id"]: row["full_name"] for row in snapshot.participants}
+                people = {row["id"]: row for row in snapshot.participants}
                 collection_balances.append(
                     {
                         "collection": dict(collection),
@@ -917,9 +922,11 @@ class BudgetService:
                             "collection_title": collection["title"],
                             "currency": collection["currency"],
                             "debtor_id": debt.debtor_id,
-                            "debtor_name": names[debt.debtor_id],
+                            "debtor_name": people[debt.debtor_id]["full_name"],
+                            "debtor_username": people[debt.debtor_id]["username"],
                             "creditor_id": debt.creditor_id,
-                            "creditor_name": names[debt.creditor_id],
+                            "creditor_name": people[debt.creditor_id]["full_name"],
+                            "creditor_username": people[debt.creditor_id]["username"],
                             "amount": debt.amount,
                         }
                     )
@@ -930,7 +937,8 @@ class BudgetService:
         async with self.db.connect() as connection:
             return await connection.execute_fetchall(
                 """
-                SELECT e.*,actor.full_name actor_name,target.full_name target_name
+                SELECT e.*,actor.full_name actor_name,actor.username actor_username,
+                       target.full_name target_name,target.username target_username
                 FROM collection_events e
                 JOIN users actor ON actor.id=e.actor_id
                 LEFT JOIN users target ON target.id=e.target_user_id

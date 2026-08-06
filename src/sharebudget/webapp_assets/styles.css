@@ -69,6 +69,12 @@ main { width: min(100%, 720px); margin: 0 auto; padding: 8px 14px 28px; }
 .section-head h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
 .text-button { border: 0; padding: 7px 2px; color: var(--accent); background: transparent; font-weight: 680; }
 .card-list { display: grid; gap: 10px; }
+.collection-summaries { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 2px 0 16px; }
+.summary-tile { min-width: 0; min-height: 78px; padding: 13px 14px; border: 1px solid transparent; border-radius: 18px; color: var(--text); text-align: left; box-shadow: var(--shadow); }
+.summary-tile small { display: block; min-height: 29px; color: var(--muted); font-size: 11px; line-height: 1.25; }
+.summary-tile b { display: block; margin-top: 5px; overflow-wrap: anywhere; font-size: 16px; line-height: 1.2; }
+.summary-owe { border-color: color-mix(in srgb, #d99876 28%, var(--line)); background: color-mix(in srgb, #e8b89d 16%, var(--surface)); }
+.summary-owed { border-color: color-mix(in srgb, #63a99a 27%, var(--line)); background: color-mix(in srgb, #8ac7b9 16%, var(--surface)); }
 .card {
   width: 100%; border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--surface); color: var(--text); box-shadow: var(--shadow);
@@ -117,12 +123,20 @@ button:disabled { opacity: .5; cursor: default; }
 .history-collection-title { display: flex; align-items: center; gap: 6px; }
 .collection-link { border: 0; padding: 0; color: var(--accent); background: transparent; font: inherit; font-weight: inherit; text-align: left; cursor: pointer; }
 .collection-link:hover { text-decoration: underline; }
+.user-link { display: inline; border: 0; padding: 0; color: var(--accent); background: transparent; font: inherit; font-weight: inherit; line-height: inherit; text-align: left; cursor: pointer; }
+.user-link:hover { text-decoration: underline; }
 .row-note { margin-top: 5px; color: var(--muted); font-size: 12px; line-height: 1.4; }
 .pill { display: inline-flex; padding: 5px 8px; border-radius: 10px; background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); font-size: 11px; font-weight: 750; }
 .pill.cancelled { color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent); }
 .pill.pending { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
 .share-breakdown { display: grid; gap: 3px; margin-top: 8px; padding: 8px 10px; border-radius: 12px; background: var(--bg); }
 .payment-card { margin: 10px 0; padding: 13px 14px; border-radius: 15px; background: color-mix(in srgb, var(--accent) 8%, var(--surface)); border: 1px solid var(--line); white-space: pre-wrap; }
+.quick-payments { display: grid; gap: 9px; margin: 0 0 14px; }
+.quick-payments.compact { margin-top: 2px; }
+.quick-payment { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px; padding: 13px 14px; border: 1px solid color-mix(in srgb, var(--warn) 24%, var(--line)); border-radius: 17px; background: color-mix(in srgb, var(--warn) 7%, var(--surface)); }
+.quick-payment > span { display: grid; gap: 2px; min-width: 0; }
+.quick-payment small, .quick-payment em { color: var(--muted); font-size: 11px; font-style: normal; }
+.quick-payment button { min-height: 37px; padding: 8px 12px; border: 0; border-radius: 12px; color: #fff; background: var(--accent); font-weight: 760; }
 .transaction-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .mini-button { border: 0; padding: 7px 10px; border-radius: 10px; background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); font-size: 12px; font-weight: 700; }
 .mini-button.confirm { color: var(--good); background: color-mix(in srgb, var(--good) 11%, transparent); }

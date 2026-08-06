@@ -25,7 +25,7 @@ from .config import Settings
 from .links import parse_group_start_param
 from .money import CURRENCIES, format_money, parse_amount
 from .notifications import replace_repayment_prompt, report_collection_event
-from .render import transaction_update_report
+from .render import telegram_user_link, transaction_update_report
 from .service import BudgetService, DomainError
 
 LOGGER = logging.getLogger(__name__)
@@ -216,7 +216,7 @@ def _full_name(user: dict) -> str:
 
 
 def _name(user: dict) -> str:
-    return escape(_full_name(user))
+    return telegram_user_link(user["id"], _full_name(user), user.get("username"))
 
 
 @web.middleware
@@ -343,7 +343,7 @@ async def collection_details(request: web.Request) -> web.Response:
     history = view.history[:history_limit]
     events = view.events[:events_limit]
     shares = view.shares
-    names = {row["id"]: row["full_name"] for row in snapshot.participants}
+    people = {row["id"]: row for row in snapshot.participants}
     return web.json_response(
         {
             "ok": True,
@@ -358,8 +358,10 @@ async def collection_details(request: web.Request) -> web.Response:
                     "debtor_id": debt.debtor_id,
                     "creditor_id": debt.creditor_id,
                     "amount": debt.amount,
-                    "debtor_name": names[debt.debtor_id],
-                    "creditor_name": names[debt.creditor_id],
+                    "debtor_name": people[debt.debtor_id]["full_name"],
+                    "debtor_username": people[debt.debtor_id]["username"],
+                    "creditor_name": people[debt.creditor_id]["full_name"],
+                    "creditor_username": people[debt.creditor_id]["username"],
                 }
                 for debt in snapshot.debts
             ],
@@ -374,8 +376,10 @@ async def collection_details(request: web.Request) -> web.Response:
                     "kind": row["kind"],
                     "creator_id": row["creator_id"],
                     "creator_name": row["creator_name"],
+                    "creator_username": row["creator_username"],
                     "counterparty_id": row["counterparty_id"],
                     "counterparty_name": row["counterparty_name"],
+                    "counterparty_username": row["counterparty_username"],
                     "amount": row["amount"],
                     "comment": row["comment"],
                     "status": row["status"],
@@ -423,7 +427,7 @@ async def create_collection(request: web.Request) -> web.Response:
         bot,
         service,
         collection,
-        f"🧾 {_name(user)} создал сбор <b>«{escape(collection['title'])}»</b> · "
+        f"🧾 {_name(user)} создал(а) сбор <b>«{escape(collection['title'])}»</b> · "
         f"{collection['currency']}\n\nНажмите «Принять» — регистрация займет один шаг.",
         _collection_invite_markup(request.app[SETTINGS_KEY], collection_id),
         exclude_user_ids={user["id"]},
@@ -475,7 +479,7 @@ async def add_expense(request: web.Request) -> web.Response:
         bot,
         service,
         collection,
-        f"💸 {_name(user)} добавил затрату <b>{format_money(amount, collection['currency'])}</b>"
+        f"💸 {_name(user)} добавил(а) затрату <b>{format_money(amount, collection['currency'])}</b>"
         f" · {escape(comment) if comment else 'без комментария'} · на {len(participant_ids)} чел.",
         exclude_user_ids={user["id"]},
     )
@@ -520,7 +524,8 @@ async def add_repayment(request: web.Request) -> web.Response:
         bot,
         service,
         collection,
-        f"⏳ {_name(user)} сообщил о возврате долга {escape(creditor['full_name'])}: "
+        f"⏳ {_name(user)} сообщил(а) о возврате долга "
+        f"{telegram_user_link(creditor['id'], creditor['full_name'], creditor['username'])}: "
         f"<b>{format_money(amount, collection['currency'])}</b>. Баланс изменится после "
         f"подтверждения получателем.{comment_line}",
         exclude_user_ids={user["id"], creditor_id},
@@ -595,7 +600,7 @@ async def request_funds(request: web.Request) -> web.Response:
         try:
             await bot.send_message(
                 collection["chat_id"],
-                f"🔔 {_name(user)} вежливо напомнил о расчёте по сбору "
+                f"🔔 {_name(user)} вежливо напомнил(а) о расчёте по сбору "
                 f"<b>«{escape(collection['title'])}»</b>. "
                 f"Личные уведомления: {delivered} из {len(debts)}.",
                 parse_mode="HTML",
@@ -636,7 +641,8 @@ async def confirm_repayment(request: web.Request) -> web.Response:
         bot,
         service,
         collection,
-        f"✅ {_name(user)} подтвердил получение возврата от {escape(sender['full_name'])}: "
+        f"✅ {_name(user)} подтвердил(а) получение возврата от "
+        f"{telegram_user_link(sender['id'], sender['full_name'], sender['username'])}: "
         f"<b>{format_money(transaction['amount'], collection['currency'])}</b>. "
         f"Балансы пересчитаны.{comment_line}",
         exclude_user_ids={user["id"]},
@@ -649,7 +655,7 @@ async def confirm_repayment(request: web.Request) -> web.Response:
         user["id"],
         transaction["confirmation_message_id"],
         "✅ <b>Получение подтверждено</b>\n\n"
-        f"От: {escape(sender['full_name'])}\n"
+        f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
         f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
         f"Сбор: {escape(collection['title'])}{comment_detail}",
     )
@@ -674,7 +680,8 @@ async def reject_repayment(request: web.Request) -> web.Response:
         bot,
         service,
         collection,
-        f"❌ {_name(user)} отклонил получение возврата от {escape(sender['full_name'])}: "
+        f"❌ {_name(user)} отклонил(а) получение возврата от "
+        f"{telegram_user_link(sender['id'], sender['full_name'], sender['username'])}: "
         f"<b>{format_money(transaction['amount'], collection['currency'])}</b>. "
         f"Баланс не изменился.{comment_line}",
         exclude_user_ids={user["id"]},
@@ -687,7 +694,7 @@ async def reject_repayment(request: web.Request) -> web.Response:
         user["id"],
         transaction["confirmation_message_id"],
         "❌ <b>Получение отклонено</b>\n\n"
-        f"От: {escape(sender['full_name'])}\n"
+        f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
         f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
         f"Сбор: {escape(collection['title'])}{comment_detail}",
     )
@@ -809,8 +816,10 @@ async def edit_transaction(request: web.Request) -> web.Response:
             collection,
             transaction,
             updated,
-            [row["full_name"] for row in before_shares],
-            [row["full_name"] for row in after_shares],
+            before_shares,
+            after_shares,
+            actor_id=user["id"],
+            actor_username=user.get("username"),
         ),
         exclude_user_ids={user["id"]},
     )
@@ -831,7 +840,7 @@ async def cancel_transaction(request: web.Request) -> web.Response:
         bot,
         service,
         collection,
-        f"↩️ {_name(user)} отменил транзакцию #{transaction_id}. Балансы пересчитаны.",
+        f"↩️ {_name(user)} отменил(а) транзакцию #{transaction_id}. Балансы пересчитаны.",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
@@ -848,7 +857,7 @@ async def leave_collection(request: web.Request) -> web.Response:
         bot,
         service,
         collection,
-        f"👋 {_name(user)} вышел из сбора <b>«{escape(collection['title'])}»</b>.",
+        f"👋 {_name(user)} вышел(ла) из сбора <b>«{escape(collection['title'])}»</b>.",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
@@ -931,7 +940,8 @@ async def archive_collection(request: web.Request) -> web.Response:
         bot,
         service,
         collection,
-        f"📦 {_name(user)} завершил сбор <b>«{escape(collection['title'])}»</b>. Архив — 30 дней.",
+        f"📦 {_name(user)} завершил(а) сбор <b>«{escape(collection['title'])}»</b>. "
+        "Архив — 30 дней.",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
@@ -948,7 +958,7 @@ async def restore_collection(request: web.Request) -> web.Response:
         bot,
         service,
         collection,
-        f"♻️ {_name(user)} восстановил сбор <b>«{escape(collection['title'])}»</b>.",
+        f"♻️ {_name(user)} восстановил(а) сбор <b>«{escape(collection['title'])}»</b>.",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
@@ -966,7 +976,7 @@ async def delete_collection(request: web.Request) -> web.Response:
         bot,
         service,
         collection,
-        f"🗑 {_name(user)} безвозвратно удалил архивный сбор "
+        f"🗑 {_name(user)} безвозвратно удалил(а) архивный сбор "
         f"<b>«{escape(collection['title'])}»</b>.",
         exclude_user_ids={user["id"]},
     )
@@ -989,7 +999,7 @@ async def transfer_admin(request: web.Request) -> web.Response:
         service,
         collection,
         f"👑 Администратор сбора <b>«{escape(collection['title'])}»</b> — "
-        f"{escape(member['full_name'])}.",
+        f"{telegram_user_link(member['id'], member['full_name'], member['username'])}.",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
@@ -1009,7 +1019,8 @@ async def remove_member(request: web.Request) -> web.Response:
         bot,
         service,
         collection,
-        f"👥 {escape(member['full_name'])} больше не участвует в сборе "
+        f"👥 {telegram_user_link(member['id'], member['full_name'], member['username'])} "
+        "больше не участвует в сборе "
         f"<b>«{escape(collection['title'])}»</b>.",
         exclude_user_ids={user["id"], member_id},
     )

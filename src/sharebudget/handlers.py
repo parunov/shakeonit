@@ -41,6 +41,7 @@ from .notifications import replace_repayment_prompt, report_collection_event
 from .render import (
     collection_text,
     history_text,
+    telegram_user_link,
     transaction_text,
     transaction_update_report,
     user_label,
@@ -51,6 +52,10 @@ from .states import AddExpense, AddRepayment, CreateCollection, EditTransaction,
 LOGGER = logging.getLogger(__name__)
 
 router = Router()
+
+
+def event_user_link(user) -> str:
+    return telegram_user_link(user.id, user.full_name, user.username)
 
 HELP_TEXT = """<b>❓ Помощь</b>
 
@@ -74,7 +79,7 @@ TUTORIAL_TEXT = """<b>🎓 Как пользоваться ShareBudget</b>
 4. После подключения участника можно выбрать при добавлении затраты.
 5. Тот, кто заплатил, нажимает «Добавить затрату», вводит сумму, отмечает людей и пишет короткое описание.
 6. Когда кто-то действительно переводит деньги, используйте «Вернуть долг».
-7. Экран сбора сразу покажет, кто кому и сколько должен. В «Истории» видны все действия.
+7. Экран сбора сразу покажет, кто кому и сколько должен(а). В «Истории» видны все действия.
 8. Основная работа проходит в Mini App: оно открывается прямо из группы и показывает сборы этой группы.
 
 Быстрая запись при включенном Privacy Mode: <code>/expense@имя_бота 40 @ivan @maxim билеты</code>. Если сборов несколько, бот предложит выбрать нужный. Отмеченные пользователи должны участвовать в сборе.
@@ -527,7 +532,7 @@ async def join_collection(callback: CallbackQuery, service: BudgetService) -> No
         callback.bot,
         service,
         collection,
-        f"🙋 {escape(callback.from_user.full_name)} участвует в сборе.",
+        f"🙋 {event_user_link(callback.from_user)} участвует в сборе.",
         exclude_user_ids={callback.from_user.id},
     )
     await callback.answer(
@@ -661,7 +666,7 @@ async def expense_comment(message: Message, state: FSMContext, service: BudgetSe
         message.bot,
         service,
         collection,
-        f"💸 {escape(message.from_user.full_name)} добавил затрату "
+        f"💸 {event_user_link(message.from_user)} добавил(а) затрату "
         f"<b>{format_money(data['amount'], collection['currency'])}</b>"
         f" · {escape(comment) if comment else 'без комментария'}.",
         exclude_user_ids={message.from_user.id},
@@ -726,9 +731,12 @@ async def repay_creditor(
     creditor = await service.get_user(creditor_id)
     details = creditor["payment_details"].strip() if creditor else ""
     payment_text = (
-        f"<b>💳 Данные для перевода · {escape(creditor['full_name'])}</b>\n{escape(details)}"
+        f"<b>💳 Данные для перевода · "
+        f"{telegram_user_link(creditor['id'], creditor['full_name'], creditor['username'])}</b>\n"
+        f"{escape(details)}"
         if details
-        else f"<b>💳 {escape(creditor['full_name'])}</b>\nПлатежные данные пока не добавлены."
+        else f"<b>💳 {telegram_user_link(creditor['id'], creditor['full_name'], creditor['username'])}</b>\n"
+        "Платежные данные пока не добавлены."
     )
     await callback.message.answer(
         f"{payment_text}\n\nВведите фактически переведенную сумму:",
@@ -774,7 +782,7 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
         message.bot,
         service,
         collection,
-        f"⏳ {escape(message.from_user.full_name)} сообщил о возврате "
+        f"⏳ {event_user_link(message.from_user)} сообщил(а) о возврате "
         f"<b>{format_money(amount, collection['currency'])}</b>. "
         "Баланс изменится после подтверждения получателем.",
         exclude_user_ids={message.from_user.id, data["creditor_id"]},
@@ -783,7 +791,7 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
         confirmation_message = await message.bot.send_message(
             data["creditor_id"],
             "🤝 <b>Подтвердите получение</b>\n\n"
-            f"От: {escape(message.from_user.full_name)}\n"
+            f"От: {event_user_link(message.from_user)}\n"
             f"Сумма: <b>{format_money(amount, collection['currency'])}</b>\n"
             f"Сбор: {escape(collection['title'])}",
             parse_mode=ParseMode.HTML,
@@ -824,14 +832,14 @@ async def repayment_confirm(callback: CallbackQuery, service: BudgetService) -> 
         callback.bot,
         service,
         collection,
-        f"✅ {escape(callback.from_user.full_name)} подтвердил получение возврата от "
-        f"{escape(sender['full_name'])}: "
+        f"✅ {event_user_link(callback.from_user)} подтвердил(а) получение возврата от "
+        f"{telegram_user_link(sender['id'], sender['full_name'], sender['username'])}: "
         f"<b>{format_money(transaction['amount'], collection['currency'])}</b>.{comment_line}",
         exclude_user_ids={callback.from_user.id},
     )
     final_text = (
         "✅ <b>Получение подтверждено</b>\n\n"
-        f"От: {escape(sender['full_name'])}\n"
+        f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
         f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
         f"Сбор: {escape(collection['title'])}"
         f"{comment_detail}"
@@ -874,12 +882,19 @@ async def history(callback: CallbackQuery, service: BudgetService) -> None:
         text += "\n\n<b>Изменения участников</b>\n"
         for event in member_events[:20]:
             if event["kind"] == "joined":
-                action = "вступил в сбор"
+                action = "вступил(а) в сбор"
             elif event["kind"] == "left":
-                action = "вышел из сбора"
+                action = "вышел(ла) из сбора"
             else:
-                action = f"удалил участника {escape(event['target_name'] or '')}"
-            text += f"\n• {event['created_at'][:16]} · {escape(event['actor_name'])} {action}"
+                target = telegram_user_link(
+                    event["target_user_id"], event["target_name"], event["target_username"]
+                )
+                action = f"удалил(а) участника {target}"
+            text += (
+                f"\n• {event['created_at'][:16]} · "
+                f"{telegram_user_link(event['actor_id'], event['actor_name'], event['actor_username'])} "
+                f"{action}"
+            )
     debts = snapshot.debts
     names = {row["id"]: user_label(row) for row in participants}
     text += "\n\n<b>Финальный список балансов</b>\n"
@@ -938,7 +953,7 @@ async def transaction_cancel(callback: CallbackQuery, service: BudgetService) ->
         callback.bot,
         service,
         collection,
-        f"↩️ {escape(callback.from_user.full_name)} отменил транзакцию #{transaction_id}. "
+        f"↩️ {event_user_link(callback.from_user)} отменил(а) транзакцию #{transaction_id}. "
         "Балансы пересчитаны.",
         exclude_user_ids={callback.from_user.id},
     )
@@ -1007,8 +1022,10 @@ async def transaction_edit_comment(
             collection,
             before,
             after,
-            [row["full_name"] for row in before_shares],
-            [row["full_name"] for row in after_shares],
+            before_shares,
+            after_shares,
+            actor_id=message.from_user.id,
+            actor_username=message.from_user.username,
         ),
         exclude_user_ids={message.from_user.id},
     )
@@ -1039,14 +1056,14 @@ async def repayment_reject(callback: CallbackQuery, service: BudgetService) -> N
         callback.bot,
         service,
         collection,
-        f"❌ {escape(callback.from_user.full_name)} отклонил получение возврата от "
-        f"{escape(sender['full_name'])}: "
+        f"❌ {event_user_link(callback.from_user)} отклонил(а) получение возврата от "
+        f"{telegram_user_link(sender['id'], sender['full_name'], sender['username'])}: "
         f"<b>{format_money(transaction['amount'], collection['currency'])}</b>.{comment_line}",
         exclude_user_ids={callback.from_user.id},
     )
     final_text = (
         "❌ <b>Получение отклонено</b>\n\n"
-        f"От: {escape(sender['full_name'])}\n"
+        f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
         f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
         f"Сбор: {escape(collection['title'])}"
         f"{comment_detail}"
@@ -1088,7 +1105,7 @@ async def my_balance(callback: CallbackQuery, service: BudgetService) -> None:
     ]
     lines = [f"<b>⚖️ Ваш баланс · {escape(collection['title'])}</b>"]
     if not personal:
-        lines.append("\n✅ У вас нет долгов и никто не должен вам.")
+        lines.append("\n✅ У вас нет долгов и никто не должен(а) вам.")
     for debt in personal:
         if debt.debtor_id == callback.from_user.id:
             lines.append(
@@ -1097,7 +1114,7 @@ async def my_balance(callback: CallbackQuery, service: BudgetService) -> None:
             )
         else:
             lines.append(
-                f"\n{names[debt.debtor_id]} должен вам: "
+                f"\n{names[debt.debtor_id]} должен(а) вам: "
                 f"<b>{format_money(debt.amount, collection['currency'])}</b>"
             )
     await safe_edit(
@@ -1141,7 +1158,7 @@ async def leave(callback: CallbackQuery, service: BudgetService) -> None:
         callback.bot,
         service,
         collection,
-        f"👋 {escape(callback.from_user.full_name)} вышел из сбора.",
+        f"👋 {event_user_link(callback.from_user)} вышел(ла) из сбора.",
         exclude_user_ids={callback.from_user.id},
     )
     await callback.answer("Вы вышли из сбора", show_alert=True)
@@ -1203,7 +1220,7 @@ async def archive_confirm(callback: CallbackQuery, service: BudgetService) -> No
         callback.bot,
         service,
         collection,
-        f"📦 {escape(callback.from_user.full_name)} завершил сбор. Архив — 30 дней.",
+        f"📦 {event_user_link(callback.from_user)} завершил(а) сбор. Архив — 30 дней.",
         exclude_user_ids={callback.from_user.id},
     )
     await callback.answer("Сбор перемещен в архив", show_alert=True)
@@ -1219,7 +1236,7 @@ async def restore(callback: CallbackQuery, service: BudgetService) -> None:
         callback.bot,
         service,
         collection,
-        f"♻️ {escape(callback.from_user.full_name)} восстановил сбор.",
+        f"♻️ {event_user_link(callback.from_user)} восстановил(а) сбор.",
         exclude_user_ids={callback.from_user.id},
     )
     await callback.answer("Сбор восстановлен", show_alert=True)
@@ -1250,7 +1267,8 @@ async def transfer_do(callback: CallbackQuery, service: BudgetService) -> None:
         callback.bot,
         service,
         collection,
-        f"👑 Новый администратор сбора — {escape(new_admin['full_name'])}.",
+        f"👑 Новый администратор(ка) сбора — "
+        f"{telegram_user_link(new_admin['id'], new_admin['full_name'], new_admin['username'])}.",
         exclude_user_ids={callback.from_user.id},
     )
     await callback.answer("Роль передана", show_alert=True)
@@ -1281,7 +1299,8 @@ async def remove_do(callback: CallbackQuery, service: BudgetService) -> None:
         callback.bot,
         service,
         collection,
-        f"👥 {escape(member['full_name'])} больше не участвует в сборе.",
+        f"👥 {telegram_user_link(member['id'], member['full_name'], member['username'])} "
+        "больше не участвует в сборе.",
         exclude_user_ids={callback.from_user.id, int(user_id)},
     )
     await callback.answer("Участник удален", show_alert=True)
@@ -1356,7 +1375,7 @@ async def quick_expense(
         message.bot,
         service,
         collection,
-        f"💸 {escape(message.from_user.full_name)} добавил затрату "
+        f"💸 {event_user_link(message.from_user)} добавил(а) затрату "
         f"<b>{format_money(amount, collection['currency'])}</b> · "
         f"{' '.join(escape(token) for token in comment_tokens) or 'без комментария'}.",
         exclude_user_ids={actor_id},
