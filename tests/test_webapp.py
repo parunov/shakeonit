@@ -248,6 +248,51 @@ async def test_edit_expense_api_replaces_participants(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_request_funds_notifies_each_debtor_and_reports_to_group(tmp_path):
+    database = Database(tmp_path / "request-funds.db")
+    await database.initialize()
+    service = BudgetService(database)
+    await service.upsert_user(1, "owner", "Организатор")
+    await service.upsert_user(2, "anna", "Анна")
+    await service.upsert_user(3, "max", "Максим")
+    await service.set_payment_details(1, "Карта •• 1234")
+    collection_id = await service.create_collection(-100500, "Поездка", "EUR", 1)
+    await service.join(collection_id, 2)
+    await service.join(collection_id, 3)
+    await service.add_expense(collection_id, 1, 900, [1, 2, 3], "Ужин")
+    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    settings.main_app_enabled = True
+    bot = SimpleNamespace(send_message=AsyncMock())
+    application = web.Application()
+    setup_webapp_routes(application, bot, service, settings)
+    owner_auth = signed_init_data(user={"id": 1, "first_name": "Организатор"})
+
+    async with TestClient(TestServer(application)) as client:
+        response = await client.post(
+            f"/api/collections/{collection_id}/request-funds",
+            json={},
+            headers={"X-Telegram-Init-Data": owner_auth},
+        )
+        payload = await response.json()
+
+    assert response.status == 200
+    assert payload == {
+        "ok": True,
+        "debtors_count": 2,
+        "notifications_sent": 2,
+        "failed_count": 0,
+        "report_sent": True,
+    }
+    recipients = [call.args[0] for call in bot.send_message.await_args_list]
+    assert recipients == [2, 3, -100500]
+    assert "Карта •• 1234" in bot.send_message.await_args_list[0].args[1]
+    assert (
+        "startapp=collection_"
+        in bot.send_message.await_args_list[0].kwargs["reply_markup"].inline_keyboard[0][0].url
+    )
+
+
+@pytest.mark.asyncio
 async def test_join_can_enable_private_collection_notifications(tmp_path):
     database = Database(tmp_path / "notifications.db")
     await database.initialize()

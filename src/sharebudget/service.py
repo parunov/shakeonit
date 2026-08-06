@@ -530,6 +530,46 @@ class BudgetService:
     async def settlement(self, collection_id: int) -> list[Debt]:
         return (await self.collection_snapshot(collection_id)).debts
 
+    async def request_funds(
+        self, collection_id: int, creditor_id: int, cooldown_minutes: int = 15
+    ) -> list[Debt]:
+        await self._require_member_active(collection_id, creditor_id)
+        debts = [
+            debt for debt in await self.settlement(collection_id) if debt.creditor_id == creditor_id
+        ]
+        if not debts:
+            raise DomainError("Сейчас вам никто не должен по этому сбору")
+
+        async with self.db.connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            previous = await _fetchone(
+                connection,
+                """
+                SELECT created_at FROM collection_events
+                WHERE collection_id=? AND actor_id=? AND kind='funds_requested'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (collection_id, creditor_id),
+            )
+            if previous:
+                requested_at = datetime.fromisoformat(previous["created_at"]).replace(tzinfo=UTC)
+                remaining = timedelta(minutes=cooldown_minutes) - (datetime.now(UTC) - requested_at)
+                if remaining.total_seconds() > 0:
+                    await connection.rollback()
+                    minutes = max(1, int((remaining.total_seconds() + 59) // 60))
+                    raise DomainError(
+                        f"Напоминание уже отправлено. Повторить можно через {minutes} мин."
+                    )
+            await connection.execute(
+                """
+                INSERT INTO collection_events(collection_id,kind,actor_id,details)
+                VALUES (?,'funds_requested',?,?)
+                """,
+                (collection_id, creditor_id, str(len(debts))),
+            )
+            await connection.commit()
+        return debts
+
     async def history(self, collection_id: int, limit: int = 50, offset: int = 0):
         await self._collection(collection_id)
         async with self.db.connect() as connection:

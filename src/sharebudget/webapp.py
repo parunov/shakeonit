@@ -517,6 +517,83 @@ async def add_repayment(request: web.Request) -> web.Response:
     )
 
 
+async def request_funds(request: web.Request) -> web.Response:
+    service, bot, user = _context(request)
+    collection_id = int(request.match_info["collection_id"])
+    collection = await _require_member(service, collection_id, user["id"])
+    debts = await service.request_funds(collection_id, user["id"])
+    settings = request.app[SETTINGS_KEY]
+    username = settings.bot_username.lstrip("@")
+    app_url = (
+        f"https://t.me/{username}?startapp=collection_{collection_id}&mode=compact"
+        if settings.main_app_enabled
+        else f"https://t.me/{username}?start=app"
+    )
+    open_markup = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📱 Открыть сбор", url=app_url)],
+        ]
+    )
+    creditor = await service.get_user(user["id"])
+    payment_details = (
+        f"\n\n💳 <b>Реквизиты:</b> {escape(creditor['payment_details'])}"
+        if creditor["payment_details"]
+        else ""
+    )
+    delivered = 0
+    failed = 0
+    for debt in debts:
+        try:
+            await bot.send_message(
+                debt.debtor_id,
+                "🔔 <b>Небольшое напоминание о расчёте</b>\n\n"
+                f"{_name(user)} вежливо просит завершить расчёт по сбору "
+                f"«{escape(collection['title'])}».\n"
+                f"К возврату: <b>{format_money(debt.amount, collection['currency'])}</b>."
+                f"{payment_details}\n\n"
+                "После перевода отметьте возврат в сборе — получатель подтвердит получение.",
+                parse_mode="HTML",
+                reply_markup=open_markup,
+            )
+            delivered += 1
+        except TelegramAPIError:
+            failed += 1
+            LOGGER.info(
+                "Could not deliver funds request to user %s for collection %s",
+                debt.debtor_id,
+                collection_id,
+            )
+
+    report_sent = False
+    if collection["chat_id"]:
+        try:
+            await bot.send_message(
+                collection["chat_id"],
+                f"🔔 {_name(user)} вежливо напомнил о расчёте по сбору "
+                f"<b>«{escape(collection['title'])}»</b>. "
+                f"Личные уведомления: {delivered} из {len(debts)}.",
+                parse_mode="HTML",
+                disable_notification=True,
+            )
+            report_sent = True
+        except TelegramAPIError:
+            LOGGER.warning(
+                "Could not publish funds request report to chat %s",
+                collection["chat_id"],
+                exc_info=True,
+            )
+
+    return web.json_response(
+        {
+            "ok": True,
+            "debtors_count": len(debts),
+            "notifications_sent": delivered,
+            "failed_count": failed,
+            "report_sent": report_sent,
+        }
+    )
+
+
 async def confirm_repayment(request: web.Request) -> web.Response:
     service, bot, user = _context(request)
     transaction_id = int(request.match_info["transaction_id"])
@@ -853,6 +930,7 @@ def setup_webapp_routes(
     application.router.add_post("/api/chats/prepare", prepare_chat_request)
     application.router.add_post("/api/collections/{collection_id}/expenses", add_expense)
     application.router.add_post("/api/collections/{collection_id}/repayments", add_repayment)
+    application.router.add_post("/api/collections/{collection_id}/request-funds", request_funds)
     application.router.add_post("/api/collections/{collection_id}/join", join_collection)
     application.router.add_patch(
         "/api/collections/{collection_id}/notifications", save_notification_subscription

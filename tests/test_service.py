@@ -201,6 +201,24 @@ async def test_edit_expense_rejects_unknown_participant_without_mutation(service
 
 
 @pytest.mark.asyncio
+async def test_request_funds_targets_only_current_debtors_and_has_cooldown(service):
+    collection_id = await make_collection(service)
+    await service.add_expense(collection_id, 1, 900, [1, 2, 3], "Ужин")
+
+    debts = await service.request_funds(collection_id, 1)
+
+    assert [(debt.debtor_id, debt.creditor_id, debt.amount) for debt in debts] == [
+        (2, 1, 300),
+        (3, 1, 300),
+    ]
+    assert (await service.collection_events(collection_id))[0]["kind"] == "funds_requested"
+    with pytest.raises(DomainError, match="Повторить можно"):
+        await service.request_funds(collection_id, 1)
+    with pytest.raises(DomainError, match="никто не должен"):
+        await service.request_funds(collection_id, 2)
+
+
+@pytest.mark.asyncio
 async def test_cannot_leave_with_balance(service):
     collection_id = await make_collection(service)
     await service.add_expense(collection_id, 1, 1000, [1, 2], "Такси")

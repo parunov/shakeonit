@@ -179,7 +179,7 @@ async function renderBalance() {
     return `
       <button class="card collection-card" type="button" data-action="open-collection" data-id="${data.collection.id}">
         <span class="collection-icon status-icon" aria-hidden="true">${status.icon}</span>
-        <span><span class="card-title">${e(data.collection.title)}</span><span class="card-subtitle">Статус: ${status.label}</span></span>
+        <span><span class="card-title">${e(data.collection.title)}</span><span class="card-subtitle">${status.label}</span></span>
         <span class="amount ${mine > 0 ? "positive" : mine < 0 ? "negative" : ""}">${money(Math.abs(mine), data.collection.currency)}</span>
       </button>`;
   });
@@ -311,6 +311,12 @@ function renderCollection() {
   const me = state.bootstrap.user.id;
   const isAdmin = collection.admin_id === me;
   const myBalance = data.balances.find((item) => item.user_id === me)?.amount || 0;
+  const myDebtors = data.debts.filter((debt) => debt.creditor_id === me);
+  const settlementStatus = myBalance > 0
+    ? `💰 Вам должны ${money(myBalance, collection.currency)}`
+    : myBalance < 0
+      ? `💸 Вы должны ${money(-myBalance, collection.currency)}`
+      : "🤝 Ваш расчёт закрыт";
   const activeParticipants = data.participants.filter((member) => member.active !== false);
   const tabs = [
     ["overview", "Обзор"], ["history", "История"], ["members", "Люди"],
@@ -318,12 +324,12 @@ function renderCollection() {
   ];
   app.innerHTML = `
     <section class="hero">
-      <div class="hero-label">ВСЕГО ЗАТРАТ · ${e(collection.currency)}</div>
+      <div class="hero-top"><div class="hero-label">ВСЕГО ЗАТРАТ · ${e(collection.currency)}</div><div class="hero-status">${settlementStatus}</div></div>
       <div class="hero-value">${money(data.total, collection.currency)}</div>
       <div class="hero-meta">${activeParticipants.length} участников · ${collection.is_personal ? "уведомления через бота" : "Telegram-группа"} · ${collection.status === "active" ? "активен" : "в архиве"}</div>
     </section>
     ${collection.status === "active" ? `<div class="quick-actions"><button class="action-button" type="button" data-action="expense">💸 Добавить затрату</button><button class="action-button" type="button" data-action="repay">🤝 Вернуть долг</button></div>` : `<div class="status-banner">📦 Сбор находится в архиве. Балансы и история доступны без изменений.</div>`}
-    <div class="status-banner">${myBalance > 0 ? `Вам должны <b>${money(myBalance, collection.currency)}</b>` : myBalance < 0 ? `Вы должны <b>${money(-myBalance, collection.currency)}</b>` : "✅ Ваш расчёт закрыт"}</div>
+    ${collection.status === "active" ? `<button class="request-funds" type="button" data-action="request-funds" ${myDebtors.length ? "" : "disabled"}><span>🔔</span><span><b>Запросить средства</b><small>${myDebtors.length ? `Вежливо напомнить должникам · ${myDebtors.length}` : "Сейчас вам никто не должен"}</small></span><i>›</i></button>` : ""}
     ${collection.status === "active" ? `<button class="notification-toggle ${data.notifications_enabled ? "enabled" : ""}" type="button" data-action="toggle-notifications" data-enabled="${data.notifications_enabled}"><span>${data.notifications_enabled ? "🔔" : "🔕"}</span><span><b>${data.notifications_enabled ? "Уведомления включены" : "Получать уведомления"}</b><small>${data.notifications_enabled ? "Бот сообщит о новых операциях в личном чате" : "Даже если вас нет в Telegram-группе"}</small></span><i>›</i></button>` : ""}
     <div class="tabs">${tabs.map(([key, label]) => `<button type="button" data-action="tab" data-tab="${key}" class="${state.collectionTab === key ? "active" : ""}">${label}</button>`).join("")}</div>
     <section class="panel">${renderCollectionPanel(data, isAdmin)}</section>`;
@@ -354,6 +360,7 @@ function renderCollectionPanel(data, isAdmin) {
       created: "создал сбор", joined: "вступил в сбор", left: "вышел из сбора",
       member_removed: "удалил участника", admin_transferred: "передал роль администратора",
       archived: "завершил сбор", restored: "восстановил сбор",
+      funds_requested: "вежливо запросил завершить расчёт",
     };
     const events = data.events.map((item) => `<article class="history-row"><div class="row-title">${shortDate(item.created_at)} · ${e(item.actor_name)} ${e(eventLabels[item.kind] || item.kind)}</div>${item.target_name && item.target_name !== item.actor_name ? `<div class="row-note">Участник: ${e(item.target_name)}</div>` : ""}</article>`).join("");
     if (!transactions && !events) return empty("📜", "История пока пуста");
@@ -374,7 +381,7 @@ function createSheet() {
     chats.unshift({ chat_id: state.bootstrap.context_chat_id, label: "Текущая Telegram-группа" });
   }
   const destinations = [...chats, { chat_id: 0, label: "Без Telegram-группы · уведомления в боте" }];
-  showSheet(`<h2>Новый сбор</h2><p class="sheet-intro">Можно связать сбор с Telegram-группой или вести его только через личные уведомления бота.</p><form id="create-form"><label class="field"><span>Где вести сбор</span><select name="chat_id" required>${destinations.map((chat) => `<option value="${chat.chat_id}">${e(chat.label)}</option>`).join("")}</select></label><label class="field"><span>Название</span><input name="title" minlength="2" maxlength="80" placeholder="Например, Поездка в Варшаву" required></label><label class="field"><span>Валюта</span><select name="currency">${state.bootstrap.currencies.map((currency) => `<option>${currency}</option>`).join("")}</select></label><div class="sheet-actions"><button class="primary-button" type="submit">Создать сбор</button><button class="secondary-button" type="button" data-action="choose-group">Выбрать Telegram-группу</button><button class="secondary-button" type="button" data-action="add-bot-group">Добавить бота в новую группу</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+  showSheet(`<h2>Новый сбор</h2><p class="sheet-intro">Можно связать сбор с Telegram-группой или вести его только через личные уведомления бота.</p><form id="create-form"><label class="field"><span>Где вести сбор</span><select name="chat_id" required>${destinations.map((chat) => `<option value="${chat.chat_id}">${e(chat.label)}</option>`).join("")}</select></label><label class="field"><span>Название</span><input name="title" minlength="2" maxlength="80" placeholder="Например, Поездка в Варшаву" required></label><label class="field"><span>Валюта</span><select name="currency">${state.bootstrap.currencies.map((currency) => `<option>${currency}</option>`).join("")}</select></label><div class="sheet-actions"><button class="primary-button" type="submit">Создать сбор</button><button class="secondary-button" type="button" data-action="add-bot-group">Добавить бота в новую группу</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
 
 function expenseSheet() {
@@ -467,6 +474,17 @@ app.addEventListener("click", async (event) => {
     if (action === "repay") return repaySheet();
     if (action === "tab") { state.collectionTab = target.dataset.tab; renderCollection(); return; }
     if (action === "edit-transaction") return editSheet(target.dataset.id);
+    if (action === "request-funds") {
+      if (!await confirmAction("Отправить всем вашим должникам вежливое напоминание о расчёте?")) return;
+      setBusy(target, true);
+      const result = await api(`/api/collections/${state.collection.collection.id}/request-funds`, { method: "POST", body: "{}" });
+      if (result.failed_count) {
+        toast(`Отправлено ${result.notifications_sent} из ${result.debtors_count}. Остальные ещё не подключили бота`, true);
+      } else {
+        toast(`Напоминание отправлено · ${result.notifications_sent}`);
+      }
+      return await refreshCurrent(state.collectionTab);
+    }
     if (action === "payment") return paymentSheet();
     if (action === "toggle-notifications") {
       const enabled = target.dataset.enabled === "true";
@@ -571,28 +589,6 @@ sheet.addEventListener("click", async (event) => {
       setBusy(target, false);
     }
     return;
-  }
-  if (target.dataset.action === "choose-group") {
-    if (!tg?.isVersionAtLeast?.("9.6") || !tg?.requestChat) {
-      toast("Обновите Telegram или создайте первый сбор командой /new", true);
-      return;
-    }
-    try {
-      setBusy(target, true);
-      const prepared = await api("/api/chats/prepare", { method: "POST", body: "{}" });
-      tg.requestChat(prepared.request_id, async (success) => {
-        setBusy(target, false);
-        if (!success) return;
-        closeSheet();
-        toast("Группа добавляется…");
-        await new Promise((resolve) => setTimeout(resolve, 900));
-        await reloadBootstrap();
-        createSheet();
-      });
-    } catch (error) {
-      setBusy(target, false);
-      toast(error.message, true);
-    }
   }
 });
 
