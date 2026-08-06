@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from html import escape
 
-from .links import collection_html_link
 from .money import format_money
 
 
@@ -28,8 +27,6 @@ def transaction_update_report(
     *,
     actor_id: int | None = None,
     actor_username: str | None = None,
-    bot_username: str = "ShakeOnIt_bot",
-    main_app_enabled: bool = True,
 ) -> str:
     """Render a concrete audit message without exposing an internal transaction id."""
 
@@ -58,7 +55,7 @@ def transaction_update_report(
     )
     return (
         f"✏️ {actor} изменил(а) {kind} по сбору "
-        f"{collection_html_link(collection, bot_username, main_app_enabled=main_app_enabled)}.\n"
+        f"<b>«{escape(collection['title'])}»</b>.\n"
         f"Было: {state_text(before, before_participants)}\n"
         f"Стало: {state_text(after, after_participants)}"
     )

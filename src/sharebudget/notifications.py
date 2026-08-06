@@ -8,7 +8,6 @@ from html import escape
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 
-from .links import collection_html_link
 from .service import BudgetService
 
 LOGGER = logging.getLogger(__name__)
@@ -22,7 +21,6 @@ async def notify_subscribers(
     *,
     exclude_user_ids: Collection[int] = (),
     reply_markup=None,
-    collection_title: str | None = None,
 ) -> int:
     """Deliver a collection event to opted-in participants via private chat."""
     excluded = set(exclude_user_ids)
@@ -31,14 +29,13 @@ async def notify_subscribers(
         for row in await service.notification_subscribers(collection["id"])
         if row["user_id"] not in excluded
     ]
-    heading = collection_title or f"<b>{escape(collection['title'])}</b>"
 
     async def deliver(row) -> bool:
         user_id = row["user_id"]
         try:
             await bot.send_message(
                 user_id,
-                f"🔔 {heading}\n\n{text}",
+                f"🔔 <b>{escape(collection['title'])}</b>\n\n{text}",
                 parse_mode="HTML",
                 disable_notification=False,
                 reply_markup=reply_markup,
@@ -81,22 +78,13 @@ async def report_collection_event(
 ) -> tuple[bool, int]:
     """Publish an event to the linked group and opted-in private subscribers."""
 
-    bot_user = getattr(bot, "_me", None)
-    username = getattr(bot_user, "username", None) or "ShakeOnIt_bot"
-    main_app_enabled = bool(getattr(bot_user, "has_main_web_app", True))
-    collection_title = collection_html_link(
-        collection,
-        username,
-        main_app_enabled=main_app_enabled,
-    )
-
     async def send_to_group() -> bool:
         if not collection["chat_id"]:
             return False
         try:
             await bot.send_message(
                 collection["chat_id"],
-                f"🔔 {collection_title}\n\n{text}",
+                f"🔔 <b>{escape(collection['title'])}</b>\n\n{text}",
                 parse_mode="HTML",
                 disable_notification=True,
                 reply_markup=reply_markup,
@@ -120,7 +108,6 @@ async def report_collection_event(
             text,
             exclude_user_ids=exclude_user_ids,
             reply_markup=subscriber_reply_markup,
-            collection_title=collection_title,
         ),
     )
     return group_sent, delivered

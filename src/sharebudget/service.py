@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -29,11 +30,13 @@ class CollectionSnapshot:
 
 @dataclass(frozen=True)
 class CollectionView:
+    collection: object
     snapshot: CollectionSnapshot
     history: list
     events: list
     shares: dict[int, list[dict]]
     notifications_enabled: bool
+    pending_repayments: dict[int, int]
 
 
 async def _fetchone(connection, query: str, params=()):
@@ -44,6 +47,7 @@ async def _fetchone(connection, query: str, params=()):
 class BudgetService:
     def __init__(self, database: Database):
         self.db = database
+        self._write_slots = asyncio.Semaphore(4)
 
     async def upsert_user(
         self,
@@ -464,6 +468,35 @@ class BudgetService:
                 (collection_id,),
             )
 
+    async def _active_members_on(
+        self,
+        connection,
+        collection_id: int,
+        user_ids: Iterable[int],
+    ) -> tuple[object, set[int]]:
+        """Validate collection status and load active members on an existing connection."""
+        collection = await _fetchone(
+            connection,
+            "SELECT * FROM collections WHERE id=?",
+            (collection_id,),
+        )
+        if not collection:
+            raise DomainError("Сбор не найден")
+        if collection["status"] != "active":
+            raise DomainError("Сбор завершен и находится в архиве")
+        requested = set(user_ids)
+        if not requested:
+            return collection, set()
+        placeholders = ",".join("?" for _ in requested)
+        rows = await connection.execute_fetchall(
+            f"""
+            SELECT user_id FROM participants
+            WHERE collection_id=? AND active=1 AND user_id IN ({placeholders})
+            """,
+            (collection_id, *requested),
+        )
+        return collection, {row["user_id"] for row in rows}
+
     async def _snapshot_on(self, connection, collection_id: int) -> CollectionSnapshot:
         participants = await connection.execute_fetchall(
             """
@@ -526,9 +559,23 @@ class BudgetService:
 
     async def collection_view(
         self, collection_id: int, user_id: int, history_limit: int = 100, events_limit: int = 200
-    ) -> CollectionView:
+    ) -> CollectionView | None:
         """Load the complete collection screen through one SQLite connection."""
         async with self.db.connect() as connection:
+            collection = await _fetchone(
+                connection,
+                """
+                SELECT c.*,u.full_name AS admin_name
+                FROM collections c
+                JOIN users u ON u.id=c.admin_id
+                JOIN participants p ON p.collection_id=c.id
+                    AND p.user_id=? AND p.active=1
+                WHERE c.id=?
+                """,
+                (user_id, collection_id),
+            )
+            if not collection:
+                return None
             snapshot = await self._snapshot_on(connection, collection_id)
             history = await connection.execute_fetchall(
                 """
@@ -581,12 +628,23 @@ class BudgetService:
                 )
                 for row in share_rows:
                     shares.setdefault(row["transaction_id"], []).append(dict(row))
+            pending_rows = await connection.execute_fetchall(
+                """
+                SELECT counterparty_id,SUM(amount) amount FROM transactions
+                WHERE collection_id=? AND kind='repayment' AND creator_id=?
+                  AND status='active' AND confirmation_status='pending'
+                GROUP BY counterparty_id
+                """,
+                (collection_id, user_id),
+            )
         return CollectionView(
+            collection=collection,
             snapshot=snapshot,
             history=history,
             events=events,
             shares=shares,
             notifications_enabled=bool(subscription and subscription["notifications_enabled"]),
+            pending_repayments={row["counterparty_id"]: row["amount"] for row in pending_rows},
         )
 
     async def add_expense(
@@ -597,16 +655,23 @@ class BudgetService:
         participant_ids: Iterable[int],
         comment: str,
     ) -> int:
-        await self._require_member_active(collection_id, creator_id)
         if amount <= 0:
             raise DomainError("Сумма должна быть больше нуля")
         shares = split_amount(amount, list(participant_ids))
         if sum(shares.values()) != amount:
             raise RuntimeError("Нарушена целостность распределения затраты")
-        await self._require_members(collection_id, shares)
         if len(comment.strip()) > 200:
             raise DomainError("Комментарий не должен быть длиннее 200 символов")
-        async with self.db.connect() as connection:
+        async with self._write_slots, self.db.connect() as connection:
+            _, active_members = await self._active_members_on(
+                connection,
+                collection_id,
+                {*shares, creator_id},
+            )
+            if creator_id not in active_members:
+                raise DomainError("Сначала нажмите «Участвовать в сборе»")
+            if not set(shares).issubset(active_members):
+                raise DomainError("Все выбранные люди должны участвовать в сборе")
             await connection.execute("BEGIN IMMEDIATE")
             cursor = await connection.execute(
                 """
@@ -631,15 +696,22 @@ class BudgetService:
         amount: int,
         comment: str = "",
     ) -> int:
-        await self._require_member_active(collection_id, debtor_id)
-        await self._require_members(collection_id, [creditor_id])
         if amount <= 0:
             raise DomainError("Сумма должна быть больше нуля")
         if debtor_id == creditor_id:
             raise DomainError("Нельзя вернуть долг самому себе")
         if len(comment.strip()) > 200:
             raise DomainError("Комментарий не должен быть длиннее 200 символов")
-        async with self.db.connect() as connection:
+        async with self._write_slots, self.db.connect() as connection:
+            _, active_members = await self._active_members_on(
+                connection,
+                collection_id,
+                {debtor_id, creditor_id},
+            )
+            if debtor_id not in active_members:
+                raise DomainError("Сначала нажмите «Участвовать в сборе»")
+            if creditor_id not in active_members:
+                raise DomainError("Все выбранные люди должны участвовать в сборе")
             await connection.execute("BEGIN IMMEDIATE")
             snapshot = await self._snapshot_on(connection, collection_id)
             direct_debt = next(

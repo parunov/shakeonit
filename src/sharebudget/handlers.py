@@ -35,7 +35,7 @@ from .keyboards import (
     transaction_actions,
     webapp_launch,
 )
-from .links import collection_html_link, group_start_param
+from .links import group_start_param
 from .money import format_money, parse_amount
 from .notifications import replace_repayment_prompt, report_collection_event
 from .render import (
@@ -56,15 +56,6 @@ router = Router()
 
 def event_user_link(user) -> str:
     return telegram_user_link(user.id, user.full_name, user.username)
-
-
-def event_collection_link(bot, collection) -> str:
-    bot_user = getattr(bot, "_me", None)
-    return collection_html_link(
-        collection,
-        getattr(bot_user, "username", None) or "ShakeOnIt_bot",
-        main_app_enabled=bool(getattr(bot_user, "has_main_web_app", True)),
-    )
 
 
 HELP_TEXT = """<b>❓ Помощь</b>
@@ -242,7 +233,7 @@ async def start(
             (
                 "✅ <b>Подключение завершено</b>\n\n"
                 f"Вы {'уже участвовали' if was_member else 'теперь участвуете'} в сборе "
-                f"{event_collection_link(message.bot, collection)}. "
+                f"<b>«{escape(collection['title'])}»</b>. "
                 "Бот запомнил ваш Telegram ID.\n\n"
                 "🔔 Личные уведомления по этому сбору включены."
             ),
@@ -819,7 +810,7 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
             "🤝 <b>Подтвердите получение</b>\n\n"
             f"От: {event_user_link(message.from_user)}\n"
             f"Сумма: <b>{format_money(amount, collection['currency'])}</b>\n"
-            f"Сбор: {event_collection_link(message.bot, collection)}",
+            f"Сбор: <b>«{escape(collection['title'])}»</b>",
             parse_mode=ParseMode.HTML,
             reply_markup=confirm_markup,
         )
@@ -867,7 +858,7 @@ async def repayment_confirm(callback: CallbackQuery, service: BudgetService) -> 
         "✅ <b>Получение подтверждено</b>\n\n"
         f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
         f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
-        f"Сбор: {event_collection_link(callback.bot, collection)}"
+        f"Сбор: <b>«{escape(collection['title'])}»</b>"
         f"{comment_detail}"
     )
     if callback.message.chat.type == ChatType.PRIVATE:
@@ -1091,7 +1082,7 @@ async def repayment_reject(callback: CallbackQuery, service: BudgetService) -> N
         "❌ <b>Получение отклонено</b>\n\n"
         f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
         f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
-        f"Сбор: {event_collection_link(callback.bot, collection)}"
+        f"Сбор: <b>«{escape(collection['title'])}»</b>"
         f"{comment_detail}"
     )
     if callback.message.chat.type == ChatType.PRIVATE:
@@ -1407,7 +1398,7 @@ async def quick_expense(
         exclude_user_ids={actor_id},
     )
     await message.reply(
-        f"✅ Затрата #{transaction_id} добавлена в {event_collection_link(message.bot, collection)}: "
+        f"✅ Затрата #{transaction_id} добавлена в <b>«{escape(collection['title'])}»</b>: "
         f"<b>{format_money(amount, collection['currency'])}</b> на "
         f"{', '.join('@' + escape(name) for name in usernames)}.",
         parse_mode="HTML",

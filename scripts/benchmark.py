@@ -154,6 +154,14 @@ async def run(args: argparse.Namespace) -> None:
                 await response.read()
                 return response.status == 200
 
+            async def bootstrap(index: int) -> bool:
+                response = await client.get(
+                    "/api/bootstrap",
+                    headers={"X-Telegram-Init-Data": auth[index % len(auth)]},
+                )
+                await response.read()
+                return response.status == 200
+
             await sync(0)
             await details(0)
             results = [
@@ -175,6 +183,12 @@ async def run(args: argparse.Namespace) -> None:
                     max(50, args.requests // 5),
                     args.concurrency,
                     save_expense,
+                ),
+                await measure(
+                    "bootstrap",
+                    max(50, args.requests // 5),
+                    args.concurrency,
+                    bootstrap,
                 ),
             ]
             print(

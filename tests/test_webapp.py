@@ -136,6 +136,8 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert "Сколько я должен(а)" in script_text
         assert 'data-action="open-user"' in script_text
         assert 'data-action="quick-repay"' in script_text
+        assert "if (tg?.openTelegramLink) tg.openTelegramLink(url);" in script_text
+        assert "if (username && tg?.openTelegramLink)" not in script_text
 
         unauthorized = await client.get("/api/bootstrap")
         assert unauthorized.status == 401
@@ -399,7 +401,7 @@ async def test_repayment_notification_can_be_rejected_by_recipient(tmp_path):
     assert "Комментарий: Перевод на карту" in private_message
     assert "Сбор:" in private_message
     assert "Поездка" in private_message
-    assert 'href="https://t.me/ShakeOnIt_bot?start=collection_' in private_message
+    assert "start=collection_" not in private_message
     assert f"#{repayment_id}" not in private_message
     assert callbacks == {f"repayconfirm:{repayment_id}", f"repayreject:{repayment_id}"}
     assert rejected.status == 200
@@ -455,11 +457,31 @@ async def test_request_funds_notifies_each_debtor_and_reports_to_group(tmp_path)
         in (bot.send_message.await_args_list[0].args[1])
     )
     assert "Личные уведомления" not in bot.send_message.await_args_list[-1].args[1]
-    assert "startapp=collection_" in bot.send_message.await_args_list[-1].args[1]
+    assert "startapp=collection_" not in bot.send_message.await_args_list[-1].args[1]
     assert (
         "startapp=collection_"
         in bot.send_message.await_args_list[0].kwargs["reply_markup"].inline_keyboard[0][0].url
     )
+
+
+@pytest.mark.asyncio
+async def test_repeated_api_calls_reuse_validated_user_session(tmp_path):
+    database = Database(tmp_path / "session-cache.db")
+    await database.initialize()
+    service = BudgetService(database)
+    service.upsert_user = AsyncMock(wraps=service.upsert_user)
+    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    application = web.Application()
+    setup_webapp_routes(application, SimpleNamespace(), service, settings)
+    auth = signed_init_data(user={"id": 21, "first_name": "Без", "last_name": "Ника"})
+
+    async with TestClient(TestServer(application)) as client:
+        first = await client.get("/api/balance", headers={"X-Telegram-Init-Data": auth})
+        second = await client.get("/api/balance", headers={"X-Telegram-Init-Data": auth})
+
+    assert first.status == 200
+    assert second.status == 200
+    service.upsert_user.assert_awaited_once()
 
 
 @pytest.mark.asyncio

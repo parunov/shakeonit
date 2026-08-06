@@ -73,7 +73,7 @@ function openTelegramUser(target) {
     ? `https://t.me/${encodeURIComponent(username.replace(/^@/, ""))}`
     : `tg://user?id=${encodeURIComponent(target.dataset.userId)}`;
   haptic();
-  if (username && tg?.openTelegramLink) tg.openTelegramLink(url);
+  if (tg?.openTelegramLink) tg.openTelegramLink(url);
   else window.location.href = url;
 }
 

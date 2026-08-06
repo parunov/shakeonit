@@ -56,7 +56,10 @@ window.Telegram = {{ WebApp: {{
   enableClosingConfirmation() {{}}, disableClosingConfirmation() {{}}, close() {{}},
   requestWriteAccess(callback) {{ callback(true); }},
   showConfirm(message, callback) {{ window.__lastConfirm = message; callback(true); }},
-  openTelegramLink(url) {{ window.__lastTelegramLink = url; }},
+  openTelegramLink(url) {{
+    window.__lastTelegramLink = url;
+    document.documentElement.dataset.lastTelegramLink = url;
+  }},
   shareMessage(id, callback) {{ window.__lastSharedMessage = id; callback(true); }},
   HapticFeedback: {{ impactOccurred() {{}} }},
   BackButton: {{ show() {{}}, hide() {{}}, onClick(callback) {{ window.__back = callback; }} }}
@@ -74,7 +77,7 @@ async def create_application(database_path: Path) -> web.Application:
     service = BudgetService(database)
     await service.upsert_user(1, "anna", "Анна", private_started=True)
     await service.upsert_user(2, "boris", "Борис", private_started=True)
-    await service.upsert_user(3, "max", "Максим", private_started=True)
+    await service.upsert_user(3, None, "Максим", private_started=True)
     await service.set_payment_details(1, "Карта •• 1111", "Альфа-Банк")
     await service.set_payment_details(2, "Телефон +375 29 000-00-00", "Беларусбанк")
     collection_id = await service.create_collection(-100500, "Берлин", "EUR", 1)

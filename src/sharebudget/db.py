@@ -73,6 +73,12 @@ CREATE TABLE IF NOT EXISTS transactions (
 CREATE INDEX IF NOT EXISTS idx_transactions_collection
 ON transactions(collection_id, status, created_at);
 
+CREATE INDEX IF NOT EXISTS idx_transactions_collection_history
+ON transactions(collection_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_transactions_creator_history
+ON transactions(creator_id, created_at DESC, id DESC);
+
 CREATE INDEX IF NOT EXISTS idx_transactions_pending_repayments
 ON transactions(collection_id, kind, status, confirmation_status, creator_id, counterparty_id);
 
@@ -95,6 +101,9 @@ CREATE TABLE IF NOT EXISTS collection_events (
 
 CREATE INDEX IF NOT EXISTS idx_collection_events_collection
 ON collection_events(collection_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_collection_events_history
+ON collection_events(collection_id, created_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS bot_messages (
     chat_id INTEGER NOT NULL,

@@ -30,8 +30,7 @@ async def test_collection_event_reaches_group_and_private_subscribers():
     assert sorted(call.args[0] for call in bot.send_message.await_args_list) == [-100500, 2, 3]
     assert all("Поездка" in call.args[1] for call in bot.send_message.await_args_list)
     assert all(
-        'href="https://t.me/ShakeOnIt_bot?startapp=collection_7&amp;mode=compact"' in call.args[1]
-        for call in bot.send_message.await_args_list
+        "startapp=collection_" not in call.args[1] for call in bot.send_message.await_args_list
     )
 
 

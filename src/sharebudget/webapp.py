@@ -41,8 +41,14 @@ FX_CACHE_KEY = web.AppKey("fx_cache", dict)
 FX_LOCK_KEY = web.AppKey("fx_lock", asyncio.Lock)
 DELIVERY_TASKS_KEY = web.AppKey("delivery_tasks", set)
 DELIVERY_LIMIT_KEY = web.AppKey("delivery_limit", asyncio.Semaphore)
+USER_SYNC_CACHE_KEY = web.AppKey("user_sync_cache", dict)
+AUTH_CACHE_KEY = web.AppKey("auth_cache", dict)
 NBRB_RATES_URL = "https://api.nbrb.by/exrates/rates?periodicity=0"
 FX_CACHE_SECONDS = 30 * 60
+USER_SYNC_CACHE_SECONDS = 10 * 60
+USER_SYNC_CACHE_LIMIT = 10_000
+AUTH_CACHE_SECONDS = 5 * 60
+AUTH_CACHE_LIMIT = 10_000
 
 
 class ApiError(Exception):
@@ -229,7 +235,6 @@ async def delivery_context(application: web.Application):
 async def _confirm_private_subscription(
     bot: Bot,
     service: BudgetService,
-    settings: Settings,
     collection,
     user_id: int,
 ) -> bool:
@@ -237,7 +242,7 @@ async def _confirm_private_subscription(
         await bot.send_message(
             user_id,
             "🔔 <b>Уведомления включены</b>\n\n"
-            f"Сбор: {collection_html_link(collection, settings.bot_username, main_app_enabled=settings.main_app_enabled)}. "
+            f"Сбор: <b>«{escape(collection['title'])}»</b>. "
             "Теперь важные операции будут приходить в этот чат.",
             parse_mode="HTML",
             request_timeout=5,
@@ -275,26 +280,31 @@ def _name(user: dict) -> str:
     return telegram_user_link(user["id"], _full_name(user), user.get("username"))
 
 
-def _collection_link(request: web.Request, collection) -> str:
-    settings = request.app[SETTINGS_KEY]
-    return collection_html_link(
-        collection,
-        settings.bot_username,
-        main_app_enabled=settings.main_app_enabled,
-    )
-
-
 @web.middleware
 async def api_middleware(request: web.Request, handler):
     if not request.path.startswith("/api/"):
         return await handler(request)
     try:
         settings = request.app[SETTINGS_KEY]
-        auth = validate_init_data(
-            request.headers.get("X-Telegram-Init-Data", ""),
-            settings.bot_token,
-            settings.webapp_auth_max_age,
-        )
+        raw_init_data = request.headers.get("X-Telegram-Init-Data", "")
+        now_epoch = int(time.time())
+        auth_cache = request.app[AUTH_CACHE_KEY]
+        cached_auth = auth_cache.get(raw_init_data)
+        if cached_auth and cached_auth[1] >= now_epoch:
+            auth = cached_auth[0]
+        else:
+            auth = validate_init_data(
+                raw_init_data,
+                settings.bot_token,
+                settings.webapp_auth_max_age,
+            )
+            expires_at = min(
+                int(auth["auth_date"]) + settings.webapp_auth_max_age,
+                now_epoch + AUTH_CACHE_SECONDS,
+            )
+            auth_cache[raw_init_data] = (auth, expires_at)
+            if len(auth_cache) > AUTH_CACHE_LIMIT:
+                auth_cache.pop(next(iter(auth_cache)), None)
         request[AUTH_KEY] = auth
         user = auth["user"]
         full_name = " ".join(
@@ -303,9 +313,19 @@ async def api_middleware(request: web.Request, handler):
         if request.path == "/api/sync":
             request[NEW_USER_KEY] = False
         else:
-            request[NEW_USER_KEY] = await request.app[SERVICE_KEY].upsert_user(
-                user["id"], user.get("username"), full_name, private_started=True
-            )
+            now = time.monotonic()
+            identity = (user.get("username"), full_name)
+            cache = request.app[USER_SYNC_CACHE_KEY]
+            cached = cache.get(user["id"])
+            if cached and cached[0] == identity and now - cached[1] < USER_SYNC_CACHE_SECONDS:
+                request[NEW_USER_KEY] = False
+            else:
+                request[NEW_USER_KEY] = await request.app[SERVICE_KEY].upsert_user(
+                    user["id"], user.get("username"), full_name, private_started=True
+                )
+                cache[user["id"]] = (identity, now)
+                if len(cache) > USER_SYNC_CACHE_LIMIT:
+                    cache.pop(next(iter(cache)), None)
         return await handler(request)
     except (ApiError, DomainError, ValueError) as exc:
         status = exc.status if isinstance(exc, ApiError) else 400
@@ -390,7 +410,6 @@ async def sync_status(request: web.Request) -> web.Response:
 async def collection_details(request: web.Request) -> web.Response:
     service, _, user = _context(request)
     collection_id = int(request.match_info["collection_id"])
-    collection = await _require_member(service, collection_id, user["id"])
     try:
         history_limit = min(500, max(20, int(request.query.get("history_limit", "20"))))
         events_limit = min(500, max(20, int(request.query.get("events_limit", "20"))))
@@ -402,6 +421,11 @@ async def collection_details(request: web.Request) -> web.Response:
         history_limit=history_limit + 1,
         events_limit=events_limit + 1,
     )
+    if view is None:
+        if not await service.get_collection(collection_id):
+            raise ApiError("Сбор не найден", 404)
+        raise ApiError("Этот сбор доступен только его участникам", 403)
+    collection = view.collection
     snapshot = view.snapshot
     history_has_more = len(view.history) > history_limit
     events_has_more = len(view.events) > events_limit
@@ -409,7 +433,7 @@ async def collection_details(request: web.Request) -> web.Response:
     events = view.events[:events_limit]
     shares = view.shares
     people = {row["id"]: row for row in snapshot.participants}
-    pending = await service.pending_repayments(collection_id, user["id"])
+    pending = view.pending_repayments
     return web.json_response(
         {
             "ok": True,
@@ -492,7 +516,7 @@ async def create_collection(request: web.Request) -> web.Response:
     if personal and payload.get("subscribe") is True:
         await service.set_notification_subscription(collection_id, user["id"], True)
         notifications_enabled = await _confirm_private_subscription(
-            bot, service, request.app[SETTINGS_KEY], collection, user["id"]
+            bot, service, collection, user["id"]
         )
 
     async def deliver_creation() -> None:
@@ -500,7 +524,7 @@ async def create_collection(request: web.Request) -> web.Response:
             bot,
             service,
             collection,
-            f"🧾 <b>Новый общий сбор</b> {_collection_link(request, collection)}\n\n"
+            f"🧾 <b>Новый общий сбор «{escape(collection['title'])}»</b>\n\n"
             f"{_name(user)} приглашает вести расходы вместе в {collection['currency']}. "
             "Добавляйте траты и сразу видьте, кто кому сколько должен(а).",
             _collection_invite_markup(request.app[SETTINGS_KEY], collection_id),
@@ -660,7 +684,7 @@ async def add_repayment(request: web.Request) -> web.Response:
                     "🤝 <b>Подтвердите получение</b>\n\n"
                     f"От: {_name(user)}\n"
                     f"Сумма: <b>{format_money(amount, collection['currency'])}</b>\n"
-                    f"Сбор: {_collection_link(request, collection)}{comment_line}",
+                    f"Сбор: <b>«{escape(collection['title'])}»</b>{comment_line}",
                     parse_mode="HTML",
                     reply_markup=confirm_markup,
                     request_timeout=5,
@@ -708,7 +732,7 @@ async def request_funds(request: web.Request) -> web.Response:
         collection_id,
         main_app_enabled=settings.main_app_enabled,
     )
-    collection_link = _collection_link(request, collection)
+    collection_title = f"<b>«{escape(collection['title'])}»</b>"
     open_markup = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📱 Открыть сбор", url=app_url)],
@@ -722,7 +746,7 @@ async def request_funds(request: web.Request) -> web.Response:
                     debt.debtor_id,
                     "🔔 <b>Просьба рассчитаться</b>\n\n"
                     f"{_name(user)} просит вас рассчитаться по действующим долгам "
-                    f"в сборе {collection_link}.",
+                    f"в сборе {collection_title}.",
                     parse_mode="HTML",
                     reply_markup=open_markup,
                     request_timeout=5,
@@ -742,7 +766,7 @@ async def request_funds(request: web.Request) -> web.Response:
                 await bot.send_message(
                     collection["chat_id"],
                     f"🔔 {_name(user)} просит рассчитаться по действующим долгам "
-                    f"в сборе {collection_link}.",
+                    f"в сборе {collection_title}.",
                     parse_mode="HTML",
                     disable_notification=True,
                     request_timeout=5,
@@ -803,7 +827,7 @@ async def confirm_repayment(request: web.Request) -> web.Response:
                 "✅ <b>Получение подтверждено</b>\n\n"
                 f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
                 f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
-                f"Сбор: {_collection_link(request, collection)}{comment_detail}",
+                f"Сбор: <b>«{escape(collection['title'])}»</b>{comment_detail}",
             ),
         )
 
@@ -853,7 +877,7 @@ async def reject_repayment(request: web.Request) -> web.Response:
                 "❌ <b>Получение отклонено</b>\n\n"
                 f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
                 f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
-                f"Сбор: {_collection_link(request, collection)}{comment_detail}",
+                f"Сбор: <b>«{escape(collection['title'])}»</b>{comment_detail}",
             ),
         )
 
@@ -878,13 +902,11 @@ async def join_collection(request: web.Request) -> web.Response:
     subscribe = payload.get("subscribe") is True
     await service.join(collection_id, user["id"], subscribe=subscribe)
     if subscribe:
-        subscribe = await _confirm_private_subscription(
-            bot, service, request.app[SETTINGS_KEY], collection, user["id"]
-        )
+        subscribe = await _confirm_private_subscription(bot, service, collection, user["id"])
     sent, notifications_sent = _queue_report(
         request,
         collection,
-        f"🙋 {_name(user)} участвует в сборе {_collection_link(request, collection)}.",
+        f"🙋 {_name(user)} участвует в сборе <b>«{escape(collection['title'])}»</b>.",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
@@ -986,8 +1008,6 @@ async def edit_transaction(request: web.Request) -> web.Response:
             after_shares,
             actor_id=user["id"],
             actor_username=user.get("username"),
-            bot_username=request.app[SETTINGS_KEY].bot_username,
-            main_app_enabled=request.app[SETTINGS_KEY].main_app_enabled,
         ),
         exclude_user_ids={user["id"]},
     )
@@ -1033,7 +1053,7 @@ async def leave_collection(request: web.Request) -> web.Response:
     sent, notifications_sent = _queue_report(
         request,
         collection,
-        f"👋 {_name(user)} вышел(ла) из сбора {_collection_link(request, collection)}.",
+        f"👋 {_name(user)} вышел(ла) из сбора <b>«{escape(collection['title'])}»</b>.",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
@@ -1074,9 +1094,7 @@ async def save_notification_subscription(request: web.Request) -> web.Response:
         raise ApiError("Некорректная настройка уведомлений")
     await service.set_notification_subscription(collection_id, user["id"], enabled)
     if enabled:
-        enabled = await _confirm_private_subscription(
-            bot, service, request.app[SETTINGS_KEY], collection, user["id"]
-        )
+        enabled = await _confirm_private_subscription(bot, service, collection, user["id"])
     return web.json_response({"ok": True, "notifications_enabled": enabled})
 
 
@@ -1122,7 +1140,7 @@ async def archive_collection(request: web.Request) -> web.Response:
     sent, notifications_sent = _queue_report(
         request,
         collection,
-        f"📦 {_name(user)} завершил(а) сбор {_collection_link(request, collection)}. "
+        f"📦 {_name(user)} завершил(а) сбор <b>«{escape(collection['title'])}»</b>. "
         "Архив — 30 дней.",
         exclude_user_ids={user["id"]},
     )
@@ -1144,7 +1162,7 @@ async def restore_collection(request: web.Request) -> web.Response:
     sent, notifications_sent = _queue_report(
         request,
         collection,
-        f"♻️ {_name(user)} восстановил(а) сбор {_collection_link(request, collection)}.",
+        f"♻️ {_name(user)} восстановил(а) сбор <b>«{escape(collection['title'])}»</b>.",
         exclude_user_ids={user["id"]},
     )
     return web.json_response(
@@ -1167,7 +1185,7 @@ async def delete_collection(request: web.Request) -> web.Response:
         request,
         collection,
         f"🗑 {_name(user)} безвозвратно удалил(а) архивный сбор "
-        f"{_collection_link(request, collection)}.",
+        f"<b>«{escape(collection['title'])}»</b>.",
         exclude_user_ids={user["id"]},
     )
     await service.delete_archived(collection_id, user["id"])
@@ -1192,7 +1210,7 @@ async def transfer_admin(request: web.Request) -> web.Response:
     sent, notifications_sent = _queue_report(
         request,
         collection,
-        f"👑 Администратор сбора {_collection_link(request, collection)} — "
+        f"👑 Администратор сбора <b>«{escape(collection['title'])}»</b> — "
         f"{telegram_user_link(member['id'], member['full_name'], member['username'])}.",
         exclude_user_ids={user["id"]},
     )
@@ -1219,7 +1237,7 @@ async def remove_member(request: web.Request) -> web.Response:
         collection,
         f"👥 {telegram_user_link(member['id'], member['full_name'], member['username'])} "
         "больше не участвует в сборе "
-        f"{_collection_link(request, collection)}.",
+        f"<b>«{escape(collection['title'])}»</b>.",
         exclude_user_ids={user["id"], member_id},
     )
     return web.json_response(
@@ -1277,6 +1295,8 @@ def setup_webapp_routes(
     application[SETTINGS_KEY] = settings
     application[FX_CACHE_KEY] = {}
     application[FX_LOCK_KEY] = asyncio.Lock()
+    application[USER_SYNC_CACHE_KEY] = {}
+    application[AUTH_CACHE_KEY] = {}
     application.cleanup_ctx.append(delivery_context)
     application.middlewares.extend([security_headers, api_middleware])
     application.router.add_get("/app", app_index)
