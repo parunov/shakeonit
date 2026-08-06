@@ -119,7 +119,7 @@ async def main() -> None:
     if settings.webapp_url:
         await bot.set_chat_menu_button(
             menu_button=MenuButtonWebApp(
-                text="Приложение",
+                text="Открыть приложение",
                 web_app=WebAppInfo(url=settings.webapp_url),
             )
         )

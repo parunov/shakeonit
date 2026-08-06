@@ -30,7 +30,7 @@ def webapp_launch(url: str) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📱 Открыть ShakeOnIt",
+                    text="📱 Открыть приложение",
                     web_app=WebAppInfo(url=url),
                 )
             ]
