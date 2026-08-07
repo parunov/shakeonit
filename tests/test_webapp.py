@@ -140,6 +140,9 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert "Сколько я должен(а)" in script_text
         assert 'data-action="open-user"' in script_text
         assert 'data-action="quick-repay"' in script_text
+        assert 'data-action="${actionName}"' in script_text
+        assert 'swipeAction === "delete"' in script_text
+        assert "!canConfirm && !item.has_inactive_participants" in script_text
         assert "if (tg?.openTelegramLink) tg.openTelegramLink(url);" in script_text
         assert "if (username && tg?.openTelegramLink)" not in script_text
         assert "tg://user?id=" not in script_text
@@ -214,7 +217,7 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_collection_api_survives_cancel_after_member_left(tmp_path):
+async def test_collection_api_marks_transaction_after_member_left(tmp_path):
     database = Database(tmp_path / "former-member.db")
     await database.initialize()
     service = BudgetService(database)
@@ -226,7 +229,6 @@ async def test_collection_api_survives_cancel_after_member_left(tmp_path):
     repayment_id = await service.add_repayment(collection_id, 2, 1, 500)
     await service.confirm_repayment(repayment_id, 1)
     await service.remove_participant(collection_id, 2, 2)
-    await service.cancel_transaction(expense_id, 1)
 
     settings = Settings(bot_token=TOKEN, database_path=database.path)
     application = web.Application()
@@ -241,9 +243,10 @@ async def test_collection_api_survives_cancel_after_member_left(tmp_path):
         payload = await response.json()
 
     assert response.status == 200
-    former = next(member for member in payload["participants"] if member["id"] == 2)
-    assert former["active"] is False
-    assert payload["debts"][0]["creditor_name"] == "Бывший участник"
+    assert all(member["id"] != 2 for member in payload["participants"])
+    expense = next(item for item in payload["history"] if item["id"] == expense_id)
+    assert expense["has_inactive_participants"] is True
+    assert payload["debts"] == []
 
 
 @pytest.mark.asyncio

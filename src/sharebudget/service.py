@@ -1061,6 +1061,50 @@ class BudgetService:
             result.setdefault(row["transaction_id"], []).append(dict(row))
         return result
 
+    async def _transactions_with_inactive_participants_on(
+        self, connection, transaction_ids: Iterable[int]
+    ) -> set[int]:
+        ids = list(dict.fromkeys(int(item) for item in transaction_ids))
+        if not ids:
+            return set()
+        placeholders = ",".join("?" for _ in ids)
+        rows = await connection.execute_fetchall(
+            f"""
+            SELECT t.id FROM transactions t
+            WHERE t.id IN ({placeholders}) AND (
+                (t.kind='expense' AND EXISTS (
+                    SELECT 1 FROM expense_shares s
+                    LEFT JOIN participants p
+                      ON p.collection_id=t.collection_id AND p.user_id=s.user_id
+                    WHERE s.transaction_id=t.id AND COALESCE(p.active,0)=0
+                ))
+                OR
+                (t.kind='repayment' AND (
+                    NOT EXISTS (
+                        SELECT 1 FROM participants creator
+                        WHERE creator.collection_id=t.collection_id
+                          AND creator.user_id=t.creator_id AND creator.active=1
+                    )
+                    OR NOT EXISTS (
+                        SELECT 1 FROM participants recipient
+                        WHERE recipient.collection_id=t.collection_id
+                          AND recipient.user_id=t.counterparty_id AND recipient.active=1
+                    )
+                ))
+            )
+            """,
+            ids,
+        )
+        return {row["id"] for row in rows}
+
+    async def transactions_with_inactive_participants(
+        self, transaction_ids: Iterable[int]
+    ) -> set[int]:
+        async with self.db.connect() as connection:
+            return await self._transactions_with_inactive_participants_on(
+                connection, transaction_ids
+            )
+
     async def global_history(
         self,
         user_id: int,
@@ -1291,14 +1335,26 @@ class BudgetService:
         if collection["status"] != "active":
             raise DomainError("Архивный сбор нельзя изменять")
         async with self.db.connect() as connection:
-            await connection.execute(
+            await connection.execute("BEGIN IMMEDIATE")
+            blocked = await self._transactions_with_inactive_participants_on(
+                connection, [transaction_id]
+            )
+            if transaction_id in blocked:
+                await connection.rollback()
+                raise DomainError(
+                    "Нельзя удалить транзакцию: один из её участников вышел из сбора"
+                )
+            cursor = await connection.execute(
                 """
                 UPDATE transactions SET status='cancelled',cancelled_by=?,
                     cancelled_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
-                WHERE id=?
+                WHERE id=? AND status='active'
                 """,
                 (actor_id, transaction_id),
             )
+            if cursor.rowcount != 1:
+                await connection.rollback()
+                raise DomainError("Транзакция уже отменена или не найдена")
             await connection.commit()
         return transaction["collection_id"]
 
@@ -1360,6 +1416,14 @@ class BudgetService:
                 raise DomainError("Сумма возврата больше текущего долга этому участнику")
         async with self.db.connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
+            blocked = await self._transactions_with_inactive_participants_on(
+                connection, [transaction_id]
+            )
+            if transaction_id in blocked:
+                await connection.rollback()
+                raise DomainError(
+                    "Нельзя изменить транзакцию: один из её участников вышел из сбора"
+                )
             await connection.execute(
                 "UPDATE transactions SET amount=?,comment=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                 (amount, comment.strip(), transaction_id),

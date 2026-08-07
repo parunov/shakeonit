@@ -443,6 +443,9 @@ async def collection_details(request: web.Request) -> web.Response:
     history = view.history[:history_limit]
     events = view.events[:events_limit]
     shares = view.shares
+    inactive_transaction_ids = await service.transactions_with_inactive_participants(
+        row["id"] for row in history
+    )
     people = {row["id"]: row for row in snapshot.participants}
     payment_methods = await service.payment_methods_for_users(people)
     pending = view.pending_repayments
@@ -498,6 +501,7 @@ async def collection_details(request: web.Request) -> web.Response:
                     "cancelled_by": row["cancelled_by"],
                     "created_at": row["created_at"],
                     "shared_with": row["shared_with"],
+                    "has_inactive_participants": row["id"] in inactive_transaction_ids,
                     "shares": shares.get(row["id"], []),
                 }
                 for row in history
@@ -962,12 +966,16 @@ async def global_history(request: web.Request) -> web.Response:
     shares = await service.expense_shares_for_transactions(
         row["id"] for row in transactions if row["kind"] == "expense"
     )
+    inactive_transaction_ids = await service.transactions_with_inactive_participants(
+        row["id"] for row in transactions
+    )
     return web.json_response(
         {
             "ok": True,
             "transactions": [
                 {
                     **dict(row),
+                    "has_inactive_participants": row["id"] in inactive_transaction_ids,
                     "shares": shares.get(row["id"], []),
                 }
                 for row in transactions

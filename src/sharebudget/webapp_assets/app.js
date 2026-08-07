@@ -183,10 +183,10 @@ function empty(icon, text) {
   return `<div class="empty"><span class="empty-icon">${icon}</span>${e(text)}</div>`;
 }
 
-function collectionCards(rows, allowSwipe = false) {
+function collectionCards(rows, swipeAction = null) {
   if (!rows.length) return empty("🌿", "Сборов пока нет. Создайте первый с группой или без неё.");
   return `<div class="card-list">${rows.map((item) => {
-    const canArchive = allowSwipe && item.status === "active" && item.admin_id === state.bootstrap.user.id;
+    const canSwipe = Boolean(swipeAction) && item.admin_id === state.bootstrap.user.id;
     const card = `<button class="card collection-card swipe-card" type="button" data-action="${item.is_participant === false ? "preview-collection" : "open-collection"}" data-id="${item.id}">
       <span class="collection-icon">${item.status === "archived" ? "📦" : "🧾"}</span>
       <span>
@@ -195,7 +195,9 @@ function collectionCards(rows, allowSwipe = false) {
       </span>
       <span class="chevron">›</span>
     </button>`;
-    return canArchive ? `<div class="collection-swipe-row" data-swipe-id="${item.id}"><button class="swipe-archive-action" type="button" data-action="swipe-archive" data-id="${item.id}">В архив</button>${card}</div>` : card;
+    const actionLabel = swipeAction === "delete" ? "Удалить" : "В архив";
+    const actionName = swipeAction === "delete" ? "swipe-delete" : "swipe-archive";
+    return canSwipe ? `<div class="collection-swipe-row" data-swipe-id="${item.id}"><button class="swipe-danger-action" type="button" data-action="${actionName}" data-id="${item.id}">${actionLabel}</button>${card}</div>` : card;
   }).join("")}</div>`;
 }
 
@@ -221,8 +223,8 @@ async function renderCollections() {
     </div>
     ${quickPayments ? `<section class="quick-pay-block ${state.quickPayExpanded ? "expanded" : ""}"><button class="quick-pay-toggle" type="button" data-action="toggle-quick-pay"><span class="quick-pay-symbol">↗</span><span><b>Быстрая оплата</b><small>${myDebts.length} ${myDebts.length === 1 ? "долг" : "долга"} · нажмите, чтобы ${state.quickPayExpanded ? "свернуть" : "развернуть"}</small></span><strong>${myDebts.length}</strong><i>${state.quickPayExpanded ? "⌃" : "⌄"}</i></button>${state.quickPayExpanded ? quickPayments : ""}</section>` : ""}
     <div class="section-head"><h2>Текущие</h2><button class="text-button" type="button" data-action="create">+ Новый</button></div>
-    ${collectionCards(active, true)}
-    ${archived.length ? `<div class="section-head"><h2>Архив</h2></div>${collectionCards(archived)}` : ""}`;
+    ${collectionCards(active, "archive")}
+    ${archived.length ? `<div class="section-head"><h2>Архив</h2></div>${collectionCards(archived, "delete")}` : ""}`;
   updateNav();
 }
 
@@ -362,8 +364,8 @@ async function renderHistory(loadKind = null) {
     const isConfirmedRepayment = item.kind === "repayment" && item.confirmation_status === "confirmed";
     const isRejectedRepayment = item.kind === "repayment" && item.status === "cancelled" && item.cancelled_by === item.counterparty_id;
     const canConfirm = item.is_participant && item.collection_status === "active" && item.kind === "repayment" && item.status === "active" && item.confirmation_status === "pending" && item.counterparty_id === state.bootstrap.user.id;
-    const canEdit = item.is_participant && item.status === "active" && !isConfirmedRepayment && item.collection_status === "active" && (item.creator_id === state.bootstrap.user.id || item.collection_admin_id === state.bootstrap.user.id);
-    const canCancel = item.is_participant && item.status === "active" && item.collection_status === "active" && (item.collection_admin_id === state.bootstrap.user.id || (item.creator_id === state.bootstrap.user.id && !isConfirmedRepayment));
+    const canEdit = !canConfirm && !item.has_inactive_participants && item.is_participant && item.status === "active" && !isConfirmedRepayment && item.collection_status === "active" && (item.creator_id === state.bootstrap.user.id || item.collection_admin_id === state.bootstrap.user.id);
+    const canCancel = !canConfirm && !item.has_inactive_participants && item.is_participant && item.status === "active" && item.collection_status === "active" && (item.collection_admin_id === state.bootstrap.user.id || (item.creator_id === state.bootstrap.user.id && !isConfirmedRepayment));
     const status = item.status === "cancelled" ? `<span class="pill cancelled">${isRejectedRepayment ? "отклонено" : "отменено"}</span>` : item.kind === "repayment" && item.confirmation_status === "pending" ? '<span class="pill pending">ожидает</span>' : item.kind === "repayment" ? '<span class="pill">подтверждено</span>' : "";
     const shares = item.kind === "expense" && item.shares.length ? `<div class="share-breakdown">${item.shares.map((share) => `<div class="row-note">${userLink(share.user_id, share.full_name, share.username)} — ${money(share.amount, item.currency)}</div>`).join("")}</div>` : "";
     const collectionTitle = item.is_participant ? `<button class="collection-link" type="button" data-action="open-collection" data-id="${item.collection_id}">${e(item.collection_title)}</button>` : `<span>${e(item.collection_title)}</span>`;
@@ -493,9 +495,9 @@ function renderCollectionPanel(data, isAdmin) {
     const transactions = data.history.map((item) => {
       const isConfirmedRepayment = item.kind === "repayment" && item.confirmation_status === "confirmed";
       const isRejectedRepayment = item.kind === "repayment" && item.status === "cancelled" && item.cancelled_by === item.counterparty_id;
-      const canEdit = item.status === "active" && !isConfirmedRepayment && collection.status === "active" && (isAdmin || item.creator_id === state.bootstrap.user.id);
-      const canCancel = item.status === "active" && collection.status === "active" && (isAdmin || (item.creator_id === state.bootstrap.user.id && !isConfirmedRepayment));
       const canConfirm = item.kind === "repayment" && item.status === "active" && item.confirmation_status === "pending" && item.counterparty_id === state.bootstrap.user.id;
+      const canEdit = !canConfirm && !item.has_inactive_participants && item.status === "active" && !isConfirmedRepayment && collection.status === "active" && (isAdmin || item.creator_id === state.bootstrap.user.id);
+      const canCancel = !canConfirm && !item.has_inactive_participants && item.status === "active" && collection.status === "active" && (isAdmin || (item.creator_id === state.bootstrap.user.id && !isConfirmedRepayment));
       const subject = item.kind === "expense" ? e(item.comment || "Затрата") : `Возврат → ${userLink(item.counterparty_id, item.counterparty_name, item.counterparty_username)}`;
       const status = item.status === "cancelled" ? `<span class="pill cancelled">${isRejectedRepayment ? "отклонено" : "отменено"}</span>` : item.kind === "repayment" && item.confirmation_status === "pending" ? '<span class="pill pending">ожидает подтверждения</span>' : item.kind === "repayment" ? '<span class="pill">подтверждено</span>' : "";
       const shares = item.kind === "expense" ? `<div class="share-breakdown">${item.shares.map((share) => `<div class="row-note">${userLink(share.user_id, share.full_name, share.username)} — ${money(share.amount, collection.currency)}</div>`).join("")}</div>` : "";
@@ -745,6 +747,14 @@ app.addEventListener("click", async (event) => {
       setBusy(target, true);
       const result = await api(`/api/collections/${target.dataset.id}/archive`, { method: "POST", body: "{}" });
       reportToast(result, "Сбор в архиве");
+      await reloadBootstrap();
+      return await renderCollections();
+    }
+    if (action === "swipe-delete") {
+      if (!await confirmAction("Удалить архивный сбор навсегда? Все операции и история будут удалены без возможности восстановления.")) return;
+      setBusy(target, true);
+      const result = await api(`/api/collections/${target.dataset.id}`, { method: "DELETE" });
+      reportToast(result, "Сбор удалён");
       await reloadBootstrap();
       return await renderCollections();
     }
@@ -1102,7 +1112,7 @@ tg?.BackButton?.onClick(() => navigateBack(true));
 app.addEventListener("touchstart", (event) => {
   const row = event.target.closest(".collection-swipe-row");
   const touch = event.changedTouches[0];
-  if (!row || !touch || event.target.closest("button.swipe-archive-action")) return;
+  if (!row || !touch || event.target.closest("button.swipe-danger-action")) return;
   state.collectionSwipe = { row, x: touch.clientX, y: touch.clientY };
 }, { passive: true });
 
@@ -1113,7 +1123,7 @@ app.addEventListener("touchmove", (event) => {
   const dx = touch.clientX - start.x;
   const dy = Math.abs(touch.clientY - start.y);
   if (dy > Math.abs(dx)) return;
-  const offset = Math.max(-92, Math.min(0, dx));
+  const offset = Math.max(-96, Math.min(0, dx));
   start.row.style.setProperty("--swipe-x", `${offset}px`);
 }, { passive: true });
 

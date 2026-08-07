@@ -13,9 +13,7 @@ from .money import CURRENCIES
 
 
 def main_menu() -> ReplyKeyboardMarkup:
-    # A slash command is delivered in groups even with Privacy Mode enabled; the
-    # handler then returns an authenticated Main Mini App link for that chat.
-    app = KeyboardButton(text="/app@ShakeOnIt_bot")
+    app = KeyboardButton(text="Открыть приложение")
     return ReplyKeyboardMarkup(
         keyboard=[[app]],
         resize_keyboard=True,

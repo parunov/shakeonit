@@ -234,6 +234,21 @@ async def test_member_cannot_cancel_someone_elses_transaction(service):
 
 
 @pytest.mark.asyncio
+async def test_transaction_cannot_be_edited_or_cancelled_after_participant_left(service):
+    collection_id = await make_collection(service)
+    expense_id = await service.add_expense(collection_id, 1, 1000, [2], "Билеты")
+    repayment_id = await service.add_repayment(collection_id, 2, 1, 1000, "Расчёт")
+    await service.confirm_repayment(repayment_id, 1)
+    await service.remove_participant(collection_id, 2, 2)
+
+    assert await service.transactions_with_inactive_participants([expense_id]) == {expense_id}
+    with pytest.raises(DomainError, match="участников вышел"):
+        await service.edit_transaction(expense_id, 1, 1200, "Новая сумма")
+    with pytest.raises(DomainError, match="участников вышел"):
+        await service.cancel_transaction(expense_id, 1)
+
+
+@pytest.mark.asyncio
 async def test_edit_expense_resplits_exactly(service):
     collection_id = await make_collection(service)
     transaction_id = await service.add_expense(collection_id, 1, 1000, [1, 2, 3], "Еда")
@@ -317,21 +332,20 @@ async def test_leave_keeps_transaction_history(service):
 
 
 @pytest.mark.asyncio
-async def test_cancel_after_member_left_keeps_former_member_in_balances(service):
+async def test_cancel_after_member_left_is_blocked_and_balances_stay_closed(service):
     collection_id = await make_collection(service)
     expense_id = await service.add_expense(collection_id, 1, 1000, [1, 2], "Такси")
     repayment_id = await service.add_repayment(collection_id, 2, 1, 500)
     await service.confirm_repayment(repayment_id, 1)
     await service.remove_participant(collection_id, 2, 2)
 
-    await service.cancel_transaction(expense_id, 1)
+    with pytest.raises(DomainError, match="участников вышел"):
+        await service.cancel_transaction(expense_id, 1)
     snapshot = await service.collection_snapshot(collection_id)
 
-    former = next(row for row in snapshot.participants if row["id"] == 2)
-    assert former["active"] == 0
-    assert snapshot.balances == {1: -500, 2: 500, 3: 0}
-    assert snapshot.debts[0].debtor_id == 1
-    assert snapshot.debts[0].creditor_id == 2
+    assert all(row["id"] != 2 for row in snapshot.participants)
+    assert snapshot.balances == {1: 0, 3: 0}
+    assert snapshot.debts == []
 
 
 @pytest.mark.asyncio

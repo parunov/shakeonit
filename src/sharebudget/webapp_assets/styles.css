@@ -244,10 +244,10 @@ button:disabled { opacity: .5; cursor: default; }
 .amount-input input { font-size: 22px; font-weight: 760; letter-spacing: -.02em; }
 .amount-input button { min-width: 60px; border: 0; border-radius: 14px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); font-weight: 800; }
 
-.collection-swipe-row { position: relative; overflow: hidden; border-radius: 19px; background: var(--bad); }
-.collection-swipe-row .swipe-card { position: relative; z-index: 1; width: 100%; transform: translateX(var(--swipe-x, 0)); transition: transform .2s ease; }
-.collection-swipe-row.revealed .swipe-card { transform: translateX(-92px); }
-.swipe-archive-action { position: absolute; inset: 0 0 0 auto; width: 92px; border: 0; color: #fff; background: var(--bad); font-size: 12px; font-weight: 780; }
+.collection-swipe-row { position: relative; overflow: hidden; border-radius: 23px; background: transparent; }
+.collection-swipe-row .swipe-card { position: relative; z-index: 1; width: 100%; border-radius: 23px; transform: translateX(var(--swipe-x, 0)); transition: transform .2s ease; }
+.collection-swipe-row.revealed .swipe-card { transform: translateX(-96px); }
+.swipe-danger-action { position: absolute; inset: 0 0 0 auto; width: 96px; border: 0; border-radius: 0 23px 23px 0; color: #fff; background: var(--bad); font-size: 12px; font-weight: 780; }
 .history-stats-trigger { display: grid; grid-template-columns: 1fr auto; align-items: center; width: 100%; border: 0; text-align: left; }
 .history-stats-trigger > span { display: grid; }
 .history-stats-trigger > i { font-size: 30px; font-style: normal; opacity: .8; }
