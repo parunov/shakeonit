@@ -504,14 +504,27 @@ class BudgetService:
             )
             return row is not None
 
-    async def join(self, collection_id: int, user_id: int, subscribe: bool = False) -> None:
+    async def join(self, collection_id: int, user_id: int, subscribe: bool = False) -> bool:
+        """Join or restore membership and return True only for a new active membership."""
         collection = await self._active_collection(collection_id)
         async with self.db.connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
             existing = await _fetchone(
                 connection,
                 "SELECT active FROM participants WHERE collection_id=? AND user_id=?",
                 (collection_id, user_id),
             )
+            if existing and existing["active"]:
+                if subscribe:
+                    await connection.execute(
+                        """
+                        UPDATE participants SET notifications_enabled=1
+                        WHERE collection_id=? AND user_id=?
+                        """,
+                        (collection_id, user_id),
+                    )
+                await connection.commit()
+                return False
             await connection.execute(
                 """
                 INSERT INTO participants(
@@ -532,6 +545,7 @@ class BudgetService:
                     (collection_id, user_id, user_id),
                 )
             await connection.commit()
+            return True
 
     async def notification_subscription(self, collection_id: int, user_id: int) -> bool:
         async with self.db.connect() as connection:

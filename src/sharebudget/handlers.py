@@ -566,21 +566,21 @@ async def open_collection(callback: CallbackQuery, service: BudgetService) -> No
 async def join_collection(callback: CallbackQuery, service: BudgetService) -> None:
     await sync_user(service, callback)
     collection_id = int(callback.data.split(":")[1])
-    was_member = await service.is_participant(collection_id, callback.from_user.id)
     message = callback.message
     subscribe = bool(message and message.chat.type == ChatType.PRIVATE)
-    await service.join(collection_id, callback.from_user.id, subscribe=subscribe)
+    joined_now = await service.join(collection_id, callback.from_user.id, subscribe=subscribe)
     collection = await service.get_collection(collection_id)
-    await report_collection_event(
-        callback.bot,
-        service,
-        collection,
-        f"🙋 {event_user_link(callback.from_user)} участвует в сборе.",
-        exclude_user_ids={callback.from_user.id},
-    )
+    if joined_now:
+        await report_collection_event(
+            callback.bot,
+            service,
+            collection,
+            f"🙋 {event_user_link(callback.from_user)} участвует в сборе.",
+            exclude_user_ids={callback.from_user.id},
+        )
     await callback.answer(
         "✅ Вы уже участвуете в сборе."
-        if was_member
+        if not joined_now
         else "🎉 Готово! Вы участвуете — без регистрации и переходов.",
         show_alert=True,
     )

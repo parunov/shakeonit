@@ -777,7 +777,8 @@ app.addEventListener("click", async (event) => {
       const requestedSubscription = action === "join-subscribe";
       const subscribe = requestedSubscription ? await requestWritePermission() : false;
       const result = await api(`/api/collections/${target.dataset.id}/join`, { method: "POST", body: JSON.stringify({ subscribe }) });
-      reportToast(result, result.notifications_enabled ? "Вы участвуете · уведомления включены" : "Вы участвуете в сборе");
+      if (result.already_participant) toast("Вы уже участвуете в этом сборе");
+      else reportToast(result, result.notifications_enabled ? "Вы участвуете · уведомления включены" : "Вы участвуете в сборе");
       if (requestedSubscription && !result.notifications_enabled) toast("Вы участвуете, но Telegram не разрешил личные уведомления", true);
       await reloadBootstrap();
       return await openCollection(target.dataset.id, "overview", true);

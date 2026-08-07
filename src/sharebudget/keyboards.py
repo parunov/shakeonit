@@ -13,10 +13,9 @@ from .money import CURRENCIES
 
 
 def main_menu() -> ReplyKeyboardMarkup:
-    # Reply-keyboard Mini Apps do not receive authenticated user data from Telegram.
-    # Plain text buttons route through the bot, which returns an authenticated
-    # InlineKeyboardButton with WebAppInfo.
-    app = KeyboardButton(text="📱 Открыть приложение")
+    # A slash command is delivered in groups even with Privacy Mode enabled; the
+    # handler then returns an authenticated Main Mini App link for that chat.
+    app = KeyboardButton(text="/app@ShakeOnIt_bot")
     return ReplyKeyboardMarkup(
         keyboard=[[app]],
         resize_keyboard=True,

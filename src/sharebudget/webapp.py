@@ -261,9 +261,16 @@ async def _confirm_private_subscription(
         return False
 
 
-def _collection_invite_markup(collection_id: int) -> InlineKeyboardMarkup:
+def _collection_invite_markup(collection_id: int, settings: Settings) -> InlineKeyboardMarkup:
+    username = settings.bot_username.lstrip("@")
+    collection_url = (
+        f"https://t.me/{username}?startapp=collection_{collection_id}&mode=compact"
+        if settings.main_app_enabled
+        else f"https://t.me/{username}?start=collection_{collection_id}"
+    )
     rows = [
-        [InlineKeyboardButton(text="🙋 Участвовать в сборе", callback_data=f"join:{collection_id}")]
+        [InlineKeyboardButton(text="🙋 Участвовать в сборе", callback_data=f"join:{collection_id}")],
+        [InlineKeyboardButton(text="📱 Открыть сбор", url=collection_url)],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -535,7 +542,7 @@ async def create_collection(request: web.Request) -> web.Response:
             f"🧾 <b>Новый общий сбор «{escape(collection['title'])}»</b>\n\n"
             f"{_name(user)} приглашает вести расходы вместе в {collection['currency']}. "
             "Добавляйте траты и сразу видьте, кто кому сколько должен(а).",
-            _collection_invite_markup(collection_id),
+            _collection_invite_markup(collection_id, request.app[SETTINGS_KEY]),
             exclude_user_ids={user["id"]},
         )
         if not personal and sent:
@@ -906,22 +913,33 @@ async def join_collection(request: web.Request) -> web.Response:
         raise ApiError("Активный сбор не найден", 404)
     payload = await _json_body(request)
     subscribe = payload.get("subscribe") is True
-    await service.join(collection_id, user["id"], subscribe=subscribe)
-    if subscribe:
-        subscribe = await _confirm_private_subscription(bot, service, collection, user["id"])
-    sent, notifications_sent = _queue_report(
-        request,
-        collection,
-        f"🙋 {_name(user)} участвует в сборе <b>«{escape(collection['title'])}»</b>.",
-        exclude_user_ids={user["id"]},
+    was_member = await service.is_participant(collection_id, user["id"])
+    was_subscribed = (
+        await service.notification_subscription(collection_id, user["id"])
+        if was_member
+        else False
     )
+    joined_now = await service.join(collection_id, user["id"], subscribe=subscribe)
+    if subscribe and not was_subscribed:
+        await _confirm_private_subscription(bot, service, collection, user["id"])
+    notifications_enabled = await service.notification_subscription(collection_id, user["id"])
+    if joined_now:
+        sent, notifications_sent = _queue_report(
+            request,
+            collection,
+            f"🙋 {_name(user)} участвует в сборе <b>«{escape(collection['title'])}»</b>.",
+            exclude_user_ids={user["id"]},
+        )
+    else:
+        sent, notifications_sent = False, 0
     return web.json_response(
         {
             "ok": True,
             "report_sent": sent,
             "notifications_sent": notifications_sent,
-            "notifications_enabled": subscribe,
-            "notifications_queued": True,
+            "notifications_enabled": notifications_enabled,
+            "notifications_queued": joined_now,
+            "already_participant": not joined_now,
         }
     )
 

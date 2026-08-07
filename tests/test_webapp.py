@@ -90,19 +90,25 @@ def test_validate_init_data_rejects_duplicate_fields():
 def test_collection_invite_uses_safe_fallback_or_enabled_main_app():
     settings = Settings(bot_token=TOKEN, main_app_enabled=False)
     buttons = [
-        button for row in _collection_invite_markup(42).inline_keyboard for button in row
+        button for row in _collection_invite_markup(42, settings).inline_keyboard for button in row
     ]
 
-    assert not any(button.url for button in buttons)
+    assert any(button.url == "https://t.me/ShakeOnIt_bot?start=collection_42" for button in buttons)
     assert any(button.callback_data == "join:42" for button in buttons)
     assert not any(button.callback_data == "decline:42" for button in buttons)
-    assert {button.text for button in buttons} == {"🙋 Участвовать в сборе"}
+    assert {button.text for button in buttons} == {
+        "🙋 Участвовать в сборе",
+        "📱 Открыть сбор",
+    }
 
     settings.main_app_enabled = True
     enabled_buttons = [
-        button for row in _collection_invite_markup(42).inline_keyboard for button in row
+        button for row in _collection_invite_markup(42, settings).inline_keyboard for button in row
     ]
-    assert not any(button.url for button in enabled_buttons)
+    assert any(
+        button.url == "https://t.me/ShakeOnIt_bot?startapp=collection_42&mode=compact"
+        for button in enabled_buttons
+    )
     assert any(button.callback_data == "join:42" for button in enabled_buttons)
 
 
@@ -833,6 +839,42 @@ async def test_join_can_enable_private_collection_notifications(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_repeated_join_returns_already_participant_without_duplicate_report(tmp_path):
+    database = Database(tmp_path / "repeated-join.db")
+    await database.initialize()
+    service = BudgetService(database)
+    await service.upsert_user(1, "owner", "Организатор")
+    collection_id = await service.create_collection(-100500, "Поездка", "EUR", 1)
+    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    bot = SimpleNamespace(send_message=AsyncMock())
+    application = web.Application()
+    setup_webapp_routes(application, bot, service, settings)
+    member_auth = signed_init_data(user={"id": 2, "first_name": "Участник"})
+
+    async with TestClient(TestServer(application)) as client:
+        first = await client.post(
+            f"/api/collections/{collection_id}/join",
+            json={"subscribe": True},
+            headers={"X-Telegram-Init-Data": member_auth},
+        )
+        await drain_deliveries(application)
+        first_delivery_count = bot.send_message.await_count
+        second = await client.post(
+            f"/api/collections/{collection_id}/join",
+            json={"subscribe": True},
+            headers={"X-Telegram-Init-Data": member_auth},
+        )
+        second_payload = await second.json()
+        await drain_deliveries(application)
+
+    assert first.status == 200
+    assert second.status == 200
+    assert second_payload["already_participant"] is True
+    assert second_payload["notifications_queued"] is False
+    assert bot.send_message.await_count == first_delivery_count
+
+
+@pytest.mark.asyncio
 async def test_personal_collection_uses_bot_notifications_without_group(tmp_path):
     database = Database(tmp_path / "personal-collection.db")
     await database.initialize()
@@ -910,7 +952,9 @@ async def test_group_collection_creation_posts_actionable_invitation(tmp_path):
         if button.url
     ]
     assert callbacks == {f"join:{payload['collection_id']}"}
-    assert urls == []
+    assert urls == [
+        f"https://t.me/ShakeOnIt_bot?startapp=collection_{payload['collection_id']}&mode=compact"
+    ]
 
 
 @pytest.mark.asyncio

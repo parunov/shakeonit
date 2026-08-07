@@ -194,6 +194,17 @@ async def test_private_notification_subscription_follows_active_membership(servi
 
 
 @pytest.mark.asyncio
+async def test_join_is_idempotent_and_records_one_membership_event(service):
+    collection_id = await service.create_collection(-100, "Подарок", "BYN", 1)
+
+    assert await service.join(collection_id, 2) is True
+    assert await service.join(collection_id, 2) is False
+
+    events = await service.collection_events(collection_id, limit=20)
+    assert sum(row["kind"] == "joined" and row["actor_id"] == 2 for row in events) == 1
+
+
+@pytest.mark.asyncio
 async def test_personal_collection_is_not_exposed_as_telegram_chat(service):
     personal_id = await service.create_collection(0, "Личный подарок", "BYN", 1)
 

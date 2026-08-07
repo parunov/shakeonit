@@ -71,9 +71,12 @@ async def test_shared_inline_invitation_join_works_without_message_or_collection
     )
 
     await join_collection(callback, service)
+    await join_collection(callback, service)
 
     assert await service.is_participant(collection_id, 2)
-    callback.answer.assert_awaited_once()
+    assert callback.answer.await_count == 2
+    events = await service.collection_events(collection_id, limit=20)
+    assert sum(row["kind"] == "joined" and row["actor_id"] == 2 for row in events) == 1
 
 
 @pytest.mark.asyncio
