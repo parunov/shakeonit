@@ -13,6 +13,19 @@ from .service import BudgetService
 LOGGER = logging.getLogger(__name__)
 
 
+async def send_with_retry(send, *, attempts: int = 2):
+    """Retry transient Telegram failures once without duplicating successful messages."""
+    for attempt in range(attempts):
+        try:
+            return await send()
+        except TelegramForbiddenError:
+            raise
+        except TelegramAPIError:
+            if attempt + 1 >= attempts:
+                raise
+            await asyncio.sleep(0.35 * (attempt + 1))
+
+
 async def notify_subscribers(
     bot: Bot,
     service: BudgetService,
@@ -21,25 +34,28 @@ async def notify_subscribers(
     *,
     exclude_user_ids: Collection[int] = (),
     reply_markup=None,
+    category: str = "collection_events",
 ) -> int:
     """Deliver a collection event to opted-in participants via private chat."""
     excluded = set(exclude_user_ids)
     subscribers = [
         row
-        for row in await service.notification_subscribers(collection["id"])
+        for row in await service.notification_subscribers(collection["id"], category)
         if row["user_id"] not in excluded
     ]
 
     async def deliver(row) -> bool:
         user_id = row["user_id"]
         try:
-            await bot.send_message(
-                user_id,
-                f"🔔 <b>{escape(collection['title'])}</b>\n\n{text}",
-                parse_mode="HTML",
-                disable_notification=False,
-                reply_markup=reply_markup,
-                request_timeout=5,
+            await send_with_retry(
+                lambda: bot.send_message(
+                    user_id,
+                    f"🔔 <b>{escape(collection['title'])}</b>\n\n{text}",
+                    parse_mode="HTML",
+                    disable_notification=False,
+                    reply_markup=reply_markup,
+                    request_timeout=5,
+                )
             )
             return True
         except TelegramForbiddenError:
@@ -75,6 +91,7 @@ async def report_collection_event(
     *,
     exclude_user_ids: Collection[int] = (),
     subscriber_reply_markup=None,
+    category: str = "collection_events",
 ) -> tuple[bool, int]:
     """Publish an event to the linked group and opted-in private subscribers."""
 
@@ -82,13 +99,15 @@ async def report_collection_event(
         if not collection["chat_id"]:
             return False
         try:
-            await bot.send_message(
-                collection["chat_id"],
-                f"🔔 <b>{escape(collection['title'])}</b>\n\n{text}",
-                parse_mode="HTML",
-                disable_notification=True,
-                reply_markup=reply_markup,
-                request_timeout=5,
+            await send_with_retry(
+                lambda: bot.send_message(
+                    collection["chat_id"],
+                    f"🔔 <b>{escape(collection['title'])}</b>\n\n{text}",
+                    parse_mode="HTML",
+                    disable_notification=True,
+                    reply_markup=reply_markup,
+                    request_timeout=5,
+                )
             )
             return True
         except TelegramAPIError:
@@ -108,6 +127,7 @@ async def report_collection_event(
             text,
             exclude_user_ids=exclude_user_ids,
             reply_markup=subscriber_reply_markup,
+            category=category,
         ),
     )
     return group_sent, delivered

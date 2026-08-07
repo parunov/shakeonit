@@ -32,6 +32,8 @@ const state = {
   collectionEventsLimit: 20,
   viewStack: [],
   swipeStart: null,
+  collectionSwipe: null,
+  quickPayExpanded: false,
   launchIntent: launchParams.get("intent")
     || launchParams.get("tgWebAppStartParam")
     || tg?.initDataUnsafe?.start_param,
@@ -181,17 +183,20 @@ function empty(icon, text) {
   return `<div class="empty"><span class="empty-icon">${icon}</span>${e(text)}</div>`;
 }
 
-function collectionCards(rows) {
+function collectionCards(rows, allowSwipe = false) {
   if (!rows.length) return empty("🌿", "Сборов пока нет. Создайте первый с группой или без неё.");
-  return `<div class="card-list">${rows.map((item) => `
-    <button class="card collection-card" type="button" data-action="${item.is_participant === false ? "preview-collection" : "open-collection"}" data-id="${item.id}">
+  return `<div class="card-list">${rows.map((item) => {
+    const canArchive = allowSwipe && item.status === "active" && item.admin_id === state.bootstrap.user.id;
+    const card = `<button class="card collection-card swipe-card" type="button" data-action="${item.is_participant === false ? "preview-collection" : "open-collection"}" data-id="${item.id}">
       <span class="collection-icon">${item.status === "archived" ? "📦" : "🧾"}</span>
       <span>
         <span class="card-title">${e(item.title)}${item.admin_id === state.bootstrap.user.id ? '<span class="owner-mark">Ваш сбор</span>' : ""}</span>
         <span class="card-subtitle">${e(item.currency)} · ${item.participants_count ?? "—"} участников${item.is_personal ? " · без группы" : ""}${item.status === "archived" ? " · архив" : item.is_participant === false ? " · можно участвовать" : ""}</span>
       </span>
       <span class="chevron">›</span>
-    </button>`).join("")}</div>`;
+    </button>`;
+    return canArchive ? `<div class="collection-swipe-row" data-swipe-id="${item.id}"><button class="swipe-archive-action" type="button" data-action="swipe-archive" data-id="${item.id}">В архив</button>${card}</div>` : card;
+  }).join("")}</div>`;
 }
 
 async function renderCollections() {
@@ -202,7 +207,8 @@ async function renderCollections() {
   if (!state.balanceData) state.balanceData = await api("/api/balance");
   const oweTotals = debtTotals(state.balanceData.personal_debts, "debtor_id");
   const owedTotals = debtTotals(state.balanceData.personal_debts, "creditor_id");
-  const quickPayments = quickPaymentRows(state.balanceData.personal_debts);
+  const myDebts = state.balanceData.personal_debts.filter((debt) => debt.debtor_id === state.bootstrap.user.id);
+  const quickPayments = quickPaymentRows(myDebts);
   const emptySummary = money(0, state.bootstrap.user.preferred_currency);
   const owe = Object.keys(oweTotals).length ? moneyMap(oweTotals) : emptySummary;
   const owed = Object.keys(owedTotals).length ? moneyMap(owedTotals) : emptySummary;
@@ -213,9 +219,9 @@ async function renderCollections() {
       <button class="summary-tile summary-owe" type="button" data-action="collections-summary"><small>Сколько я должен(а)</small><b>${owe}</b></button>
       <button class="summary-tile summary-owed" type="button" data-action="collections-summary"><small>Сколько мне должны</small><b>${owed}</b></button>
     </div>
-    ${quickPayments ? `<section class="quick-pay-block"><div class="quick-pay-heading"><span>↗</span><div><b>Быстрая оплата</b><small>Погасить долг без лишних шагов</small></div></div>${quickPayments}</section>` : ""}
+    ${quickPayments ? `<section class="quick-pay-block ${state.quickPayExpanded ? "expanded" : ""}"><button class="quick-pay-toggle" type="button" data-action="toggle-quick-pay"><span class="quick-pay-symbol">↗</span><span><b>Быстрая оплата</b><small>${myDebts.length} ${myDebts.length === 1 ? "долг" : "долга"} · нажмите, чтобы ${state.quickPayExpanded ? "свернуть" : "развернуть"}</small></span><strong>${myDebts.length}</strong><i>${state.quickPayExpanded ? "⌃" : "⌄"}</i></button>${state.quickPayExpanded ? quickPayments : ""}</section>` : ""}
     <div class="section-head"><h2>Текущие</h2><button class="text-button" type="button" data-action="create">+ Новый</button></div>
-    ${collectionCards(active)}
+    ${collectionCards(active, true)}
     ${archived.length ? `<div class="section-head"><h2>Архив</h2></div>${collectionCards(archived)}` : ""}`;
   updateNav();
 }
@@ -289,20 +295,29 @@ function renderProfile() {
   title.textContent = "Профиль";
   tg?.BackButton?.hide();
   const user = state.bootstrap.user;
+  const methods = user.payment_methods || [];
+  const notificationLabels = {
+    notify_expenses: ["Затраты", "Новые и изменённые затраты"],
+    notify_repayments: ["Возвраты долгов", "Запросы подтверждения и результат"],
+    notify_collection_events: ["События сборов", "Участники, архив и управление"],
+    notify_reminders: ["Напоминания", "Вежливые запросы рассчитаться"],
+  };
   app.innerHTML = `
     <section class="card member-row">
-      <div class="row-between"><div><div class="row-title">${userLink(user.id, user.full_name, user.username)}</div><div class="row-note">${user.username ? `@${e(user.username)}` : `Telegram ID ${user.id}`}</div></div><span class="pill">Подключён</span></div>
+      <div class="row-between"><div><div class="row-title">${userLink(user.id, user.full_name, user.username)}</div><div class="row-note">${user.username ? `@${e(user.username)}` : `Telegram ID ${user.id}`}</div></div><button class="text-button" type="button" data-action="edit-name">Изменить имя</button></div>
     </section>
     <div class="section-head"><h2>Общая валюта баланса</h2></div>
     <section class="card member-row">
       <div class="row-note">Используется только для общего итога. Суммы внутри сборов не меняются.</div>
       <label class="field compact-field"><span>Показывать общий баланс в</span><select id="preferred-currency">${state.bootstrap.currencies.map((currency) => `<option ${currency === user.preferred_currency ? "selected" : ""}>${currency}</option>`).join("")}</select></label>
     </section>
-    <div class="section-head"><h2>Платежные данные</h2><button class="text-button" type="button" data-action="payment">Изменить</button></div>
+    <div class="section-head"><h2>Платежные данные · ${methods.length}</h2><button class="text-button" type="button" data-action="payment">${methods.length ? "Изменить" : "+ Добавить"}</button></div>
     <section class="card member-row">
       <div class="row-note">Реквизиты доступны другим пользователям только при оформлении возврата долга.</div>
-      <div class="row-title">${user.bank_name ? `${e(user.bank_name)}<br>` : ""}${e(user.payment_details || "Пока не добавлены")}</div>
+      ${methods.length ? methods.map((method) => `<div class="profile-payment"><b>${e(method.bank_name || "Способ оплаты")}</b><span>${e(method.details)}</span></div>`).join("") : '<div class="row-title">Пока не добавлены</div>'}
     </section>
+    <div class="section-head"><h2>Уведомления</h2></div>
+    <section class="card notification-preferences">${Object.entries(notificationLabels).map(([key, labels]) => `<label class="preference-row"><span><b>${labels[0]}</b><small>${labels[1]}</small></span><input class="switch-input" type="checkbox" data-notification-pref="${key}" ${user.notification_preferences?.[key] ? "checked" : ""}></label>`).join("")}</section>
     <div class="status-banner">🔒 Вход подтверждается Telegram. Пароли и отдельная регистрация не нужны.</div>`;
   updateNav();
 }
@@ -310,7 +325,7 @@ function renderProfile() {
 function quickPaymentRows(debts) {
   const mine = (debts || []).filter((debt) => debt.debtor_id === state.bootstrap.user.id);
   if (!mine.length) return "";
-  return `<div class="quick-payments">${mine.map((debt) => `<div class="quick-payment"><span><b>${userLink(debt.creditor_id, debt.creditor_name, debt.creditor_username)}</b><em>${e(debt.collection_title || "")} · ${money(debt.amount, debt.currency)}</em></span><button type="button" data-action="quick-repay" data-collection-id="${debt.collection_id}" data-creditor-id="${debt.creditor_id}">Оплатить</button></div>`).join("")}</div>`;
+  return `<div class="quick-payments">${mine.map((debt) => `<article class="quick-payment"><span class="quick-payment-avatar">${e(String(debt.creditor_name || "?").split(/\s+/).map((part) => part[0]).join("").slice(0, 2))}</span><span class="quick-payment-info"><small>Перевести</small><b>${userLink(debt.creditor_id, debt.creditor_name, debt.creditor_username)}</b><em>${e(debt.collection_title || "")}</em></span><span class="quick-payment-side"><strong>${money(debt.amount, debt.currency)}</strong><button type="button" data-action="quick-repay" data-collection-id="${debt.collection_id}" data-creditor-id="${debt.creditor_id}">Оплатить</button></span></article>`).join("")}</div>`;
 }
 
 async function renderHistory(loadKind = null) {
@@ -357,7 +372,7 @@ async function renderHistory(loadKind = null) {
     return `<article class="history-row"><div class="row-between"><div><div class="row-title history-collection-title"><span>${item.kind === "expense" ? "💸" : "🤝"}</span>${collectionTitle}</div><div class="row-note">${userLink(item.creator_id, item.creator_name, item.creator_username)} · ${shortDate(item.created_at)}</div></div><div class="amount">${money(item.amount, item.currency)}</div></div><div class="row-note">${description} ${status}</div>${shares}${actions}</article>`;
   }).join("");
   const events = data.events.map((item) => `<article class="history-row"><div class="row-title">${item.is_participant ? `<button class="collection-link" type="button" data-action="open-collection" data-id="${item.collection_id}">${e(item.collection_title)}</button>` : e(item.collection_title)}</div><div class="row-note">${shortDate(item.created_at)} · ${userLink(item.actor_id, item.actor_name, item.actor_username)} ${e(eventLabels[item.kind] || item.kind)}${item.target_name && item.target_name !== item.actor_name ? ` · ${userLink(item.target_user_id, item.target_name, item.target_username)}` : ""}</div></article>`).join("");
-  app.innerHTML = `<section class="hero"><div class="hero-label">МОИ ЗАТРАТЫ С НАЧАЛА МЕСЯЦА</div><div class="hero-value">${moneyMap(data.expense_stats.monthly_by_currency)}</div><div class="hero-meta">${data.expense_stats.monthly_count} операций</div></section><button class="statistics-button" type="button" data-action="expense-statistics"><span>📊</span><span><b>Статистика моих затрат</b><small>По валютам и сборам</small></span><i>›</i></button><div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}${data.transaction_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="transactions">Загрузить ещё</button>' : ""}<div class="section-head"><h2>История сборов</h2></div>${events ? `<div class="card">${events}</div>` : empty("🧾", "Событий пока нет")}${data.event_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="events">Загрузить ещё</button>' : ""}`;
+  app.innerHTML = `<button class="hero history-stats-trigger" type="button" data-action="expense-statistics"><span><span class="hero-label">МОИ ЗАТРАТЫ С НАЧАЛА МЕСЯЦА</span><span class="hero-value">${moneyMap(data.expense_stats.monthly_by_currency)}</span><span class="hero-meta">${data.expense_stats.monthly_count} операций · подробная статистика</span></span><i>›</i></button><div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}${data.transaction_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="transactions">Загрузить ещё</button>' : ""}<div class="section-head"><h2>История сборов</h2></div>${events ? `<div class="card">${events}</div>` : empty("🧾", "Событий пока нет")}${data.event_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="events">Загрузить ещё</button>' : ""}`;
 }
 
 function expenseStatisticsSheet() {
@@ -551,9 +566,11 @@ function repaySheet(preferredCreditorId = null) {
   const selectedIndex = Math.max(0, debts.findIndex((debt) => debt.creditor_id === Number(preferredCreditorId)));
   const cards = debts.map((debt, index) => {
     const member = data.participants.find((item) => item.id === debt.creditor_id);
-    const payment = member?.payment_details || "Получатель пока не добавил(а) платежные данные";
-    const bank = member?.bank_name ? `<span class="row-note">Банк: ${e(member.bank_name)}</span><br>` : "";
-    return `<div class="payment-card" data-payment="${debt.creditor_id}" ${index === selectedIndex ? "" : "hidden"}><div class="payment-card-head"><b>💳 Данные для перевода · ${userLink(member?.id, member?.full_name, member?.username)}</b></div>${bank}<div class="payment-value-row"><span class="payment-value">${e(payment)}</span><button class="copy-payment" type="button" data-action="copy-payment" data-value="${encodeURIComponent(payment)}">Копировать</button></div></div>`;
+    const methods = member?.payment_methods?.length
+      ? member.payment_methods
+      : member?.payment_details ? [{ bank_name: member.bank_name, details: member.payment_details }] : [];
+    const methodRows = methods.length ? methods.map((method) => `<div class="repay-method">${method.bank_name ? `<span class="row-note">Банк: ${e(method.bank_name)}</span>` : ""}<div class="payment-value-row"><span class="payment-value">${e(method.details)}</span><button class="copy-payment" type="button" data-action="copy-payment" data-value="${encodeURIComponent(method.details)}">Копировать</button></div></div>`).join("") : '<span class="row-note">Получатель пока не добавил(а) платежные данные</span>';
+    return `<div class="payment-card" data-payment="${debt.creditor_id}" ${index === selectedIndex ? "" : "hidden"}><div class="payment-card-head"><b>💳 Данные для перевода · ${userLink(member?.id, member?.full_name, member?.username)}</b></div>${methodRows}</div>`;
   }).join("");
   showSheet(`<h2>Вернуть долг</h2><p class="sheet-intro">После записи получатель должен(а) подтвердить деньги. До этого баланс не изменится.</p><form id="repay-form"><label class="field"><span>Получатель</span><select name="creditor_id" data-action="repay-creditor">${debts.map((debt, index) => `<option value="${debt.creditor_id}" data-max="${debt.repayable_amount}" ${index === selectedIndex ? "selected" : ""}>${e(debt.creditor_name)} · доступно ${money(debt.repayable_amount, data.collection.currency)}</option>`).join("")}</select></label>${cards}<label class="field"><span>Переведено · ${e(data.collection.currency)}</span><span class="amount-input"><input name="amount" inputmode="decimal" placeholder="0,00" required><button type="button" data-action="repay-max">MAX</button></span></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" placeholder="Необязательно"></label><div class="sheet-actions"><button class="primary-button" type="submit">Отправить на подтверждение</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
@@ -592,7 +609,17 @@ function editSheet(transactionId, collectionData = state.collection, returnTo = 
 }
 
 function paymentSheet() {
-  showSheet(`<h2>Платежные данные</h2><p class="sheet-intro">Например, телефон СБП или последние цифры карты. Не указывайте секретные коды.</p><form id="payment-form"><label class="field"><span>Банк</span><input name="bank_name" maxlength="100" placeholder="Например, Альфа-Банк" value="${e(state.bootstrap.user.bank_name)}"></label><label class="field"><span>Реквизиты</span><textarea name="payment_details" maxlength="500" placeholder="Можно оставить пустым">${e(state.bootstrap.user.payment_details)}</textarea></label><div class="sheet-actions"><button class="primary-button" type="submit">Сохранить</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+  const methods = state.bootstrap.user.payment_methods || [];
+  const rows = (methods.length ? methods : [{ bank_name: "", details: "" }]).map((method) => paymentMethodEditor(method)).join("");
+  showSheet(`<h2>Платежные данные</h2><p class="sheet-intro">Добавьте несколько удобных способов. Номер карты и другие реквизиты видны только на экране возврата долга.</p><form id="payment-form"><div id="payment-method-editors">${rows}</div><button class="add-method-button" type="button" data-action="add-payment-method">+ Ещё способ оплаты</button><div class="sheet-actions"><button class="primary-button" type="submit">Сохранить</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+}
+
+function paymentMethodEditor(method = {}) {
+  return `<div class="payment-method-editor"><button type="button" class="remove-method" data-action="remove-payment-method" aria-label="Удалить">×</button><label class="field"><span>Банк</span><input name="method_bank" maxlength="100" placeholder="Например, Альфа-Банк" value="${e(method.bank_name || "")}"></label><label class="field"><span>Реквизиты</span><textarea name="method_details" maxlength="500" placeholder="Телефон СБП или номер карты">${e(method.details || "")}</textarea></label></div>`;
+}
+
+function nameSheet() {
+  showSheet(`<h2>Ваше имя</h2><p class="sheet-intro">Так вас будут видеть участники сборов.</p><form id="name-form"><label class="field"><span>Имя</span><input name="full_name" minlength="2" maxlength="80" value="${e(state.bootstrap.user.full_name)}" required></label><div class="sheet-actions"><button class="primary-button" type="submit">Сохранить</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
 
 function memberActionSheet(type) {
@@ -693,6 +720,11 @@ app.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-action]");
   if (!target || state.busy) return;
   const action = target.dataset.action;
+  const revealedSwipe = target.closest(".collection-swipe-row.revealed");
+  if (revealedSwipe && action === "open-collection") {
+    revealedSwipe.classList.remove("revealed");
+    return;
+  }
   try {
     if (action === "open-user") {
       openTelegramUser(target);
@@ -702,6 +734,19 @@ app.addEventListener("click", async (event) => {
       rememberView("balance");
       state.balanceMode = "personal";
       return await renderBalance();
+    }
+    if (action === "toggle-quick-pay") {
+      state.quickPayExpanded = !state.quickPayExpanded;
+      haptic();
+      return await renderCollections();
+    }
+    if (action === "swipe-archive") {
+      if (!await confirmAction("Завершить сбор и отправить его в архив на 30 дней?")) return;
+      setBusy(target, true);
+      const result = await api(`/api/collections/${target.dataset.id}/archive`, { method: "POST", body: "{}" });
+      reportToast(result, "Сбор в архиве");
+      await reloadBootstrap();
+      return await renderCollections();
     }
     if (action === "quick-repay") {
       await openCollection(target.dataset.collectionId, "history", true);
@@ -765,6 +810,7 @@ app.addEventListener("click", async (event) => {
       return await refreshCurrent(state.collectionTab);
     }
     if (action === "payment") return paymentSheet();
+    if (action === "edit-name") return nameSheet();
     if (action === "toggle-notifications") {
       const enabled = target.dataset.enabled === "true";
       if (!enabled && !await requestWritePermission()) {
@@ -848,6 +894,25 @@ app.addEventListener("click", async (event) => {
 });
 
 app.addEventListener("change", async (event) => {
+  if (event.target.dataset.notificationPref && !state.busy) {
+    const preferences = {};
+    app.querySelectorAll("[data-notification-pref]").forEach((input) => {
+      preferences[input.dataset.notificationPref] = input.checked;
+    });
+    try {
+      state.busy = true;
+      await api("/api/me/notifications", { method: "PATCH", body: JSON.stringify(preferences) });
+      state.bootstrap.user.notification_preferences = preferences;
+      haptic();
+      toast("Настройки уведомлений сохранены");
+    } catch (error) {
+      event.target.checked = !event.target.checked;
+      toast(error.message, true);
+    } finally {
+      state.busy = false;
+    }
+    return;
+  }
   if (event.target.id !== "preferred-currency" || state.busy) return;
   try {
     state.busy = true;
@@ -874,6 +939,18 @@ sheet.addEventListener("click", async (event) => {
     return;
   }
   if (target.dataset.action === "close-sheet") closeSheet();
+  if (target.dataset.action === "add-payment-method") {
+    const container = sheet.querySelector("#payment-method-editors");
+    if (container.children.length >= 10) return toast("Можно добавить не более 10 способов", true);
+    container.insertAdjacentHTML("beforeend", paymentMethodEditor());
+    haptic();
+    return;
+  }
+  if (target.dataset.action === "remove-payment-method") {
+    target.closest(".payment-method-editor")?.remove();
+    haptic();
+    return;
+  }
   if (target.dataset.action === "share-created") {
     const collection = state.collection?.collection;
     if (collection) await shareCollection(collection);
@@ -978,8 +1055,15 @@ sheet.addEventListener("submit", async (event) => {
       return await refreshCurrent("history");
     }
     if (form.id === "payment-form") {
-      await api("/api/me/payment", { method: "PATCH", body: JSON.stringify({ bank_name: values.get("bank_name"), payment_details: values.get("payment_details") }) });
+      const banks = values.getAll("method_bank");
+      const details = values.getAll("method_details");
+      const paymentMethods = details.map((value, index) => ({ bank_name: banks[index] || "", details: value })).filter((method) => method.details.trim());
+      await api("/api/me/payment-methods", { method: "PUT", body: JSON.stringify({ payment_methods: paymentMethods }) });
       closeSheet(); haptic(); toast("Платежные данные сохранены"); await reloadBootstrap(); return renderProfile();
+    }
+    if (form.id === "name-form") {
+      await api("/api/me/name", { method: "PATCH", body: JSON.stringify({ full_name: values.get("full_name") }) });
+      closeSheet(); haptic(); toast("Имя сохранено"); await reloadBootstrap(); return renderProfile();
     }
     if (form.id === "member-action-form") {
       const type = form.dataset.type;
@@ -1013,6 +1097,38 @@ avatar.addEventListener("click", () => {
 });
 document.getElementById("sheet-backdrop").addEventListener("click", closeSheet);
 tg?.BackButton?.onClick(() => navigateBack(true));
+
+app.addEventListener("touchstart", (event) => {
+  const row = event.target.closest(".collection-swipe-row");
+  const touch = event.changedTouches[0];
+  if (!row || !touch || event.target.closest("button.swipe-archive-action")) return;
+  state.collectionSwipe = { row, x: touch.clientX, y: touch.clientY };
+}, { passive: true });
+
+app.addEventListener("touchmove", (event) => {
+  const start = state.collectionSwipe;
+  const touch = event.changedTouches[0];
+  if (!start || !touch) return;
+  const dx = touch.clientX - start.x;
+  const dy = Math.abs(touch.clientY - start.y);
+  if (dy > Math.abs(dx)) return;
+  const offset = Math.max(-92, Math.min(0, dx));
+  start.row.style.setProperty("--swipe-x", `${offset}px`);
+}, { passive: true });
+
+app.addEventListener("touchend", (event) => {
+  const start = state.collectionSwipe;
+  state.collectionSwipe = null;
+  if (!start) return;
+  const touch = event.changedTouches[0];
+  const reveal = touch && touch.clientX - start.x < -54;
+  app.querySelectorAll(".collection-swipe-row.revealed").forEach((row) => {
+    if (row !== start.row) row.classList.remove("revealed");
+  });
+  start.row.classList.toggle("revealed", Boolean(reveal));
+  start.row.style.removeProperty("--swipe-x");
+  if (reveal) haptic();
+}, { passive: true });
 
 document.addEventListener("touchstart", (event) => {
   const touch = event.changedTouches[0];

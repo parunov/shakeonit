@@ -21,7 +21,7 @@ def main_menu() -> ReplyKeyboardMarkup:
         keyboard=[[app]],
         resize_keyboard=True,
         is_persistent=True,
-        input_field_placeholder="Открыть приложение ShakeOnIt",
+        input_field_placeholder="Открыть приложение «По рукам»",
     )
 
 

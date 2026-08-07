@@ -18,9 +18,27 @@ CREATE TABLE IF NOT EXISTS users (
     bank_name TEXT NOT NULL DEFAULT '',
     preferred_currency TEXT NOT NULL DEFAULT 'BYN',
     private_started INTEGER NOT NULL DEFAULT 0 CHECK (private_started IN (0, 1)),
+    name_customized INTEGER NOT NULL DEFAULT 0 CHECK (name_customized IN (0, 1)),
+    notify_expenses INTEGER NOT NULL DEFAULT 1 CHECK (notify_expenses IN (0, 1)),
+    notify_repayments INTEGER NOT NULL DEFAULT 1 CHECK (notify_repayments IN (0, 1)),
+    notify_collection_events INTEGER NOT NULL DEFAULT 1 CHECK (notify_collection_events IN (0, 1)),
+    notify_reminders INTEGER NOT NULL DEFAULT 1 CHECK (notify_reminders IN (0, 1)),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS payment_methods (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    bank_name TEXT NOT NULL DEFAULT '',
+    details TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_payment_methods_user
+ON payment_methods(user_id, position, id);
 
 CREATE TABLE IF NOT EXISTS collections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -163,6 +181,27 @@ class Database:
                 await connection.execute(
                     "ALTER TABLE users ADD COLUMN bank_name TEXT NOT NULL DEFAULT ''"
                 )
+            user_migrations = {
+                "name_customized": "INTEGER NOT NULL DEFAULT 0",
+                "notify_expenses": "INTEGER NOT NULL DEFAULT 1",
+                "notify_repayments": "INTEGER NOT NULL DEFAULT 1",
+                "notify_collection_events": "INTEGER NOT NULL DEFAULT 1",
+                "notify_reminders": "INTEGER NOT NULL DEFAULT 1",
+            }
+            for column_name, definition in user_migrations.items():
+                if column_name not in user_column_names:
+                    await connection.execute(
+                        f"ALTER TABLE users ADD COLUMN {column_name} {definition}"
+                    )
+            await connection.execute(
+                """
+                INSERT INTO payment_methods(user_id,bank_name,details,position)
+                SELECT u.id,u.bank_name,u.payment_details,0 FROM users u
+                WHERE TRIM(u.payment_details)<>'' AND NOT EXISTS (
+                    SELECT 1 FROM payment_methods pm WHERE pm.user_id=u.id
+                )
+                """
+            )
             transaction_columns = await connection.execute_fetchall(
                 "PRAGMA table_info(transactions)"
             )

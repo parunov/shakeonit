@@ -8,14 +8,24 @@ from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand, FSInputFile, MenuButtonWebApp, WebAppInfo
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.types import (
+    BotCommand,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    MenuButtonWebApp,
+    WebAppInfo,
+)
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
 from .config import Settings
 from .db import Database
 from .handlers import router
+from .links import group_start_param
 from .service import BudgetService
 from .webapp import setup_webapp_routes
 
@@ -26,6 +36,54 @@ async def archive_cleanup(service: BudgetService) -> None:
         expired = await service.expire_archives()
         if expired:
             logging.getLogger(__name__).info("Permanently closed %s expired archives", expired)
+
+
+async def refresh_group_launchers(bot: Bot, service: BudgetService, settings: Settings) -> None:
+    """Keep a privacy-mode-safe launch button in every known Telegram group."""
+    if not settings.webapp_url:
+        return
+    username = settings.bot_username.lstrip("@")
+    for chat_id in await service.list_known_group_chat_ids():
+        start_param = group_start_param(chat_id, settings.bot_token)
+        url = (
+            f"https://t.me/{username}?startapp={start_param}&mode=compact"
+            if settings.main_app_enabled
+            else f"https://t.me/{username}?start=app"
+        )
+        text = "📱 Все сборы этой группы — в приложении «По рукам»."
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="📱 Открыть приложение", url=url)]]
+        )
+        previous_id = await service.take_bot_message(chat_id, "app_link")
+        if previous_id is not None:
+            try:
+                await bot.edit_message_text(
+                    text,
+                    chat_id=chat_id,
+                    message_id=previous_id,
+                    reply_markup=markup,
+                    request_timeout=5,
+                )
+                await service.replace_bot_message(chat_id, "app_link", previous_id)
+                continue
+            except TelegramBadRequest as exc:
+                if "message is not modified" in str(exc):
+                    await service.replace_bot_message(chat_id, "app_link", previous_id)
+                    continue
+                logging.getLogger(__name__).info(
+                    "Could not refresh app launcher %s in chat %s", previous_id, chat_id
+                )
+            except TelegramAPIError:
+                logging.getLogger(__name__).info(
+                    "Could not refresh app launcher %s in chat %s", previous_id, chat_id
+                )
+        try:
+            sent = await bot.send_message(chat_id, text, reply_markup=markup, request_timeout=5)
+            await service.replace_bot_message(chat_id, "app_link", sent.message_id)
+        except TelegramAPIError:
+            logging.getLogger(__name__).warning(
+                "Could not install app launcher in chat %s", chat_id, exc_info=True
+            )
 
 
 async def health(_: web.Request) -> web.Response:
@@ -106,7 +164,11 @@ async def main() -> None:
     if expired:
         logging.getLogger(__name__).info("Permanently closed %s expired archives", expired)
 
-    bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = Bot(
+        settings.bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        session=AiohttpSession(timeout=10),
+    )
     bot_user = await bot.me()
     settings.main_app_enabled = bool(bot_user.has_main_web_app)
     dispatcher = Dispatcher(service=service, settings=settings)
@@ -124,6 +186,7 @@ async def main() -> None:
             )
         )
     cleanup_task = asyncio.create_task(archive_cleanup(service))
+    launcher_task = asyncio.create_task(refresh_group_launchers(bot, service, settings))
     try:
         if settings.webhook_url:
             await start_webhook(bot, dispatcher, service, settings)
@@ -134,8 +197,11 @@ async def main() -> None:
             await dispatcher.start_polling(bot)
     finally:
         cleanup_task.cancel()
+        launcher_task.cancel()
         with suppress(asyncio.CancelledError):
             await cleanup_task
+        with suppress(asyncio.CancelledError):
+            await launcher_task
         await bot.session.close()
 
 

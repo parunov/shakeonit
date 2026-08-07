@@ -60,13 +60,14 @@ class BudgetService:
         async with self.db.connect() as connection:
             existing = await _fetchone(
                 connection,
-                "SELECT username,full_name,private_started FROM users WHERE id=?",
+                "SELECT username,full_name,private_started,name_customized FROM users WHERE id=?",
                 (user_id,),
             )
             if existing is not None:
+                stored_name = existing["full_name"] if existing["name_customized"] else full_name
                 if (
                     existing["username"] == normalized_username
-                    and existing["full_name"] == full_name
+                    and existing["full_name"] == stored_name
                     and (existing["private_started"] or not private_started)
                 ):
                     return False
@@ -76,7 +77,7 @@ class BudgetService:
                         private_started=MAX(private_started,?),updated_at=CURRENT_TIMESTAMP
                     WHERE id=?
                     """,
-                    (normalized_username, full_name, int(private_started), user_id),
+                    (normalized_username, stored_name, int(private_started), user_id),
                 )
             else:
                 await connection.execute(
@@ -172,6 +173,114 @@ class BudgetService:
         async with self.db.connect() as connection:
             return await _fetchone(connection, "SELECT * FROM users WHERE id=?", (user_id,))
 
+    async def set_display_name(self, user_id: int, full_name: str) -> None:
+        full_name = " ".join(full_name.split())
+        if not 2 <= len(full_name) <= 80:
+            raise DomainError("Имя должно содержать от 2 до 80 символов")
+        async with self.db.connect() as connection:
+            await connection.execute(
+                """
+                UPDATE users SET full_name=?,name_customized=1,updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                """,
+                (full_name, user_id),
+            )
+            await connection.commit()
+
+    async def list_payment_methods(self, user_id: int):
+        async with self.db.connect() as connection:
+            return await connection.execute_fetchall(
+                """
+                SELECT id,bank_name,details,position FROM payment_methods
+                WHERE user_id=? ORDER BY position,id
+                """,
+                (user_id,),
+            )
+
+    async def payment_methods_for_users(self, user_ids: Iterable[int]) -> dict[int, list[dict]]:
+        ids = sorted(set(int(user_id) for user_id in user_ids))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        async with self.db.connect() as connection:
+            rows = await connection.execute_fetchall(
+                f"""
+                SELECT id,user_id,bank_name,details,position FROM payment_methods
+                WHERE user_id IN ({placeholders}) ORDER BY user_id,position,id
+                """,
+                ids,
+            )
+        result: dict[int, list[dict]] = {user_id: [] for user_id in ids}
+        for row in rows:
+            result[row["user_id"]].append(dict(row))
+        return result
+
+    async def replace_payment_methods(self, user_id: int, methods: list[dict]) -> None:
+        if len(methods) > 10:
+            raise DomainError("Можно добавить не более 10 способов оплаты")
+        cleaned: list[tuple[str, str, int]] = []
+        for position, method in enumerate(methods):
+            if not isinstance(method, dict):
+                raise DomainError("Некорректные платежные данные")
+            bank_name = str(method.get("bank_name", "")).strip()
+            details = str(method.get("details", "")).strip()
+            if not details:
+                continue
+            if len(bank_name) > 100 or len(details) > 500:
+                raise DomainError("Проверьте длину платежных данных")
+            cleaned.append((bank_name, details, position))
+        async with self.db.connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            await connection.execute("DELETE FROM payment_methods WHERE user_id=?", (user_id,))
+            await connection.executemany(
+                """
+                INSERT INTO payment_methods(user_id,bank_name,details,position)
+                VALUES (?,?,?,?)
+                """,
+                [(user_id, bank_name, details, position) for bank_name, details, position in cleaned],
+            )
+            primary_bank, primary_details = (cleaned[0][0], cleaned[0][1]) if cleaned else ("", "")
+            await connection.execute(
+                """
+                UPDATE users SET bank_name=?,payment_details=?,updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                """,
+                (primary_bank, primary_details, user_id),
+            )
+            await connection.commit()
+
+    async def set_notification_preferences(self, user_id: int, preferences: dict) -> None:
+        fields = (
+            "notify_expenses",
+            "notify_repayments",
+            "notify_collection_events",
+            "notify_reminders",
+        )
+        if set(preferences) != set(fields) or any(
+            not isinstance(preferences[field], bool) for field in fields
+        ):
+            raise DomainError("Некорректные настройки уведомлений")
+        async with self.db.connect() as connection:
+            await connection.execute(
+                """
+                UPDATE users SET notify_expenses=?,notify_repayments=?,
+                    notify_collection_events=?,notify_reminders=?,updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                """,
+                (*(int(preferences[field]) for field in fields), user_id),
+            )
+            await connection.commit()
+
+    async def notification_enabled_for_user(self, user_id: int, category: str) -> bool:
+        allowed = {"expenses", "repayments", "collection_events", "reminders"}
+        if category not in allowed:
+            raise ValueError(f"Unknown notification category: {category}")
+        async with self.db.connect() as connection:
+            row = await _fetchone(
+                connection, f"SELECT notify_{category} enabled FROM users WHERE id=?", (user_id,)
+            )
+        return bool(row and row["enabled"])
+
     async def get_shared_collection_user(self, requester_id: int, target_id: int):
         """Return a user only when both people occur in at least one collection."""
         async with self.db.connect() as connection:
@@ -197,21 +306,12 @@ class BudgetService:
             raise DomainError("Платежные данные не должны быть длиннее 500 символов")
         if bank_name is not None and len(bank_name) > 100:
             raise DomainError("Название банка не должно быть длиннее 100 символов")
-        async with self.db.connect() as connection:
-            if bank_name is None:
-                await connection.execute(
-                    "UPDATE users SET payment_details=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (details.strip(), user_id),
-                )
-            else:
-                await connection.execute(
-                    """
-                    UPDATE users SET payment_details=?,bank_name=?,updated_at=CURRENT_TIMESTAMP
-                    WHERE id=?
-                    """,
-                    (details.strip(), bank_name.strip(), user_id),
-                )
-            await connection.commit()
+        current = await self.get_user(user_id)
+        effective_bank = current["bank_name"] if bank_name is None and current else (bank_name or "")
+        await self.replace_payment_methods(
+            user_id,
+            [{"bank_name": effective_bank, "details": details}] if details.strip() else [],
+        )
 
     async def set_preferred_currency(self, user_id: int, currency: str) -> None:
         if currency not in CURRENCIES:
@@ -461,17 +561,34 @@ class BudgetService:
             )
             await connection.commit()
 
-    async def notification_subscribers(self, collection_id: int):
+    async def notification_subscribers(
+        self, collection_id: int, category: str = "collection_events"
+    ):
+        allowed = {"expenses", "repayments", "collection_events", "reminders"}
+        if category not in allowed:
+            raise ValueError(f"Unknown notification category: {category}")
         async with self.db.connect() as connection:
             return await connection.execute_fetchall(
-                """
+                f"""
                 SELECT p.user_id,u.full_name FROM participants p
                 JOIN users u ON u.id=p.user_id
                 WHERE p.collection_id=? AND p.active=1 AND p.notifications_enabled=1
+                  AND u.notify_{category}=1
                 ORDER BY p.user_id
                 """,
                 (collection_id,),
             )
+
+    async def list_known_group_chat_ids(self) -> list[int]:
+        async with self.db.connect() as connection:
+            rows = await connection.execute_fetchall(
+                """
+                SELECT DISTINCT chat_id FROM collections WHERE chat_id<0
+                UNION SELECT DISTINCT chat_id FROM user_chats WHERE chat_id<0
+                ORDER BY chat_id
+                """
+            )
+        return [row["chat_id"] for row in rows]
 
     async def list_participants(self, collection_id: int):
         async with self.db.connect() as connection:

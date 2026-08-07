@@ -23,6 +23,7 @@ async def test_collection_event_reaches_group_and_private_subscribers():
         collection,
         "Статус обновлён",
         exclude_user_ids={1},
+        category="expenses",
     )
 
     assert group_sent is True
@@ -32,6 +33,7 @@ async def test_collection_event_reaches_group_and_private_subscribers():
     assert all(
         "startapp=collection_" not in call.args[1] for call in bot.send_message.await_args_list
     )
+    service.notification_subscribers.assert_awaited_once_with(7, "expenses")
 
 
 @pytest.mark.asyncio

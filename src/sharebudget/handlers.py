@@ -37,7 +37,7 @@ from .keyboards import (
 )
 from .links import group_start_param
 from .money import format_money, parse_amount
-from .notifications import replace_repayment_prompt, report_collection_event
+from .notifications import replace_repayment_prompt, report_collection_event, send_with_retry
 from .render import (
     collection_text,
     history_text,
@@ -74,7 +74,7 @@ HELP_TEXT = """<b>❓ Помощь</b>
 
 TUTORIAL_TEXT = """<b>🎓 Как пользоваться ShareBudget</b>
 
-1. Добавьте бота в Telegram-группу и откройте приложение ShakeOnIt.
+1. Добавьте бота в Telegram-группу и откройте приложение «По рукам».
 2. Назовите событие и выберите BYN, RUB, EUR или USD.
 3. Новый пользователь нажимает «Участвовать в сборе» прямо в группе. Telegram ID регистрируется автоматически, без личного чата и отдельного входа.
 4. После подключения участника можно выбрать при добавлении затраты.
@@ -87,7 +87,7 @@ TUTORIAL_TEXT = """<b>🎓 Как пользоваться ShareBudget</b>
 
 Администратор может отменять и редактировать любые транзакции, удалять неиспользованных участников, передавать роль и завершать сбор. Восстановить сбор из архива можно 30 дней."""
 
-MENTION_HINT = """⚡ <b>Быстрая затрата в ShakeOnIt</b>
+MENTION_HINT = """⚡ <b>Быстрая затрата в «По рукам»</b>
 
 Отправьте в группе:
 <code>/expense@ShakeOnIt_bot 40 @ivan @maxim билеты</code>
@@ -167,7 +167,7 @@ async def collection_markup(
         ChatType.GROUP,
         ChatType.SUPERGROUP,
     ):
-        bot_user = await message.bot.get_me()
+        bot_user = await message.bot.get_me(request_timeout=5)
         app_url = (
             f"https://t.me/{bot_user.username}?startapp=collection_{collection['id']}&mode=compact"
             if bot_user.has_main_web_app
@@ -208,7 +208,7 @@ async def start(
     private_menu = main_menu()
     if command.args == "app" and message.chat.type == ChatType.PRIVATE and settings.webapp_url:
         await message.answer(
-            "✅ <b>ShakeOnIt готов</b>\n\nОткройте приложение — вход уже подтвержден Telegram.",
+            "✅ <b>«По рукам» готово</b>\n\nОткройте приложение — вход уже подтвержден Telegram.",
             reply_markup=app_launch_markup(settings),
             parse_mode=ParseMode.HTML,
         )
@@ -277,7 +277,7 @@ async def start(
             )
         return
     await message.answer(
-        "👋 <b>Добро пожаловать в ShakeOnIt</b>\n\n"
+        "👋 <b>Добро пожаловать в «По рукам»</b>\n\n"
         "Здесь не нужны логин, пароль или отдельная регистрация — Telegram уже безопасно "
         "подтвердил ваш профиль.\n\n"
         "📱 Все сборы, балансы, возвраты и история находятся в приложении.\n"
@@ -288,7 +288,7 @@ async def start(
     )
     if settings.webapp_url and message.chat.type == ChatType.PRIVATE:
         await message.answer(
-            "📱 Или откройте полный интерфейс ShakeOnIt:",
+            "📱 Или откройте полный интерфейс «По рукам»:",
             reply_markup=app_launch_markup(settings),
         )
 
@@ -344,11 +344,11 @@ async def open_webapp(message: Message, settings: Settings, service: BudgetServi
         if settings.main_app_enabled:
             chat_param = group_start_param(message.chat.id, settings.bot_token)
             app_url = f"https://t.me/{username}?startapp={chat_param}&mode=compact"
-            text = "📱 Откройте сборы этой группы прямо в ShakeOnIt."
+            text = "📱 Откройте сборы этой группы прямо в приложении «По рукам»."
             button_text = "📱 Запустить приложение"
         else:
             app_url = f"https://t.me/{username}?start=app"
-            text = "📱 Перейдите в личный чат и откройте защищённую кнопку ShakeOnIt."
+            text = "📱 Перейдите в личный чат и откройте защищённую кнопку приложения."
             button_text = "📱 Перейти к приложению"
         sent_message = await message.answer(
             text,
@@ -360,7 +360,7 @@ async def open_webapp(message: Message, settings: Settings, service: BudgetServi
         )
     else:
         sent_message = await message.answer(
-            "📱 <b>ShakeOnIt</b> — все сборы и операции в одном спокойном интерфейсе.",
+            "📱 <b>Все сборы в одном удобном приложении</b>",
             reply_markup=app_launch_markup(settings),
             parse_mode=ParseMode.HTML,
         )
@@ -372,7 +372,9 @@ async def open_webapp(message: Message, settings: Settings, service: BudgetServi
         )
         if previous_message_id is not None:
             try:
-                await message.bot.delete_message(message.chat.id, previous_message_id)
+                await message.bot.delete_message(
+                    message.chat.id, previous_message_id, request_timeout=5
+                )
             except TelegramAPIError:
                 LOGGER.info(
                     "Could not delete previous app link %s in chat %s",
@@ -402,7 +404,7 @@ async def remember_shared_chat(message: Message, service: BudgetService) -> None
 
 @router.my_chat_member()
 async def remember_group_when_bot_is_added(
-    event: ChatMemberUpdated, service: BudgetService
+    event: ChatMemberUpdated, service: BudgetService, settings: Settings
 ) -> None:
     if event.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
@@ -422,12 +424,15 @@ async def remember_group_when_bot_is_added(
         event.chat.id,
         event.chat.title or "Telegram-группа",
     )
-    await event.bot.send_message(
+    chat_param = group_start_param(event.chat.id, settings.bot_token)
+    sent_message = await event.bot.send_message(
         event.chat.id,
-        "👋 <b>ShakeOnIt добавлен</b>\n\nГруппа готова. Откройте Mini App или "
-        "используйте /new, чтобы создать первый сбор.",
-        reply_markup=main_menu(),
+        "👋 <b>«По рукам» добавлено</b>\n\nГруппа готова. Открывайте приложение "
+        "по кнопке ниже — она работает при включённом Privacy Mode.",
+        reply_markup=app_launch_markup(settings, chat_param, "📱 Открыть приложение", in_group=True),
+        request_timeout=5,
     )
+    await service.replace_bot_message(event.chat.id, "app_link", sent_message.message_id)
 
 
 @router.message(Command("new"))
@@ -468,7 +473,9 @@ async def new_collection(
             )
             if previous_message_id is not None:
                 try:
-                    await message.bot.delete_message(message.chat.id, previous_message_id)
+                    await message.bot.delete_message(
+                        message.chat.id, previous_message_id, request_timeout=5
+                    )
                 except TelegramAPIError:
                     LOGGER.info(
                         "Could not delete previous collection prompt %s in chat %s",
@@ -708,6 +715,7 @@ async def expense_comment(message: Message, state: FSMContext, service: BudgetSe
         f"<b>{format_money(data['amount'], collection['currency'])}</b>"
         f" · {escape(comment) if comment else 'без комментария'}.",
         exclude_user_ids={message.from_user.id},
+        category="expenses",
     )
     await state.clear()
     await message.answer(
@@ -824,25 +832,30 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
         f"<b>{format_money(amount, collection['currency'])}</b>. "
         "Баланс изменится после подтверждения получателем.",
         exclude_user_ids={message.from_user.id, data["creditor_id"]},
+        category="repayments",
     )
-    try:
-        confirmation_message = await message.bot.send_message(
-            data["creditor_id"],
-            "🤝 <b>Подтвердите получение</b>\n\n"
-            f"От: {event_user_link(message.from_user)}\n"
-            f"Сумма: <b>{format_money(amount, collection['currency'])}</b>\n"
-            f"Сбор: <b>«{escape(collection['title'])}»</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=confirm_markup,
-        )
-        await service.set_repayment_confirmation_message(
-            transaction_id, confirmation_message.message_id
-        )
-    except TelegramAPIError:
-        await message.answer(
-            "ℹ️ Не удалось отправить личное уведомление получателю. Он сможет подтвердить "
-            "возврат в истории сбора."
-        )
+    if await service.notification_enabled_for_user(data["creditor_id"], "repayments"):
+        try:
+            confirmation_message = await send_with_retry(
+                lambda: message.bot.send_message(
+                    data["creditor_id"],
+                    "🤝 <b>Подтвердите получение</b>\n\n"
+                    f"От: {event_user_link(message.from_user)}\n"
+                    f"Сумма: <b>{format_money(amount, collection['currency'])}</b>\n"
+                    f"Сбор: <b>«{escape(collection['title'])}»</b>",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=confirm_markup,
+                    request_timeout=5,
+                )
+            )
+            await service.set_repayment_confirmation_message(
+                transaction_id, confirmation_message.message_id
+            )
+        except TelegramAPIError:
+            await message.answer(
+                "ℹ️ Не удалось отправить личное уведомление получателю. Он сможет подтвердить "
+                "возврат в истории сбора."
+            )
     await message.answer(
         await collection_text(service, collection),
         reply_markup=await collection_markup(
@@ -874,10 +887,12 @@ async def repayment_confirm(callback: CallbackQuery, service: BudgetService) -> 
         f"{telegram_user_link(sender['id'], sender['full_name'], sender['username'])}: "
         f"<b>{format_money(transaction['amount'], collection['currency'])}</b>.{comment_line}",
         exclude_user_ids={callback.from_user.id},
+        category="repayments",
     )
     final_text = (
         "✅ <b>Получение подтверждено</b>\n\n"
         f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
+        f"Кому: {event_user_link(callback.from_user)}\n"
         f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
         f"Сбор: <b>«{escape(collection['title'])}»</b>"
         f"{comment_detail}"
@@ -985,6 +1000,7 @@ async def transaction_cancel_prompt(callback: CallbackQuery, service: BudgetServ
 @router.callback_query(F.data.startswith("txcancelyes:"))
 async def transaction_cancel(callback: CallbackQuery, service: BudgetService) -> None:
     transaction_id = int(callback.data.split(":")[1])
+    transaction = await service.transaction(transaction_id)
     collection_id = await service.cancel_transaction(transaction_id, callback.from_user.id)
     collection = await service.get_collection(collection_id)
     await report_collection_event(
@@ -994,6 +1010,7 @@ async def transaction_cancel(callback: CallbackQuery, service: BudgetService) ->
         f"↩️ {event_user_link(callback.from_user)} отменил(а) транзакцию #{transaction_id}. "
         "Балансы пересчитаны.",
         exclude_user_ids={callback.from_user.id},
+        category="expenses" if transaction["kind"] == "expense" else "repayments",
     )
     await callback.answer("Транзакция отменена", show_alert=True)
     await show_collection(callback.message, collection_id, callback.from_user.id, service)
@@ -1066,6 +1083,7 @@ async def transaction_edit_comment(
             actor_username=message.from_user.username,
         ),
         exclude_user_ids={message.from_user.id},
+        category="expenses" if before["kind"] == "expense" else "repayments",
     )
     await message.answer(
         await collection_text(service, collection),
@@ -1098,6 +1116,7 @@ async def repayment_reject(callback: CallbackQuery, service: BudgetService) -> N
         f"{telegram_user_link(sender['id'], sender['full_name'], sender['username'])}: "
         f"<b>{format_money(transaction['amount'], collection['currency'])}</b>.{comment_line}",
         exclude_user_ids={callback.from_user.id},
+        category="repayments",
     )
     final_text = (
         "❌ <b>Получение отклонено</b>\n\n"
@@ -1417,6 +1436,7 @@ async def quick_expense(
         f"<b>{format_money(amount, collection['currency'])}</b> · "
         f"{' '.join(escape(token) for token in comment_tokens) or 'без комментария'}.",
         exclude_user_ids={actor_id},
+        category="expenses",
     )
     await message.reply(
         f"✅ Затрата #{transaction_id} добавлена в <b>«{escape(collection['title'])}»</b>: "
@@ -1446,7 +1466,7 @@ async def quick_expense_collection(
 
 @router.inline_query()
 async def inline_hint(inline_query: InlineQuery) -> None:
-    bot_user = await inline_query.bot.get_me()
+    bot_user = await inline_query.bot.get_me(request_timeout=5)
     app_url = (
         f"https://t.me/{bot_user.username}?startapp=home&mode=compact"
         if bot_user.has_main_web_app
@@ -1456,7 +1476,7 @@ async def inline_hint(inline_query: InlineQuery) -> None:
         results=[
             InlineQueryResultArticle(
                 id="shakeonit_help_v1",
-                title="💡 Подсказка ShakeOnIt",
+                title="💡 Подсказка «По рукам»",
                 description="Как начать, вступить в сбор и добавить затрату",
                 input_message_content=InputTextMessageContent(
                     message_text=MENTION_HINT,

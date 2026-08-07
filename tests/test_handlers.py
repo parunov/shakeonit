@@ -11,6 +11,7 @@ from sharebudget.handlers import (
     join_collection,
     new_collection,
     open_webapp,
+    remember_group_when_bot_is_added,
     start,
     unknown_action,
 )
@@ -182,6 +183,34 @@ async def test_open_app_button_returns_group_scoped_main_app_link_and_removes_pr
     assert button.text == "📱 Запустить приложение"
     assert button.url.startswith("https://t.me/ShakeOnIt_bot?startapp=chat_n100500_")
     assert button.url.endswith("&mode=compact")
-    bot.delete_message.assert_awaited_once_with(-100500, 20)
+    bot.delete_message.assert_awaited_once_with(-100500, 20, request_timeout=5)
     first.delete.assert_awaited_once()
     second.delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_bot_added_to_group_installs_privacy_safe_inline_launcher(tmp_path):
+    database = Database(tmp_path / "group-onboarding.db")
+    await database.initialize()
+    service = BudgetService(database)
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=77)))
+    event = SimpleNamespace(
+        chat=SimpleNamespace(type=ChatType.SUPERGROUP, id=-100700, title="Друзья"),
+        from_user=SimpleNamespace(id=7, username="owner", full_name="Владелец"),
+        new_chat_member=SimpleNamespace(status="member"),
+        bot=bot,
+    )
+    settings = Settings(
+        bot_token="123456:test-token",
+        webapp_url="https://example.com/app",
+        bot_username="ShakeOnIt_bot",
+        main_app_enabled=True,
+    )
+
+    await remember_group_when_bot_is_added(event, service, settings)
+
+    markup = bot.send_message.await_args.kwargs["reply_markup"]
+    assert markup.inline_keyboard[0][0].url.startswith(
+        "https://t.me/ShakeOnIt_bot?startapp=chat_n100700_"
+    )
+    assert await service.take_bot_message(-100700, "app_link") == 77

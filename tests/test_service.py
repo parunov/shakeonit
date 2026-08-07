@@ -68,6 +68,55 @@ async def test_legacy_payment_update_preserves_bank_name(service):
 
 
 @pytest.mark.asyncio
+async def test_custom_name_survives_later_telegram_sync(service):
+    await service.set_display_name(1, "Анна для друзей")
+    await service.upsert_user(1, "anna_new", "Имя из Telegram")
+
+    user = await service.get_user(1)
+    assert user["full_name"] == "Анна для друзей"
+    assert user["username"] == "anna_new"
+
+
+@pytest.mark.asyncio
+async def test_multiple_payment_methods_replace_legacy_primary(service):
+    await service.replace_payment_methods(
+        1,
+        [
+            {"bank_name": "Банк A", "details": "Карта 1111"},
+            {"bank_name": "Банк B", "details": "+375291234567"},
+        ],
+    )
+
+    methods = [dict(row) for row in await service.list_payment_methods(1)]
+    assert [(row["bank_name"], row["details"]) for row in methods] == [
+        ("Банк A", "Карта 1111"),
+        ("Банк B", "+375291234567"),
+    ]
+    user = await service.get_user(1)
+    assert (user["bank_name"], user["payment_details"]) == ("Банк A", "Карта 1111")
+
+
+@pytest.mark.asyncio
+async def test_notification_categories_filter_subscribers(service):
+    collection_id = await make_collection(service)
+    await service.set_notification_subscription(collection_id, 2, True)
+    await service.set_notification_preferences(
+        2,
+        {
+            "notify_expenses": False,
+            "notify_repayments": True,
+            "notify_collection_events": True,
+            "notify_reminders": False,
+        },
+    )
+
+    assert await service.notification_subscribers(collection_id, "expenses") == []
+    assert [row["user_id"] for row in await service.notification_subscribers(
+        collection_id, "repayments"
+    )] == [2]
+
+
+@pytest.mark.asyncio
 async def test_shared_group_becomes_available_for_mini_app_collection(service):
     await service.upsert_user(1, "anna", "Анна", private_started=True)
     await service.register_user_chat(1, -100123, "Друзья")

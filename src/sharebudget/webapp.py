@@ -27,7 +27,7 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector, web
 from .config import Settings
 from .links import parse_group_start_param
 from .money import CURRENCIES, format_money, parse_amount
-from .notifications import replace_repayment_prompt, report_collection_event
+from .notifications import replace_repayment_prompt, report_collection_event, send_with_retry
 from .render import telegram_user_link, transaction_update_report
 from .service import BudgetService, DomainError
 
@@ -93,13 +93,14 @@ def _row(row) -> dict:
     return dict(row) if row is not None else {}
 
 
-def _participant(row) -> dict:
+def _participant(row, payment_methods: list[dict] | None = None) -> dict:
     return {
         "id": row["id"],
         "username": row["username"],
         "full_name": row["full_name"],
         "payment_details": row["payment_details"],
         "bank_name": row["bank_name"],
+        "payment_methods": payment_methods or [],
         "is_admin": bool(row["is_admin"]),
         "active": bool(row["active"]),
     }
@@ -166,6 +167,7 @@ async def _report(
     *,
     exclude_user_ids=(),
     subscriber_reply_markup=None,
+    category="collection_events",
 ) -> tuple[bool, int]:
     return await report_collection_event(
         bot,
@@ -175,6 +177,7 @@ async def _report(
         reply_markup,
         exclude_user_ids=exclude_user_ids,
         subscriber_reply_markup=subscriber_reply_markup,
+        category=category,
     )
 
 
@@ -203,6 +206,7 @@ def _queue_report(
     *,
     exclude_user_ids=(),
     subscriber_reply_markup=None,
+    category="collection_events",
 ) -> tuple[bool, int]:
     service, bot, _ = _context(request)
     _queue_delivery(
@@ -215,6 +219,7 @@ def _queue_report(
             reply_markup,
             exclude_user_ids=exclude_user_ids,
             subscriber_reply_markup=subscriber_reply_markup,
+            category=category,
         ),
         f"collection-{collection['id']}",
     )
@@ -343,6 +348,7 @@ async def bootstrap(request: web.Request) -> web.Response:
     rows = await service.list_visible_collections(user_id, context_chat_id)
     chats = await service.list_user_collection_chats(user_id)
     user = await service.get_user(user_id)
+    payment_methods = [dict(row) for row in await service.list_payment_methods(user_id)]
     invitation = None
     if start_param.startswith("collection_"):
         try:
@@ -365,6 +371,13 @@ async def bootstrap(request: web.Request) -> web.Response:
                 "payment_details": user["payment_details"],
                 "bank_name": user["bank_name"],
                 "preferred_currency": user["preferred_currency"],
+                "payment_methods": payment_methods,
+                "notification_preferences": {
+                    "notify_expenses": bool(user["notify_expenses"]),
+                    "notify_repayments": bool(user["notify_repayments"]),
+                    "notify_collection_events": bool(user["notify_collection_events"]),
+                    "notify_reminders": bool(user["notify_reminders"]),
+                },
             },
             "collections": [_collection(row) for row in rows],
             "chats": [
@@ -424,12 +437,16 @@ async def collection_details(request: web.Request) -> web.Response:
     events = view.events[:events_limit]
     shares = view.shares
     people = {row["id"]: row for row in snapshot.participants}
+    payment_methods = await service.payment_methods_for_users(people)
     pending = view.pending_repayments
     return web.json_response(
         {
             "ok": True,
             "collection": _collection(collection),
-            "participants": [_participant(row) for row in snapshot.participants],
+            "participants": [
+                _participant(row, payment_methods.get(row["id"], []))
+                for row in snapshot.participants
+            ],
             "balances": [
                 {"user_id": member_id, "amount": amount}
                 for member_id, amount in snapshot.balances.items()
@@ -622,6 +639,7 @@ async def add_expense(request: web.Request) -> web.Response:
         f"💸 {_name(user)} добавил(а) затрату <b>{format_money(amount, collection['currency'])}</b>"
         f" · {escape(comment) if comment else 'без комментария'} · на {len(participant_ids)} чел.",
         exclude_user_ids={user["id"]},
+        category="expenses",
     )
     return web.json_response(
         {
@@ -664,16 +682,20 @@ async def add_repayment(request: web.Request) -> web.Response:
 
     async def deliver_repayment() -> None:
         async def send_confirmation() -> None:
+            if not await service.notification_enabled_for_user(creditor_id, "repayments"):
+                return
             try:
-                confirmation_message = await bot.send_message(
-                    creditor_id,
-                    "🤝 <b>Подтвердите получение</b>\n\n"
-                    f"От: {_name(user)}\n"
-                    f"Сумма: <b>{format_money(amount, collection['currency'])}</b>\n"
-                    f"Сбор: <b>«{escape(collection['title'])}»</b>{comment_line}",
-                    parse_mode="HTML",
-                    reply_markup=confirm_markup,
-                    request_timeout=5,
+                confirmation_message = await send_with_retry(
+                    lambda: bot.send_message(
+                        creditor_id,
+                        "🤝 <b>Подтвердите получение</b>\n\n"
+                        f"От: {_name(user)}\n"
+                        f"Сумма: <b>{format_money(amount, collection['currency'])}</b>\n"
+                        f"Сбор: <b>«{escape(collection['title'])}»</b>{comment_line}",
+                        parse_mode="HTML",
+                        reply_markup=confirm_markup,
+                        request_timeout=5,
+                    )
                 )
                 message_id = getattr(confirmation_message, "message_id", None)
                 if isinstance(message_id, int):
@@ -691,6 +713,7 @@ async def add_repayment(request: web.Request) -> web.Response:
                 f"<b>{format_money(amount, collection['currency'])}</b>. Баланс изменится после "
                 f"подтверждения получателем.{comment_line}",
                 exclude_user_ids={user["id"], creditor_id},
+                category="repayments",
             ),
             send_confirmation(),
         )
@@ -717,13 +740,15 @@ async def request_funds(request: web.Request) -> web.Response:
     async def deliver_funds_requests() -> None:
         async def deliver(debt) -> bool:
             try:
-                await bot.send_message(
-                    debt.debtor_id,
-                    "🔔 <b>Просьба рассчитаться</b>\n\n"
-                    f"{_name(user)} просит вас рассчитаться по действующим долгам "
-                    f"в сборе {collection_title}.",
-                    parse_mode="HTML",
-                    request_timeout=5,
+                await send_with_retry(
+                    lambda: bot.send_message(
+                        debt.debtor_id,
+                        "🔔 <b>Просьба рассчитаться</b>\n\n"
+                        f"{_name(user)} просит вас рассчитаться по действующим долгам "
+                        f"в сборе {collection_title}.",
+                        parse_mode="HTML",
+                        request_timeout=5,
+                    )
                 )
                 return True
             except TelegramAPIError:
@@ -734,7 +759,11 @@ async def request_funds(request: web.Request) -> web.Response:
                 )
                 return False
 
-        await asyncio.gather(*(deliver(debt) for debt in debts))
+        eligible_debts = []
+        for debt in debts:
+            if await service.notification_enabled_for_user(debt.debtor_id, "reminders"):
+                eligible_debts.append(debt)
+        await asyncio.gather(*(deliver(debt) for debt in eligible_debts))
         if collection["chat_id"]:
             try:
                 await bot.send_message(
@@ -793,6 +822,7 @@ async def confirm_repayment(request: web.Request) -> web.Response:
                 f"<b>{format_money(transaction['amount'], collection['currency'])}</b>. "
                 f"Балансы пересчитаны.{comment_line}",
                 exclude_user_ids={user["id"]},
+                category="repayments",
             ),
             replace_repayment_prompt(
                 bot,
@@ -800,6 +830,7 @@ async def confirm_repayment(request: web.Request) -> web.Response:
                 transaction["confirmation_message_id"],
                 "✅ <b>Получение подтверждено</b>\n\n"
                 f"От: {telegram_user_link(sender['id'], sender['full_name'], sender['username'])}\n"
+                f"Кому: {_name(user)}\n"
                 f"Сумма: <b>{format_money(transaction['amount'], collection['currency'])}</b>\n"
                 f"Сбор: <b>«{escape(collection['title'])}»</b>{comment_detail}",
             ),
@@ -843,6 +874,7 @@ async def reject_repayment(request: web.Request) -> web.Response:
                 f"<b>{format_money(transaction['amount'], collection['currency'])}</b>. "
                 f"Баланс не изменился.{comment_line}",
                 exclude_user_ids={user["id"]},
+                category="repayments",
             ),
             replace_repayment_prompt(
                 bot,
@@ -984,6 +1016,7 @@ async def edit_transaction(request: web.Request) -> web.Response:
             actor_username=user.get("username"),
         ),
         exclude_user_ids={user["id"]},
+        category="expenses" if transaction["kind"] == "expense" else "repayments",
     )
     return web.json_response(
         {
@@ -1008,6 +1041,7 @@ async def cancel_transaction(request: web.Request) -> web.Response:
         collection,
         f"↩️ {_name(user)} отменил(а) транзакцию #{transaction_id}. Балансы пересчитаны.",
         exclude_user_ids={user["id"]},
+        category="expenses" if transaction["kind"] == "expense" else "repayments",
     )
     return web.json_response(
         {
@@ -1048,6 +1082,30 @@ async def save_payment(request: web.Request) -> web.Response:
         str(payload.get("payment_details", "")),
         str(payload.get("bank_name", "")),
     )
+    return web.json_response({"ok": True})
+
+
+async def save_payment_methods(request: web.Request) -> web.Response:
+    service, _, user = _context(request)
+    payload = await _json_body(request)
+    methods = payload.get("payment_methods")
+    if not isinstance(methods, list):
+        raise ApiError("Некорректные платежные данные")
+    await service.replace_payment_methods(user["id"], methods)
+    return web.json_response({"ok": True})
+
+
+async def save_display_name(request: web.Request) -> web.Response:
+    service, _, user = _context(request)
+    payload = await _json_body(request)
+    await service.set_display_name(user["id"], str(payload.get("full_name", "")))
+    return web.json_response({"ok": True})
+
+
+async def save_notification_preferences(request: web.Request) -> web.Response:
+    service, _, user = _context(request)
+    payload = await _json_body(request)
+    await service.set_notification_preferences(user["id"], payload)
     return web.json_response({"ok": True})
 
 
@@ -1386,4 +1444,7 @@ def setup_webapp_routes(
     application.router.add_post("/api/transactions/{transaction_id}/confirm", confirm_repayment)
     application.router.add_post("/api/transactions/{transaction_id}/reject", reject_repayment)
     application.router.add_patch("/api/me/payment", save_payment)
+    application.router.add_put("/api/me/payment-methods", save_payment_methods)
+    application.router.add_patch("/api/me/name", save_display_name)
+    application.router.add_patch("/api/me/notifications", save_notification_preferences)
     application.router.add_patch("/api/me/currency", save_preferred_currency)

@@ -122,6 +122,7 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert page.status == 200
         page_text = await page.text()
         assert "ShakeOnIt" in page_text
+        assert "По рукам — делим расходы" in page_text
         assert 'name="telegram-bot-username" content="ShakeOnIt_bot"' in page_text
         assert "__BOT_USERNAME__" not in page_text
 
