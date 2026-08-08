@@ -613,7 +613,7 @@ async def prepare_collection_share(request: web.Request) -> web.Response:
             description="Приглашение вести общие расходы вместе",
             input_message_content=InputTextMessageContent(
                 message_text=(
-                    f"🧾 <b>«{escape(collection['title'])}»</b>\n\n"
+                    f"🤝 Присоединяйтесь к сбору <b>«{escape(collection['title'])}»</b>\n\n"
                     f"Инициатор: {_name(user)}\n\n"
                     "Вступайте легко в совместный сбор средств, контролируйте расходы "
                     "и возвраты долгов."
@@ -961,40 +961,93 @@ async def join_collection(request: web.Request) -> web.Response:
 
 async def global_history(request: web.Request) -> web.Response:
     service, _, user = _context(request)
+    section = request.query.get("section", "all")
+    if section not in {"all", "transactions", "events"}:
+        raise ApiError("Некорректный раздел истории")
     try:
         transaction_offset = max(0, int(request.query.get("transaction_offset", "0")))
         event_offset = max(0, int(request.query.get("event_offset", "0")))
     except ValueError as exc:
         raise ApiError("Некорректная страница истории") from exc
     page_size = 10
-    transactions, events = await service.global_history(
-        user["id"], page_size + 1, transaction_offset, event_offset
+    include_transactions = section in {"all", "transactions"}
+    include_events = section in {"all", "events"}
+    history_task = service.global_history(
+        user["id"],
+        page_size + 1,
+        transaction_offset,
+        event_offset,
+        include_transactions=include_transactions,
+        include_events=include_events,
     )
+    stats_task = (
+        service.expense_statistics(user["id"], include_collections=False)
+        if section == "all"
+        else None
+    )
+    if stats_task is not None:
+        (transactions, events), stats = await asyncio.gather(history_task, stats_task)
+    else:
+        transactions, events = await history_task
+        stats = None
     transaction_has_more = len(transactions) > page_size
     event_has_more = len(events) > page_size
     transactions = transactions[:page_size]
     events = events[:page_size]
-    shares = await service.expense_shares_for_transactions(
-        row["id"] for row in transactions if row["kind"] == "expense"
+    shares, inactive_transaction_ids = await asyncio.gather(
+        service.expense_shares_for_transactions(
+            row["id"] for row in transactions if row["kind"] == "expense"
+        ),
+        service.transactions_with_inactive_participants(row["id"] for row in transactions),
     )
-    inactive_transaction_ids = await service.transactions_with_inactive_participants(
-        row["id"] for row in transactions
+    response = {
+        "ok": True,
+        "transactions": [
+            {
+                **dict(row),
+                "has_inactive_participants": row["id"] in inactive_transaction_ids,
+                "shares": shares.get(row["id"], []),
+            }
+            for row in transactions
+        ],
+        "events": [dict(row) for row in events],
+        "transaction_has_more": transaction_has_more,
+        "event_has_more": event_has_more,
+    }
+    if stats is not None:
+        response["expense_stats"] = stats
+    return web.json_response(response)
+
+
+async def expense_statistics(request: web.Request) -> web.Response:
+    service, _, user = _context(request)
+    return web.json_response(
+        {"ok": True, **await service.expense_statistics(user["id"])}
+    )
+
+
+async def transaction_edit_context(request: web.Request) -> web.Response:
+    service, _, user = _context(request)
+    transaction_id = int(request.match_info["transaction_id"])
+    transaction = await service.transaction(transaction_id)
+    if not transaction:
+        raise ApiError("Транзакция не найдена", 404)
+    collection = await _require_member(service, transaction["collection_id"], user["id"])
+    participants, shares_by_transaction = await asyncio.gather(
+        service.list_participants(collection["id"]),
+        service.expense_shares_for_transactions([transaction_id]),
     )
     return web.json_response(
         {
             "ok": True,
-            "transactions": [
+            "collection": _collection(collection),
+            "participants": [dict(row) for row in participants],
+            "history": [
                 {
-                    **dict(row),
-                    "has_inactive_participants": row["id"] in inactive_transaction_ids,
-                    "shares": shares.get(row["id"], []),
+                    **dict(transaction),
+                    "shares": shares_by_transaction.get(transaction_id, []),
                 }
-                for row in transactions
             ],
-            "events": [dict(row) for row in events],
-            "transaction_has_more": transaction_has_more,
-            "event_has_more": event_has_more,
-            "expense_stats": await service.expense_statistics(user["id"]),
         }
     )
 
@@ -1013,9 +1066,24 @@ async def edit_transaction(request: web.Request) -> web.Response:
         raise ApiError("Транзакция не найдена", 404)
     collection = await _require_member(service, transaction["collection_id"], user["id"])
     payload = await _json_body(request)
-    amount = parse_amount(str(payload.get("amount", "")))
     comment = str(payload.get("comment", ""))
     participant_ids = None
+    participant_shares = None
+    raw_shares = payload.get("participant_shares")
+    if raw_shares is not None:
+        if not isinstance(raw_shares, list) or not raw_shares:
+            raise ApiError("Укажите сумму хотя бы для одного участника")
+        participant_shares = {}
+        for item in raw_shares:
+            if not isinstance(item, dict):
+                raise ApiError("Проверьте индивидуальные суммы")
+            participant_id = _integer(item, "user_id", "Проверьте участника")
+            if participant_id in participant_shares:
+                raise ApiError("Участник указан несколько раз")
+            participant_shares[participant_id] = parse_amount(str(item.get("amount", "")))
+        amount = sum(participant_shares.values())
+    else:
+        amount = parse_amount(str(payload.get("amount", "")))
     if "participant_ids" in payload:
         participants = payload["participant_ids"]
         if not isinstance(participants, list):
@@ -1032,6 +1100,7 @@ async def edit_transaction(request: web.Request) -> web.Response:
         amount,
         comment,
         participant_ids=participant_ids,
+        exact_shares=participant_shares,
     )
     updated = await service.transaction(transaction_id)
     after_shares = (
@@ -1455,6 +1524,7 @@ def setup_webapp_routes(
     application.router.add_get("/api/bootstrap", bootstrap)
     application.router.add_get("/api/sync", sync_status)
     application.router.add_get("/api/history", global_history)
+    application.router.add_get("/api/expense-statistics", expense_statistics)
     application.router.add_get("/api/balance", balance_overview)
     application.router.add_get("/api/rates", exchange_rates)
     application.router.add_get("/api/collections/{collection_id}", collection_details)
@@ -1477,6 +1547,9 @@ def setup_webapp_routes(
     application.router.add_post("/api/collections/{collection_id}/transfer", transfer_admin)
     application.router.add_post("/api/collections/{collection_id}/remove", remove_member)
     application.router.add_patch("/api/transactions/{transaction_id}", edit_transaction)
+    application.router.add_get(
+        "/api/transactions/{transaction_id}/edit-context", transaction_edit_context
+    )
     application.router.add_post("/api/transactions/{transaction_id}/cancel", cancel_transaction)
     application.router.add_post("/api/transactions/{transaction_id}/confirm", confirm_repayment)
     application.router.add_post("/api/transactions/{transaction_id}/reject", reject_repayment)

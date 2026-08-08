@@ -381,20 +381,17 @@ async function renderHistory(loadKind = null) {
   if (!loadKind) app.innerHTML = `<section class="loading-card"><div class="spinner"></div><p>Собираем всю историю…</p></section>`;
   updateNav();
   const current = state.globalHistory;
-  const transactionOffset = loadKind === "transactions" ? current.transactions.length : 0;
-  const eventOffset = loadKind === "events" ? current.events.length : 0;
-  let page;
-  page = await api(`/api/history?transaction_offset=${transactionOffset}&event_offset=${eventOffset}`);
+  const offset = loadKind === "transactions" ? current.transactions.length : loadKind === "events" ? current.events.length : 0;
+  const query = loadKind ? `?section=${loadKind}&${loadKind === "transactions" ? "transaction_offset" : "event_offset"}=${offset}` : "";
+  const page = await api(`/api/history${query}`);
   if (!loadKind) {
     state.globalHistory = page;
   } else if (loadKind === "transactions") {
     current.transactions.push(...page.transactions);
     current.transaction_has_more = page.transaction_has_more;
-    current.expense_stats = page.expense_stats;
   } else {
     current.events.push(...page.events);
     current.event_has_more = page.event_has_more;
-    current.expense_stats = page.expense_stats;
   }
   const data = state.globalHistory;
   const eventLabels = {
@@ -604,7 +601,7 @@ function expenseSheet() {
   const data = state.collection;
   const activeParticipants = data.participants.filter((member) => member.active !== false);
   const customRows = activeParticipants.map((member) => `<div class="custom-share-row"><span>${userLink(member.id, member.full_name, member.username)}${member.id === state.bootstrap.user.id ? " · вы" : ""}</span><label><input name="custom_share" data-user-id="${member.id}" inputmode="decimal" placeholder="0,00"><small>${e(data.collection.currency)}</small></label></div>`).join("");
-  showSheet(`<h2>Добавить затрату</h2><p class="sheet-intro">Разделите сумму поровну или укажите точную долю каждого участника.</p><form id="expense-form"><input type="hidden" name="distribution_mode" value="equal"><div class="expense-mode-switch" role="tablist" aria-label="Способ распределения"><button class="active" type="button" data-action="expense-mode" data-mode="equal" aria-pressed="true">Поровну</button><button type="button" data-action="expense-mode" data-mode="custom" aria-pressed="false">По суммам</button></div><div data-expense-panel="equal"><label class="field"><span>Общая сумма · ${e(data.collection.currency)}</span><input name="amount" inputmode="decimal" placeholder="0,00" required></label><div class="row-between"><span class="row-title">На кого делим</span><button class="text-button" type="button" data-action="select-all">Выбрать всех</button></div><div class="check-list">${activeParticipants.map((member) => `<label class="check-row"><input type="checkbox" name="participant" value="${member.id}"><span>${userLink(member.id, member.full_name, member.username)}${member.id === state.bootstrap.user.id ? " · вы" : ""}</span></label>`).join("")}</div></div><div data-expense-panel="custom" hidden><div class="custom-share-list">${customRows}</div><div class="custom-share-total"><span>Общая сумма</span><strong data-custom-total>${money(0, data.collection.currency)}</strong></div></div><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" placeholder="Например, билеты"></label><div class="sheet-actions"><button class="primary-button" type="submit">Добавить затрату</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+  showSheet(`<h2>Добавить затрату</h2><p class="sheet-intro">Разделите сумму поровну или укажите точную долю каждого участника.</p><form id="expense-form" data-currency="${e(data.collection.currency)}"><input type="hidden" name="distribution_mode" value="equal"><div class="expense-mode-switch" role="tablist" aria-label="Способ распределения"><button class="active" type="button" data-action="expense-mode" data-mode="equal" aria-pressed="true">Поровну</button><button type="button" data-action="expense-mode" data-mode="custom" aria-pressed="false">По суммам</button></div><div data-expense-panel="equal"><label class="field"><span>Общая сумма · ${e(data.collection.currency)}</span><input name="amount" inputmode="decimal" placeholder="0,00" required></label><div class="row-between"><span class="row-title">На кого делим</span><button class="text-button" type="button" data-action="select-all">Выбрать всех</button></div><div class="check-list">${activeParticipants.map((member) => `<label class="check-row"><input type="checkbox" name="participant" value="${member.id}"><span>${userLink(member.id, member.full_name, member.username)}${member.id === state.bootstrap.user.id ? " · вы" : ""}</span></label>`).join("")}</div></div><div data-expense-panel="custom" hidden><div class="custom-share-list">${customRows}</div><div class="custom-share-total"><span>Общая сумма</span><strong data-custom-total>${money(0, data.collection.currency)}</strong></div></div><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" placeholder="Например, билеты"></label><div class="sheet-actions"><button class="primary-button" type="submit">Добавить затрату</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
 
 function repaySheet(preferredCreditorId = null) {
@@ -652,12 +649,17 @@ function editSheet(transactionId, collectionData = state.collection, returnTo = 
       candidates.push({ id: share.user_id, username: share.username, full_name: share.full_name, active: false });
     }
   });
-  const participantEditor = item.kind === "expense" ? `<div class="row-between"><span class="row-title">На кого делим</span><button class="text-button" type="button" data-action="select-all">Выбрать всех</button></div><div class="check-list">${candidates.map((member) => `<label class="check-row"><input type="checkbox" name="participant" value="${member.id}" ${selectedIds.has(member.id) ? "checked" : ""}><span>${userLink(member.id, member.full_name, member.username)}${member.id === state.bootstrap.user.id ? " · вы" : ""}${member.active ? "" : " · вышел(ла) из сбора"}</span></label>`).join("")}</div>` : "";
+  const currency = collectionData.collection.currency;
+  const shareValues = item.shares.map((share) => share.amount);
+  const equalDistribution = !shareValues.length || Math.max(...shareValues) - Math.min(...shareValues) <= 1;
+  const initialMode = equalDistribution ? "equal" : "custom";
+  const shareByUser = new Map(item.shares.map((share) => [share.user_id, share.amount]));
+  const participantEditor = item.kind === "expense" ? `<input type="hidden" name="distribution_mode" value="${initialMode}"><div class="expense-mode-switch" role="tablist" aria-label="Способ распределения"><button class="${initialMode === "equal" ? "active" : ""}" type="button" data-action="expense-mode" data-mode="equal" aria-pressed="${initialMode === "equal"}">Поровну</button><button class="${initialMode === "custom" ? "active" : ""}" type="button" data-action="expense-mode" data-mode="custom" aria-pressed="${initialMode === "custom"}">По суммам</button></div><div data-expense-panel="equal" ${initialMode === "equal" ? "" : "hidden"}><label class="field"><span>Общая сумма · ${e(currency)}</span><input name="amount" inputmode="decimal" value="${(item.amount / 100).toFixed(2).replace(".", ",")}" ${initialMode === "equal" ? "required" : ""}></label><div class="row-between"><span class="row-title">На кого делим</span><button class="text-button" type="button" data-action="select-all">Выбрать всех</button></div><div class="check-list">${candidates.map((member) => `<label class="check-row"><input type="checkbox" name="participant" value="${member.id}" ${selectedIds.has(member.id) ? "checked" : ""}><span>${userLink(member.id, member.full_name, member.username)}${member.id === state.bootstrap.user.id ? " · вы" : ""}${member.active ? "" : " · вышел(ла) из сбора"}</span></label>`).join("")}</div></div><div data-expense-panel="custom" ${initialMode === "custom" ? "" : "hidden"}><div class="custom-share-list">${candidates.map((member) => `<div class="custom-share-row"><span>${userLink(member.id, member.full_name, member.username)}${member.id === state.bootstrap.user.id ? " · вы" : ""}</span><label><input name="custom_share" data-user-id="${member.id}" inputmode="decimal" placeholder="0,00" value="${shareByUser.has(member.id) ? (shareByUser.get(member.id) / 100).toFixed(2).replace(".", ",") : ""}"><small>${e(currency)}</small></label></div>`).join("")}</div><div class="custom-share-total"><span>Общая сумма</span><strong data-custom-total>${money(item.amount, currency)}</strong></div></div>` : `<label class="field"><span>Сумма · ${e(currency)}</span><input name="amount" inputmode="decimal" value="${(item.amount / 100).toFixed(2).replace(".", ",")}" required></label>`;
   const intro = item.kind === "expense"
-    ? "После сохранения сумма будет поровну распределена между отмеченными людьми, а балансы пересчитаются."
+    ? "Выберите равное распределение или укажите точную сумму для каждого участника."
     : "Изменённый возврат останется на подтверждении у получателя.";
   const originalParticipants = [...selectedIds].sort((a, b) => a - b).join(",");
-  showSheet(`<h2>Изменить транзакцию</h2><p class="sheet-intro">${intro}</p><form id="edit-form" data-id="${item.id}" data-return="${returnTo}" data-original-participants="${originalParticipants}"><label class="field"><span>Сумма · ${e(collectionData.collection.currency)}</span><input name="amount" inputmode="decimal" value="${(item.amount / 100).toFixed(2).replace(".", ",")}" required></label><label class="field"><span>Комментарий</span><input name="comment" maxlength="200" value="${e(item.comment)}"></label>${participantEditor}<div class="sheet-actions"><button class="primary-button" type="submit">Сохранить</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+  showSheet(`<h2>Изменить транзакцию</h2><p class="sheet-intro">${intro}</p><form id="edit-form" data-id="${item.id}" data-kind="${item.kind}" data-return="${returnTo}" data-currency="${e(currency)}" data-original-participants="${originalParticipants}">${participantEditor}<label class="field"><span>Комментарий</span><input name="comment" maxlength="200" value="${e(item.comment)}"></label><div class="sheet-actions"><button class="primary-button" type="submit">Сохранить</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
 
 function paymentSheet() {
@@ -825,7 +827,13 @@ app.addEventListener("click", async (event) => {
       return;
     }
     if (action === "load-history") return await renderHistory(target.dataset.kind);
-    if (action === "expense-statistics") return expenseStatisticsSheet();
+    if (action === "expense-statistics") {
+      if (!state.globalHistory.expense_stats.by_collection_loaded) {
+        setBusy(target, true);
+        state.globalHistory.expense_stats = await api("/api/expense-statistics");
+      }
+      return expenseStatisticsSheet();
+    }
     if (action === "load-collection-history") {
       if (target.dataset.kind === "transactions") state.collectionHistoryLimit += 10;
       else state.collectionEventsLimit += 10;
@@ -855,10 +863,7 @@ app.addEventListener("click", async (event) => {
     if (action === "tab") { state.collectionTab = target.dataset.tab; renderCollection(); return; }
     if (action === "edit-transaction") return editSheet(target.dataset.id);
     if (action === "edit-history-transaction") {
-      const previousLimit = state.collectionHistoryLimit;
-      state.collectionHistoryLimit = 500;
-      const details = await loadDetails(target.dataset.collectionId, true);
-      state.collectionHistoryLimit = previousLimit;
+      const details = await api(`/api/transactions/${target.dataset.id}/edit-context`);
       return editSheet(target.dataset.id, details, "global");
     }
     if (action === "request-funds") {
@@ -1115,7 +1120,7 @@ sheet.addEventListener("input", (event) => {
   const total = [...sheet.querySelectorAll('input[name="custom_share"]')]
     .reduce((sum, input) => sum + inputMinorUnits(input.value), 0);
   const output = sheet.querySelector("[data-custom-total]");
-  if (output) output.textContent = money(total, state.collection.collection.currency);
+  if (output) output.textContent = money(total, event.target.closest("form").dataset.currency);
 });
 
 sheet.addEventListener("submit", async (event) => {
@@ -1163,9 +1168,17 @@ sheet.addEventListener("submit", async (event) => {
       closeSheet(); reportToast(result, "Возврат записан"); return await refreshCurrent("overview");
     }
     if (form.id === "edit-form") {
-      const payload = { amount: values.get("amount"), comment: values.get("comment") };
+      const payload = { comment: values.get("comment") };
       const participantInputs = [...form.querySelectorAll('input[name="participant"]')];
-      if (participantInputs.length) {
+      if (form.dataset.kind === "expense" && values.get("distribution_mode") === "custom") {
+        payload.participant_shares = [...form.querySelectorAll('input[name="custom_share"]')]
+          .filter((input) => inputMinorUnits(input.value) > 0)
+          .map((input) => ({ user_id: Number(input.dataset.userId), amount: input.value }));
+        if (!payload.participant_shares.length) throw new Error("Укажите сумму хотя бы для одного участника");
+      } else {
+        payload.amount = values.get("amount");
+      }
+      if (participantInputs.length && values.get("distribution_mode") !== "custom") {
         const participantIds = participantInputs.filter((input) => input.checked).map((input) => Number(input.value));
         if (!participantIds.length) throw new Error("Выберите хотя бы одного участника");
         const selectedParticipants = [...participantIds].sort((a, b) => a - b).join(",");

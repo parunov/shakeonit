@@ -312,6 +312,92 @@ async def test_edit_expense_api_replaces_participants(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_edit_expense_api_accepts_individual_participant_amounts(tmp_path):
+    database = Database(tmp_path / "edit-custom-shares.db")
+    await database.initialize()
+    service = BudgetService(database)
+    await service.upsert_user(1, "owner", "Организатор")
+    await service.upsert_user(2, "anna", "Анна")
+    await service.upsert_user(3, "max", "Максим")
+    collection_id = await service.create_collection(0, "Поездка", "EUR", 1)
+    await service.join(collection_id, 2)
+    await service.join(collection_id, 3)
+    transaction_id = await service.add_expense(collection_id, 1, 1000, [1, 2], "Ужин")
+    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    application = web.Application()
+    setup_webapp_routes(
+        application,
+        SimpleNamespace(send_message=AsyncMock()),
+        service,
+        settings,
+    )
+    auth = signed_init_data(user={"id": 1, "first_name": "Организатор"})
+
+    async with TestClient(TestServer(application)) as client:
+        response = await client.patch(
+            f"/api/transactions/{transaction_id}",
+            json={
+                "comment": "Индивидуальный ужин",
+                "participant_shares": [
+                    {"user_id": 1, "amount": "2,50"},
+                    {"user_id": 2, "amount": "3"},
+                    {"user_id": 3, "amount": "4,50"},
+                ],
+            },
+            headers={"X-Telegram-Init-Data": auth},
+        )
+        details = await client.get(
+            f"/api/collections/{collection_id}",
+            headers={"X-Telegram-Init-Data": auth},
+        )
+        details_payload = await details.json()
+
+    assert response.status == 200
+    transaction = next(
+        row for row in details_payload["history"] if row["id"] == transaction_id
+    )
+    assert transaction["amount"] == 1000
+    assert sorted((row["user_id"], row["amount"]) for row in transaction["shares"]) == [
+        (1, 250),
+        (2, 300),
+        (3, 450),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_transaction_edit_context_is_small_and_contains_all_active_people(tmp_path):
+    database = Database(tmp_path / "edit-context.db")
+    await database.initialize()
+    service = BudgetService(database)
+    await service.upsert_user(1, "owner", "Организатор")
+    await service.upsert_user(2, "anna", "Анна")
+    await service.upsert_user(3, "max", "Максим")
+    collection_id = await service.create_collection(0, "Поездка", "EUR", 1)
+    await service.join(collection_id, 2)
+    await service.join(collection_id, 3)
+    for number in range(25):
+        transaction_id = await service.add_expense(
+            collection_id, 1, 1000 + number, [1, 2], f"Затрата {number}"
+        )
+    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    application = web.Application()
+    setup_webapp_routes(application, object(), service, settings)
+    auth = signed_init_data(user={"id": 1, "first_name": "Организатор"})
+
+    async with TestClient(TestServer(application)) as client:
+        response = await client.get(
+            f"/api/transactions/{transaction_id}/edit-context",
+            headers={"X-Telegram-Init-Data": auth},
+        )
+        payload = await response.json()
+
+    assert response.status == 200
+    assert [row["id"] for row in payload["history"]] == [transaction_id]
+    assert {row["id"] for row in payload["participants"]} == {1, 2, 3}
+    assert {row["user_id"] for row in payload["history"][0]["shares"]} == {1, 2}
+
+
+@pytest.mark.asyncio
 async def test_expense_api_accepts_individual_participant_amounts(tmp_path):
     database = Database(tmp_path / "custom-shares.db")
     await database.initialize()
@@ -598,10 +684,15 @@ async def test_history_is_paginated_and_balance_has_personal_debts(tmp_path):
         first = await client.get("/api/history", headers={"X-Telegram-Init-Data": owner_auth})
         first_payload = await first.json()
         second = await client.get(
-            "/api/history?transaction_offset=10",
+            "/api/history?section=transactions&transaction_offset=10",
             headers={"X-Telegram-Init-Data": owner_auth},
         )
         second_payload = await second.json()
+        statistics = await client.get(
+            "/api/expense-statistics",
+            headers={"X-Telegram-Init-Data": owner_auth},
+        )
+        statistics_payload = await statistics.json()
         details = await client.get(
             f"/api/collections/{collection_id}",
             headers={"X-Telegram-Init-Data": owner_auth},
@@ -614,8 +705,13 @@ async def test_history_is_paginated_and_balance_has_personal_debts(tmp_path):
     assert first_payload["transaction_has_more"] is True
     assert len(second_payload["transactions"]) == 10
     assert second_payload["transaction_has_more"] is True
+    assert second_payload["events"] == []
+    assert "expense_stats" not in second_payload
     assert first_payload["expense_stats"]["monthly_by_currency"] == {"EUR": 1250}
     assert first_payload["expense_stats"]["monthly_paid_by_currency"] == {"EUR": 2500}
+    assert first_payload["expense_stats"]["by_collection_loaded"] is False
+    assert statistics_payload["by_collection_loaded"] is True
+    assert statistics_payload["by_collection"][0]["title"] == "Поездка"
     assert len(details_payload["history"]) == 10
     assert details_payload["history_has_more"] is True
     assert balance_payload["collections"][0]["amount"] == 1250
@@ -1150,6 +1246,9 @@ async def test_collection_share_prepares_message_for_people_and_groups(tmp_path)
     assert call.kwargs["result"].input_message_content.message_text.count("Летний отпуск") == 1
     assert "Инициатор:" in call.kwargs["result"].input_message_content.message_text
     assert "Владелец" in call.kwargs["result"].input_message_content.message_text
+    assert call.kwargs["result"].input_message_content.message_text.startswith(
+        "🤝 Присоединяйтесь к сбору <b>«Летний отпуск»</b>"
+    )
     assert (
         "Вступайте легко в совместный сбор средств, контролируйте расходы и возвраты долгов"
         in call.kwargs["result"].input_message_content.message_text

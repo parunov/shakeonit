@@ -1238,43 +1238,52 @@ class BudgetService:
         limit: int = 10,
         transaction_offset: int = 0,
         event_offset: int = 0,
+        *,
+        include_transactions: bool = True,
+        include_events: bool = True,
     ):
         async with self.db.connect() as connection:
-            transactions = await connection.execute_fetchall(
-                """
-                SELECT t.*,c.title collection_title,c.currency,
-                       c.admin_id collection_admin_id,c.status collection_status,
-                       p.active is_participant,
-                       creator.full_name creator_name,creator.username creator_username,
-                       counterparty.full_name counterparty_name,
-                       counterparty.username counterparty_username
-                FROM transactions t
-                JOIN collections c ON c.id=t.collection_id
-                JOIN participants p ON p.collection_id=c.id AND p.user_id=?
-                JOIN users creator ON creator.id=t.creator_id
-                LEFT JOIN users counterparty ON counterparty.id=t.counterparty_id
-                ORDER BY t.created_at DESC,t.id DESC LIMIT ? OFFSET ?
-                """,
-                (user_id, limit, transaction_offset),
-            )
-            events = await connection.execute_fetchall(
-                """
-                SELECT e.*,c.title collection_title,c.currency,
-                       p.active is_participant,
-                       actor.full_name actor_name,actor.username actor_username,
-                       target.full_name target_name,target.username target_username
-                FROM collection_events e
-                JOIN collections c ON c.id=e.collection_id
-                JOIN participants p ON p.collection_id=c.id AND p.user_id=?
-                JOIN users actor ON actor.id=e.actor_id
-                LEFT JOIN users target ON target.id=e.target_user_id
-                ORDER BY e.created_at DESC,e.id DESC LIMIT ? OFFSET ?
-                """,
-                (user_id, limit, event_offset),
-            )
+            transactions = []
+            if include_transactions:
+                transactions = await connection.execute_fetchall(
+                    """
+                    SELECT t.*,c.title collection_title,c.currency,
+                           c.admin_id collection_admin_id,c.status collection_status,
+                           p.active is_participant,
+                           creator.full_name creator_name,creator.username creator_username,
+                           counterparty.full_name counterparty_name,
+                           counterparty.username counterparty_username
+                    FROM transactions t
+                    JOIN collections c ON c.id=t.collection_id
+                    JOIN participants p ON p.collection_id=c.id AND p.user_id=?
+                    JOIN users creator ON creator.id=t.creator_id
+                    LEFT JOIN users counterparty ON counterparty.id=t.counterparty_id
+                    ORDER BY t.created_at DESC,t.id DESC LIMIT ? OFFSET ?
+                    """,
+                    (user_id, limit, transaction_offset),
+                )
+            events = []
+            if include_events:
+                events = await connection.execute_fetchall(
+                    """
+                    SELECT e.*,c.title collection_title,c.currency,
+                           p.active is_participant,
+                           actor.full_name actor_name,actor.username actor_username,
+                           target.full_name target_name,target.username target_username
+                    FROM collection_events e
+                    JOIN collections c ON c.id=e.collection_id
+                    JOIN participants p ON p.collection_id=c.id AND p.user_id=?
+                    JOIN users actor ON actor.id=e.actor_id
+                    LEFT JOIN users target ON target.id=e.target_user_id
+                    ORDER BY e.created_at DESC,e.id DESC LIMIT ? OFFSET ?
+                    """,
+                    (user_id, limit, event_offset),
+                )
         return transactions, events
 
-    async def expense_statistics(self, user_id: int) -> dict:
+    async def expense_statistics(
+        self, user_id: int, *, include_collections: bool = True
+    ) -> dict:
         async with self.db.connect() as connection:
             currency_rows = await connection.execute_fetchall(
                 """
@@ -1320,8 +1329,10 @@ class BudgetService:
                 """,
                 (user_id, user_id, user_id, user_id),
             )
-            collection_rows = await connection.execute_fetchall(
-                """
+            collection_rows = []
+            if include_collections:
+                collection_rows = await connection.execute_fetchall(
+                    """
                 WITH movements AS (
                     SELECT t.id transaction_id,t.collection_id,'personal' metric,s.amount
                     FROM expense_shares s JOIN transactions t ON t.id=s.transaction_id
@@ -1348,8 +1359,8 @@ class BudgetService:
                 GROUP BY c.id,c.title,c.currency
                 ORDER BY personal_amount DESC,repaid_amount DESC,c.title LIMIT 20
                 """,
-                (user_id, user_id, user_id, user_id),
-            )
+                    (user_id, user_id, user_id, user_id),
+                )
 
         def amounts(field: str) -> dict[str, int]:
             return {row["currency"]: row[field] or 0 for row in currency_rows if row[field]}
@@ -1372,6 +1383,7 @@ class BudgetService:
             "repaid_count": sum(row["repaid_count"] or 0 for row in currency_rows),
             "received_count": sum(row["received_count"] or 0 for row in currency_rows),
             "by_collection": [dict(row) for row in collection_rows],
+            "by_collection_loaded": include_collections,
         }
         # Backward-compatible aliases now represent expenses assigned to the user.
         result["monthly_by_currency"] = result["monthly_personal_by_currency"]
@@ -1556,6 +1568,8 @@ class BudgetService:
         amount: int,
         comment: str,
         participant_ids: Iterable[int] | None = None,
+        *,
+        exact_shares: dict[int, int] | None = None,
     ) -> int:
         transaction = await self.transaction(transaction_id)
         if not transaction or transaction["status"] != "active":
@@ -1570,11 +1584,26 @@ class BudgetService:
         if len(comment.strip()) > 200:
             raise DomainError("Комментарий не должен быть длиннее 200 символов")
         expense_shares = None
-        if transaction["kind"] == "expense" and participant_ids is not None:
+        if transaction["kind"] == "expense" and exact_shares is not None:
+            if participant_ids is not None:
+                raise DomainError("Выберите один способ распределения")
+            expense_shares = {
+                int(user_id): int(share) for user_id, share in exact_shares.items()
+            }
+            if not expense_shares or any(share <= 0 for share in expense_shares.values()):
+                raise DomainError("Сумма каждого участника должна быть больше нуля")
+            await self._require_registered_members(
+                transaction["collection_id"], expense_shares
+            )
+            if sum(expense_shares.values()) != amount:
+                raise DomainError("Общая сумма не совпадает с индивидуальными суммами")
+        elif transaction["kind"] == "expense" and participant_ids is not None:
             selected_ids = list(participant_ids)
             await self._require_registered_members(transaction["collection_id"], selected_ids)
             expense_shares = split_amount(amount, selected_ids)
-        elif transaction["kind"] == "repayment" and participant_ids is not None:
+        elif transaction["kind"] == "repayment" and (
+            participant_ids is not None or exact_shares is not None
+        ):
             raise DomainError("Участников можно менять только у затрат")
         if transaction["kind"] == "repayment":
             direct_debt = next(
