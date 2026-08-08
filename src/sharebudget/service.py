@@ -249,6 +249,19 @@ class BudgetService:
             )
             await connection.commit()
 
+    async def mark_payment_details_reminder_seen(self, user_id: int) -> None:
+        async with self.db.connect() as connection:
+            await connection.execute(
+                """
+                UPDATE users SET payment_details_reminded_at=CURRENT_TIMESTAMP
+                WHERE id=? AND NOT EXISTS (
+                    SELECT 1 FROM payment_methods pm WHERE pm.user_id=users.id
+                )
+                """,
+                (user_id,),
+            )
+            await connection.commit()
+
     async def set_notification_preferences(self, user_id: int, preferences: dict) -> None:
         fields = (
             "notify_expenses",
@@ -707,7 +720,7 @@ class BudgetService:
             return await self._snapshot_on(connection, collection_id)
 
     async def collection_view(
-        self, collection_id: int, user_id: int, history_limit: int = 100, events_limit: int = 200
+        self, collection_id: int, user_id: int, history_limit: int = 10, events_limit: int = 10
     ) -> CollectionView | None:
         """Load the complete collection screen through one SQLite connection."""
         async with self.db.connect() as connection:
@@ -1214,7 +1227,7 @@ class BudgetService:
     async def global_history(
         self,
         user_id: int,
-        limit: int = 20,
+        limit: int = 10,
         transaction_offset: int = 0,
         event_offset: int = 0,
     ):

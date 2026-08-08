@@ -56,6 +56,34 @@ async def test_contact_deep_link_renders_bot_api_profile_link_without_username(t
 
 
 @pytest.mark.asyncio
+async def test_welcome_explains_benefits_without_privacy_or_password_copy(
+    tmp_path, monkeypatch
+):
+    database = Database(tmp_path / "welcome.db")
+    await database.initialize()
+    service = BudgetService(database)
+    message = SimpleNamespace(
+        chat=SimpleNamespace(type=ChatType.PRIVATE, id=1),
+        from_user=SimpleNamespace(id=1, username="anna", full_name="Анна"),
+        answer=AsyncMock(),
+    )
+    monkeypatch.setattr("sharebudget.handlers.sync_user", AsyncMock())
+
+    await start(
+        message,
+        SimpleNamespace(args=None),
+        service,
+        Settings(bot_token="123456:test-token"),
+    )
+
+    text = message.answer.await_args.args[0]
+    assert "создайте сбор" in text.lower()
+    assert "кто кому сколько" in text.lower()
+    assert "privacy" not in text.lower()
+    assert "парол" not in text.lower()
+
+
+@pytest.mark.asyncio
 async def test_shared_inline_invitation_join_works_without_message_or_collection_url(tmp_path):
     database = Database(tmp_path / "inline-join.db")
     await database.initialize()
@@ -157,9 +185,11 @@ async def test_open_app_button_returns_group_scoped_main_app_link_and_removes_pr
     database = Database(tmp_path / "group-link.db")
     await database.initialize()
     service = BudgetService(database)
+    await service.upsert_user(7, "owner", "Владелец")
     bot = SimpleNamespace(delete_message=AsyncMock())
     first = SimpleNamespace(
-        chat=SimpleNamespace(type=ChatType.SUPERGROUP, id=-100500),
+        chat=SimpleNamespace(type=ChatType.SUPERGROUP, id=-100500, title="Друзья"),
+        from_user=SimpleNamespace(id=7),
         answer=AsyncMock(return_value=SimpleNamespace(message_id=20)),
         delete=AsyncMock(),
         bot=bot,
@@ -175,6 +205,7 @@ async def test_open_app_button_returns_group_scoped_main_app_link_and_removes_pr
 
     second = SimpleNamespace(
         chat=first.chat,
+        from_user=first.from_user,
         answer=AsyncMock(return_value=SimpleNamespace(message_id=25)),
         delete=AsyncMock(),
         bot=bot,

@@ -279,10 +279,11 @@ async def start(
         return
     await message.answer(
         "👋 <b>Добро пожаловать в «По рукам»</b>\n\n"
-        "Здесь не нужны логин, пароль или отдельная регистрация — Telegram уже безопасно "
-        "подтвердил ваш профиль.\n\n"
-        "📱 Все сборы, балансы, возвраты и история находятся в приложении.\n"
-        "⚡ Для быстрой затраты в группе используйте: "
+        "Создавайте сборы для поездок и праздников, делите общие расходы и всегда "
+        "видьте, кто кому сколько должен(а).\n\n"
+        "📱 Откройте приложение, создайте сбор и пригласите друзей — дальше все траты, "
+        "возвраты и балансы будут собраны в одном месте.\n"
+        "⚡ Быструю затрату в группе можно добавить командой: "
         "<code>/expense 40 @ivan @maxim билеты</code>.",
         reply_markup=private_menu,
         parse_mode=ParseMode.HTML,
@@ -341,6 +342,11 @@ async def open_webapp(message: Message, settings: Settings, service: BudgetServi
         await message.answer("ℹ️ Приложение пока не настроено.")
         return
     if message.chat.type != ChatType.PRIVATE:
+        await service.register_user_chat(
+            message.from_user.id,
+            message.chat.id,
+            message.chat.title or "Telegram-группа",
+        )
         username = settings.bot_username.lstrip("@")
         if settings.main_app_enabled:
             chat_param = group_start_param(message.chat.id, settings.bot_token)
@@ -428,8 +434,8 @@ async def remember_group_when_bot_is_added(
     chat_param = group_start_param(event.chat.id, settings.bot_token)
     sent_message = await event.bot.send_message(
         event.chat.id,
-        "👋 <b>«По рукам» добавлено</b>\n\nГруппа готова. Открывайте приложение "
-        "по кнопке ниже — она работает при включённом Privacy Mode.",
+        "👋 <b>«По рукам» добавлено</b>\n\nСоздавайте совместные сборы, добавляйте "
+        "расходы и сразу смотрите, кто кому сколько должен(а). Всё управление — по кнопке ниже.",
         reply_markup=app_launch_markup(settings, chat_param, "Открыть приложение", in_group=True),
         request_timeout=5,
     )
@@ -819,6 +825,7 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
         f"⏳ {event_user_link(message.from_user)} сообщил(а) о возврате "
         f"<b>{format_money(amount, collection['currency'])}</b>. "
         "Баланс изменится после подтверждения получателем.",
+        confirm_markup,
         exclude_user_ids={message.from_user.id, data["creditor_id"]},
         category="repayments",
     )
@@ -921,7 +928,7 @@ async def history(callback: CallbackQuery, service: BudgetService) -> None:
     ]
     if member_events:
         text += "\n\n<b>Изменения участников</b>\n"
-        for event in member_events[:20]:
+        for event in member_events[:10]:
             if event["kind"] == "joined":
                 action = "вступил(а) в сбор"
             elif event["kind"] == "left":

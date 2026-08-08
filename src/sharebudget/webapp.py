@@ -8,6 +8,7 @@ import logging
 import secrets
 import socket
 import time
+from datetime import UTC, datetime, timedelta
 from html import escape
 from pathlib import Path
 from urllib.parse import parse_qsl
@@ -271,7 +272,7 @@ def _collection_invite_markup(collection_id: int, settings: Settings) -> InlineK
     )
     rows = [
         [InlineKeyboardButton(text="🙋 Участвовать в сборе", callback_data=f"join:{collection_id}")],
-        [InlineKeyboardButton(text="📱 Открыть сбор", url=collection_url)],
+        [InlineKeyboardButton(text="👀 Просмотреть", url=collection_url)],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -357,6 +358,15 @@ async def bootstrap(request: web.Request) -> web.Response:
     chats = await service.list_user_collection_chats(user_id)
     user = await service.get_user(user_id)
     payment_methods = [dict(row) for row in await service.list_payment_methods(user_id)]
+    reminded_at = user["payment_details_reminded_at"]
+    reminder_interval_elapsed = not reminded_at or datetime.fromisoformat(reminded_at).replace(
+        tzinfo=UTC
+    ) <= datetime.now(UTC) - timedelta(days=1)
+    payment_details_reminder_due = bool(
+        not payment_methods
+        and reminder_interval_elapsed
+        and any(row["status"] == "active" and row["is_participant"] for row in rows)
+    )
     pending_confirmation = await service.pending_repayment_confirmation(user_id)
     invitation = None
     if start_param.startswith("collection_"):
@@ -393,6 +403,7 @@ async def bootstrap(request: web.Request) -> web.Response:
                 {
                     "chat_id": row["chat_id"],
                     "label": f"Группа сбора «{row['reference_title']}»",
+                    "title": row["reference_title"],
                 }
                 for row in chats
             ],
@@ -408,6 +419,7 @@ async def bootstrap(request: web.Request) -> web.Response:
             "pending_repayment_count": (
                 int(pending_confirmation["pending_count"]) if pending_confirmation else 0
             ),
+            "payment_details_reminder_due": payment_details_reminder_due,
             "sync_version": await service.sync_token(user_id, context_chat_id),
         }
     )
@@ -430,8 +442,8 @@ async def collection_details(request: web.Request) -> web.Response:
     service, _, user = _context(request)
     collection_id = int(request.match_info["collection_id"])
     try:
-        history_limit = min(500, max(20, int(request.query.get("history_limit", "20"))))
-        events_limit = min(500, max(20, int(request.query.get("events_limit", "20"))))
+        history_limit = min(500, max(10, int(request.query.get("history_limit", "10"))))
+        events_limit = min(500, max(10, int(request.query.get("events_limit", "10"))))
     except ValueError as exc:
         raise ApiError("Некорректный размер страницы") from exc
     view = await service.collection_view(
@@ -551,7 +563,7 @@ async def create_collection(request: web.Request) -> web.Response:
             bot,
             service,
             collection,
-            f"🧾 <b>Новый общий сбор «{escape(collection['title'])}»</b>\n\n"
+            "🧾 <b>Новый общий сбор</b>\n\n"
             f"{_name(user)} приглашает вести расходы вместе в {collection['currency']}. "
             "Добавляйте траты и сразу видьте, кто кому сколько должен(а).",
             _collection_invite_markup(collection_id, request.app[SETTINGS_KEY]),
@@ -602,7 +614,6 @@ async def prepare_collection_share(request: web.Request) -> web.Response:
     service, bot, user = _context(request)
     collection_id = int(request.match_info["collection_id"])
     collection = await _require_member(service, collection_id, user["id"])
-    collection_title = f"<b>«{escape(collection['title'])}»</b>"
     prepared = await bot.save_prepared_inline_message(
         user_id=user["id"],
         result=InlineQueryResultArticle(
@@ -611,23 +622,15 @@ async def prepare_collection_share(request: web.Request) -> web.Response:
             description="Приглашение вести общие расходы вместе",
             input_message_content=InputTextMessageContent(
                 message_text=(
-                    f"🧾 Присоединяйтесь к сбору {collection_title}\n\n"
-                    f"Инициатор: {_name(user)}\n"
-                    f"Название сбора: {collection_title}\n\n"
+                    f"🧾 <b>«{escape(collection['title'])}»</b>\n\n"
+                    f"Инициатор: {_name(user)}\n\n"
                     "Вступайте легко в совместный сбор средств, контролируйте расходы "
                     "и возвраты долгов."
                 ),
                 parse_mode="HTML",
             ),
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="🙋 Присоединиться к сбору",
-                            callback_data=f"join:{collection_id}",
-                        )
-                    ]
-                ]
+            reply_markup=_collection_invite_markup(
+                collection_id, request.app[SETTINGS_KEY]
             ),
         ),
         allow_user_chats=True,
@@ -718,6 +721,7 @@ async def add_repayment(request: web.Request) -> web.Response:
                 f"{telegram_user_link(creditor['id'], creditor['full_name'], creditor['username'])}: "
                 f"<b>{format_money(amount, collection['currency'])}</b>. Баланс изменится после "
                 f"подтверждения получателем.{comment_line}",
+                confirm_markup,
                 exclude_user_ids={user["id"], creditor_id},
                 category="repayments",
             ),
@@ -950,7 +954,7 @@ async def global_history(request: web.Request) -> web.Response:
         event_offset = max(0, int(request.query.get("event_offset", "0")))
     except ValueError as exc:
         raise ApiError("Некорректная страница истории") from exc
-    page_size = 20
+    page_size = 10
     transactions, events = await service.global_history(
         user["id"], page_size + 1, transaction_offset, event_offset
     )
@@ -1113,6 +1117,12 @@ async def save_payment_methods(request: web.Request) -> web.Response:
     if not isinstance(methods, list):
         raise ApiError("Некорректные платежные данные")
     await service.replace_payment_methods(user["id"], methods)
+    return web.json_response({"ok": True})
+
+
+async def mark_payment_details_reminder_seen(request: web.Request) -> web.Response:
+    service, _, user = _context(request)
+    await service.mark_payment_details_reminder_seen(user["id"])
     return web.json_response({"ok": True})
 
 
@@ -1466,6 +1476,9 @@ def setup_webapp_routes(
     application.router.add_post("/api/transactions/{transaction_id}/reject", reject_repayment)
     application.router.add_patch("/api/me/payment", save_payment)
     application.router.add_put("/api/me/payment-methods", save_payment_methods)
+    application.router.add_post(
+        "/api/me/payment-details-reminder/seen", mark_payment_details_reminder_seen
+    )
     application.router.add_patch("/api/me/name", save_display_name)
     application.router.add_patch("/api/me/notifications", save_notification_preferences)
     application.router.add_patch("/api/me/currency", save_preferred_currency)

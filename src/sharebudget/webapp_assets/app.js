@@ -29,13 +29,15 @@ const state = {
   balanceMode: "collections",
   balanceData: null,
   globalHistory: null,
-  collectionHistoryLimit: 20,
-  collectionEventsLimit: 20,
+  collectionHistoryLimit: 10,
+  collectionEventsLimit: 10,
   viewStack: [],
   swipeStart: null,
   collectionSwipe: null,
   quickPayExpanded: false,
   promptedRepayments: new Set(),
+  paymentReminderVisible: false,
+  paymentReminderAcknowledged: false,
   launchIntent: launchParams.get("intent")
     || launchParams.get("tgWebAppStartParam")
     || tg?.initDataUnsafe?.start_param,
@@ -199,6 +201,11 @@ function showPendingRepaymentConfirmation() {
 
 async function reloadBootstrap() {
   state.bootstrap = await api("/api/bootstrap");
+  if (state.bootstrap.user.payment_methods?.length) {
+    state.paymentReminderVisible = false;
+  } else if (state.bootstrap.payment_details_reminder_due) {
+    state.paymentReminderVisible = true;
+  }
   state.syncVersion = state.bootstrap.sync_version;
   state.details.clear();
   state.balanceData = null;
@@ -247,11 +254,18 @@ async function renderCollections() {
   const owed = Object.keys(owedTotals).length ? moneyMap(owedTotals) : emptySummary;
   const active = state.bootstrap.collections.filter((item) => item.status === "active");
   const archived = state.bootstrap.collections.filter((item) => item.status === "archived");
+  if (state.paymentReminderVisible && !state.paymentReminderAcknowledged) {
+    state.paymentReminderAcknowledged = true;
+    api("/api/me/payment-details-reminder/seen", { method: "POST", body: "{}" }).catch(() => {
+      state.paymentReminderAcknowledged = false;
+    });
+  }
   app.innerHTML = `
     <div class="collection-summaries">
       <button class="summary-tile summary-owe" type="button" data-action="collections-summary"><small>Сколько я должен(а)</small><b>${owe}</b></button>
       <button class="summary-tile summary-owed" type="button" data-action="collections-summary"><small>Сколько мне должны</small><b>${owed}</b></button>
     </div>
+    ${state.paymentReminderVisible ? `<section class="payment-reminder"><span class="payment-reminder-icon">💳</span><span><b>Добавьте реквизиты</b><small>Друзьям будет проще вернуть вам долг. Их покажем только при оформлении возврата.</small></span><button type="button" data-action="payment">Добавить</button><button class="payment-reminder-close" type="button" data-action="dismiss-payment-reminder" aria-label="Напомнить позже">×</button></section>` : ""}
     ${quickPayments ? `<section class="quick-pay-block ${state.quickPayExpanded ? "expanded" : ""}"><button class="quick-pay-toggle" type="button" data-action="toggle-quick-pay"><span class="quick-pay-symbol">↗</span><span><b>Быстрая оплата</b><small>${myDebts.length} ${myDebts.length === 1 ? "долг" : "долга"} · нажмите, чтобы ${state.quickPayExpanded ? "свернуть" : "развернуть"}</small></span><strong>${myDebts.length}</strong><i>${state.quickPayExpanded ? "⌃" : "⌄"}</i></button>${state.quickPayExpanded ? quickPayments : ""}</section>` : ""}
     <div class="section-head"><h2>Текущие</h2><button class="text-button" type="button" data-action="create">+ Новый</button></div>
     ${collectionCards(active, "archive")}
@@ -432,11 +446,11 @@ function renderWelcome() {
       <div class="welcome-mark">S</div>
       <div class="hero-label">SHAKEONIT</div>
       <h2>${e(firstName)}, общие расходы — без неловких подсчётов</h2>
-      <p>Telegram уже подтвердил ваш профиль. Никаких логинов, паролей и отдельной регистрации.</p>
+      <p>Создайте сбор, пригласите друзей и ведите общие расходы без таблиц и ручных подсчётов.</p>
       <div class="welcome-points">
         <div><span>🧾</span><b>Все сборы рядом</b><small>Расходы, долги и история в одном месте</small></div>
-        <div><span>⚡</span><b>Операции за секунды</b><small>Добавляйте траты и сразу видьте результат</small></div>
-        <div><span>🔒</span><b>Только Telegram</b><small>Privacy Mode остается включённым</small></div>
+        <div><span>⚡</span><b>Начать очень просто</b><small>Название, валюта и приглашение друзьям</small></div>
+        <div><span>🤝</span><b>Расчёты понятны всем</b><small>Сразу видно, кто кому и сколько должен(а)</small></div>
       </div>
       <button class="primary-button" type="button" data-action="welcome-continue">Начать</button>
     </section>`;
@@ -472,8 +486,8 @@ async function loadDetails(id, force = false) {
 
 async function openCollection(id, tab = "overview", force = false) {
   if (state.collection?.collection?.id !== Number(id)) {
-    state.collectionHistoryLimit = 20;
-    state.collectionEventsLimit = 20;
+    state.collectionHistoryLimit = 10;
+    state.collectionEventsLimit = 10;
   }
   if (!state.collection) state.collectionReturn = state.nav;
   state.collectionTab = tab;
@@ -580,10 +594,12 @@ function createdCollectionInviteSheet(collection) {
 
 function createSheet() {
   const chatId = state.bootstrap.context_chat_id || 0;
-  const intro = chatId
-    ? "Сбор будет связан с текущей Telegram-группой, и приглашение появится в её чате."
-    : "Сбор будет работать без Telegram-группы — уведомления придут лично от бота.";
-  showSheet(`<h2>Новый сбор</h2><p class="sheet-intro">${intro}</p><form id="create-form"><input type="hidden" name="chat_id" value="${chatId}"><label class="field"><span>Название</span><input name="title" minlength="2" maxlength="80" placeholder="Например, Поездка в Варшаву" required></label><label class="field"><span>Валюта</span><select name="currency">${state.bootstrap.currencies.map((currency) => `<option>${currency}</option>`).join("")}</select></label><div class="sheet-actions"><button class="primary-button" type="submit">Создать сбор</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+  const chat = state.bootstrap.chats.find((item) => Number(item.chat_id) === Number(chatId));
+  const telegramChatTitle = tg?.initDataUnsafe?.chat?.title;
+  const destination = chatId
+    ? `<b>Уведомления в группу</b><span>${e(telegramChatTitle || chat?.title || chat?.label || "Текущая Telegram-группа")}</span>`
+    : "<b>Уведомления лично от бота</b><span>Важные действия придут участникам в Telegram</span>";
+  showSheet(`<h2>Новый сбор</h2><p class="sheet-intro">Укажите название и валюту — сбор появится сразу после создания.</p><div class="notification-destination"><span>🔔</span><span>${destination}</span></div><form id="create-form"><input type="hidden" name="chat_id" value="${chatId}"><label class="field"><span>Название</span><input name="title" minlength="2" maxlength="80" placeholder="Например, Поездка в Варшаву" required></label><label class="field"><span>Валюта</span><select name="currency">${state.bootstrap.currencies.map((currency) => `<option>${currency}</option>`).join("")}</select></label><div class="sheet-actions"><button class="primary-button" type="submit">Создать сбор</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
 
 function expenseSheet() {
@@ -777,6 +793,10 @@ app.addEventListener("click", async (event) => {
       haptic();
       return await renderCollections();
     }
+    if (action === "dismiss-payment-reminder") {
+      state.paymentReminderVisible = false;
+      return await renderCollections();
+    }
     if (action === "swipe-archive") {
       if (!await confirmAction("Завершить сбор и отправить его в архив на 30 дней?")) return;
       setBusy(target, true);
@@ -806,8 +826,8 @@ app.addEventListener("click", async (event) => {
     if (action === "load-history") return await renderHistory(target.dataset.kind);
     if (action === "expense-statistics") return expenseStatisticsSheet();
     if (action === "load-collection-history") {
-      if (target.dataset.kind === "transactions") state.collectionHistoryLimit += 20;
-      else state.collectionEventsLimit += 20;
+      if (target.dataset.kind === "transactions") state.collectionHistoryLimit += 10;
+      else state.collectionEventsLimit += 10;
       return await openCollection(state.collection.collection.id, "history", true);
     }
     if (action === "open-collection") return await openCollection(target.dataset.id);
@@ -1179,7 +1199,7 @@ app.addEventListener("touchmove", (event) => {
   const dx = touch.clientX - start.x;
   const dy = Math.abs(touch.clientY - start.y);
   if (dy > Math.abs(dx)) return;
-  const offset = Math.max(-104, Math.min(0, dx));
+  const offset = Math.max(-120, Math.min(0, dx));
   start.row.style.setProperty("--swipe-x", `${offset}px`);
 }, { passive: true });
 

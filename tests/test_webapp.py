@@ -98,7 +98,7 @@ def test_collection_invite_uses_safe_fallback_or_enabled_main_app():
     assert not any(button.callback_data == "decline:42" for button in buttons)
     assert {button.text for button in buttons} == {
         "🙋 Участвовать в сборе",
-        "📱 Открыть сбор",
+        "👀 Просмотреть",
     }
 
     settings.main_app_enabled = True
@@ -145,6 +145,10 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert "!canConfirm && !item.has_inactive_participants" in script_text
         assert "showPendingRepaymentConfirmation" in script_text
         assert "prompt-confirm-repayment" in script_text
+        assert "Создайте сбор, пригласите друзей" in script_text
+        assert "Privacy Mode остается включённым" not in script_text
+        assert "collectionHistoryLimit: 10" in script_text
+        assert "payment-details-reminder/seen" in script_text
         assert "if (tg?.openTelegramLink) tg.openTelegramLink(url);" in script_text
         assert "if (username && tg?.openTelegramLink)" not in script_text
         assert "tg://user?id=" not in script_text
@@ -405,6 +409,14 @@ async def test_repayment_notification_can_be_rejected_by_recipient(tmp_path):
             for row in private_call.kwargs["reply_markup"].inline_keyboard
             for button in row
         }
+        group_call = next(
+            call for call in bot.send_message.await_args_list if call.args[0] == -100500
+        )
+        group_callbacks = {
+            button.callback_data
+            for row in group_call.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        }
 
         rejected = await client.post(
             f"/api/transactions/{repayment_id}/reject",
@@ -431,6 +443,7 @@ async def test_repayment_notification_can_be_rejected_by_recipient(tmp_path):
     assert "start=collection_" not in private_message
     assert f"#{repayment_id}" not in private_message
     assert callbacks == {f"repayconfirm:{repayment_id}", f"repayreject:{repayment_id}"}
+    assert group_callbacks == callbacks
     assert rejected.status == 200
     assert rejected_payload["report_sent"] is False
     assert rejected_payload["notifications_queued"] is True
@@ -528,7 +541,7 @@ async def test_history_is_paginated_and_balance_has_personal_debts(tmp_path):
         first = await client.get("/api/history", headers={"X-Telegram-Init-Data": owner_auth})
         first_payload = await first.json()
         second = await client.get(
-            "/api/history?transaction_offset=20",
+            "/api/history?transaction_offset=10",
             headers={"X-Telegram-Init-Data": owner_auth},
         )
         second_payload = await second.json()
@@ -540,19 +553,47 @@ async def test_history_is_paginated_and_balance_has_personal_debts(tmp_path):
         balance = await client.get("/api/balance", headers={"X-Telegram-Init-Data": owner_auth})
         balance_payload = await balance.json()
 
-    assert len(first_payload["transactions"]) == 20
+    assert len(first_payload["transactions"]) == 10
     assert first_payload["transaction_has_more"] is True
-    assert len(second_payload["transactions"]) == 5
-    assert second_payload["transaction_has_more"] is False
+    assert len(second_payload["transactions"]) == 10
+    assert second_payload["transaction_has_more"] is True
     assert first_payload["expense_stats"]["monthly_by_currency"] == {"EUR": 1250}
     assert first_payload["expense_stats"]["monthly_paid_by_currency"] == {"EUR": 2500}
-    assert len(details_payload["history"]) == 20
+    assert len(details_payload["history"]) == 10
     assert details_payload["history_has_more"] is True
     assert balance_payload["collections"][0]["amount"] == 1250
     assert balance_payload["personal_debts"][0]["debtor_name"] == "Участник"
     assert balance_payload["personal_debts"][0]["debtor_username"] == "member"
     assert balance_payload["personal_debts"][0]["creditor_name"] == "Организатор"
     assert balance_payload["personal_debts"][0]["creditor_username"] == "owner"
+
+
+@pytest.mark.asyncio
+async def test_payment_details_reminder_is_shown_at_most_once_per_day(tmp_path):
+    database = Database(tmp_path / "payment-reminder.db")
+    await database.initialize()
+    service = BudgetService(database)
+    await service.upsert_user(1, "owner", "Организатор")
+    await service.create_collection(0, "Поездка", "EUR", 1)
+    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    application = web.Application()
+    setup_webapp_routes(application, SimpleNamespace(), service, settings)
+    auth = signed_init_data(user={"id": 1, "first_name": "Организатор"})
+
+    async with TestClient(TestServer(application)) as client:
+        first = await client.get("/api/bootstrap", headers={"X-Telegram-Init-Data": auth})
+        first_payload = await first.json()
+        seen = await client.post(
+            "/api/me/payment-details-reminder/seen",
+            json={},
+            headers={"X-Telegram-Init-Data": auth},
+        )
+        second = await client.get("/api/bootstrap", headers={"X-Telegram-Init-Data": auth})
+        second_payload = await second.json()
+
+    assert first_payload["payment_details_reminder_due"] is True
+    assert seen.status == 200
+    assert second_payload["payment_details_reminder_due"] is False
 
 
 @pytest.mark.asyncio
@@ -958,6 +999,7 @@ async def test_group_collection_creation_posts_actionable_invitation(tmp_path):
     call = bot.send_message.await_args
     assert call.args[0] == -100500
     assert "День рождения" in call.args[1]
+    assert call.args[1].count("День рождения") == 1
     assert "вести расходы вместе" in call.args[1]
     callbacks = {
         button.callback_data
@@ -1045,6 +1087,7 @@ async def test_collection_share_prepares_message_for_people_and_groups(tmp_path)
     assert call.kwargs["allow_group_chats"] is True
     assert call.kwargs["allow_bot_chats"] is False
     assert "Летний отпуск" in call.kwargs["result"].input_message_content.message_text
+    assert call.kwargs["result"].input_message_content.message_text.count("Летний отпуск") == 1
     assert "Инициатор:" in call.kwargs["result"].input_message_content.message_text
     assert "Владелец" in call.kwargs["result"].input_message_content.message_text
     assert (
@@ -1056,9 +1099,16 @@ async def test_collection_share_prepares_message_for_people_and_groups(tmp_path)
     )
     message_text = call.kwargs["result"].input_message_content.message_text
     assert "startapp=collection_" not in message_text
-    button = call.kwargs["result"].reply_markup.inline_keyboard[0][0]
-    assert button.url is None
-    assert button.callback_data == f"join:{collection_id}"
+    buttons = [
+        button
+        for row in call.kwargs["result"].reply_markup.inline_keyboard
+        for button in row
+    ]
+    assert buttons[0].callback_data == f"join:{collection_id}"
+    assert buttons[1].text == "👀 Просмотреть"
+    assert buttons[1].url == (
+        f"https://t.me/ShakeOnIt_bot?startapp=collection_{collection_id}&mode=compact"
+    )
 
 
 @pytest.mark.asyncio

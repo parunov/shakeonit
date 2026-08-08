@@ -51,7 +51,10 @@ def test_index() -> str:
 <script>
 window.Telegram = {{ WebApp: {{
   initData: {json.dumps(signed_init_data())},
-  initDataUnsafe: {{ user: {{ id: 1, first_name: "Анна", username: "anna", allows_write_to_pm: true }} }},
+  initDataUnsafe: {{
+    user: {{ id: 1, first_name: "Анна", username: "anna", allows_write_to_pm: true }},
+    chat: {{ id: -100500, type: "supergroup", title: "Друзья в Берлине" }}
+  }},
   ready() {{}}, expand() {{}}, setHeaderColor() {{}}, setBackgroundColor() {{}},
   enableClosingConfirmation() {{}}, disableClosingConfirmation() {{}}, close() {{}},
   requestWriteAccess(callback) {{ callback(true); }},
@@ -78,7 +81,6 @@ async def create_application(database_path: Path) -> web.Application:
     await service.upsert_user(1, "anna", "Анна", private_started=True)
     await service.upsert_user(2, "boris", "Борис", private_started=True)
     await service.upsert_user(3, None, "Максим", private_started=True)
-    await service.set_payment_details(1, "Карта •• 1111", "Альфа-Банк")
     await service.set_payment_details(2, "Телефон +375 29 000-00-00", "Беларусбанк")
     collection_id = await service.create_collection(-100500, "Берлин", "EUR", 1)
     await service.join(collection_id, 2, subscribe=True)
