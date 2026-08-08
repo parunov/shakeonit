@@ -8,6 +8,7 @@ const nav = document.getElementById("bottom-nav");
 const sheetLayer = document.getElementById("sheet-layer");
 const sheet = document.getElementById("sheet");
 const toastNode = document.getElementById("toast");
+const historyBadge = document.getElementById("history-badge");
 const botUsername = document.querySelector('meta[name="telegram-bot-username"]')?.content;
 const launchParams = new URLSearchParams(window.location.search);
 const moneyFormatters = new Map();
@@ -204,6 +205,9 @@ async function reloadBootstrap() {
   state.globalHistory = null;
   const initials = state.bootstrap.user.full_name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2);
   avatar.textContent = initials || "S";
+  const pendingCount = Number(state.bootstrap.pending_repayment_count || 0);
+  historyBadge.textContent = pendingCount > 99 ? "99+" : String(pendingCount);
+  historyBadge.hidden = pendingCount === 0;
 }
 
 function empty(icon, text) {
@@ -401,14 +405,14 @@ async function renderHistory(loadKind = null) {
     return `<article class="history-row"><div class="row-between"><div><div class="row-title history-collection-title"><span>${item.kind === "expense" ? "💸" : "🤝"}</span>${collectionTitle}</div><div class="row-note">${userLink(item.creator_id, item.creator_name, item.creator_username)} · ${shortDate(item.created_at)}</div></div><div class="amount">${money(item.amount, item.currency)}</div></div><div class="row-note">${description} ${status}</div>${shares}${actions}</article>`;
   }).join("");
   const events = data.events.map((item) => `<article class="history-row"><div class="row-title">${item.is_participant ? `<button class="collection-link" type="button" data-action="open-collection" data-id="${item.collection_id}">${e(item.collection_title)}</button>` : e(item.collection_title)}</div><div class="row-note">${shortDate(item.created_at)} · ${userLink(item.actor_id, item.actor_name, item.actor_username)} ${e(eventLabels[item.kind] || item.kind)}${item.target_name && item.target_name !== item.actor_name ? ` · ${userLink(item.target_user_id, item.target_name, item.target_username)}` : ""}</div></article>`).join("");
-  app.innerHTML = `<button class="hero history-stats-trigger" type="button" data-action="expense-statistics"><span><span class="hero-label">МОИ ЗАТРАТЫ С НАЧАЛА МЕСЯЦА</span><span class="hero-value">${moneyMap(data.expense_stats.monthly_by_currency)}</span><span class="hero-meta">${data.expense_stats.monthly_count} операций · подробная статистика</span></span><i>›</i></button><div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}${data.transaction_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="transactions">Загрузить ещё</button>' : ""}<div class="section-head"><h2>История сборов</h2></div>${events ? `<div class="card">${events}</div>` : empty("🧾", "Событий пока нет")}${data.event_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="events">Загрузить ещё</button>' : ""}`;
+  app.innerHTML = `<button class="hero history-stats-trigger" type="button" data-action="expense-statistics"><span><span class="hero-label">МОИ РАСХОДЫ С НАЧАЛА МЕСЯЦА</span><span class="hero-value">${moneyMap(data.expense_stats.monthly_personal_by_currency)}</span><span class="hero-meta">На меня распределено · возвращено ${moneyMap(data.expense_stats.monthly_repaid_by_currency)}</span></span><i>›</i></button><div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}${data.transaction_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="transactions">Загрузить ещё</button>' : ""}<div class="section-head"><h2>История сборов</h2></div>${events ? `<div class="card">${events}</div>` : empty("🧾", "Событий пока нет")}${data.event_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="events">Загрузить ещё</button>' : ""}`;
 }
 
 function expenseStatisticsSheet() {
   const stats = state.globalHistory?.expense_stats;
   if (!stats) return;
-  const collections = stats.by_collection.map((item) => `<div class="debt-row"><div><div class="row-title">${e(item.title)}</div><div class="row-note">${item.count} операций</div></div><div class="amount">${money(item.amount, item.currency)}</div></div>`).join("");
-  showSheet(`<h2>Мои затраты</h2><p class="sheet-intro">Учитываются активные затраты, которые добавили вы.</p><div class="stats-grid"><div><small>Этот месяц</small><b>${moneyMap(stats.monthly_by_currency)}</b><span>${stats.monthly_count} операций</span></div><div><small>За всё время</small><b>${moneyMap(stats.total_by_currency)}</b><span>${stats.total_count} операций</span></div></div><div class="section-head"><h2>По сборам</h2></div><div class="card">${collections || '<div class="debt-row">Затрат пока нет</div>'}</div><div class="sheet-actions"><button class="secondary-button" type="button" data-action="close-sheet">Закрыть</button></div>`);
+  const collections = stats.by_collection.map((item) => `<div class="statistics-collection"><div class="row-between"><div><div class="row-title">${e(item.title)}</div><div class="row-note">${item.operation_count} операций</div></div><div class="amount">${money(item.personal_amount, item.currency)}</div></div><div class="statistics-flow"><span>Оплачено вами <b>${money(item.paid_amount, item.currency)}</b></span><span>Возвращено вами <b>${money(item.repaid_amount, item.currency)}</b></span>${item.received_amount ? `<span>Получено возвратов <b>${money(item.received_amount, item.currency)}</b></span>` : ""}</div></div>`).join("");
+  showSheet(`<h2>Мои расходы</h2><p class="sheet-intro">«На меня распределено» показывает вашу личную долю общих затрат. Возвраты учитываются отдельно как фактически переведённые вами средства.</p><div class="statistics-period"><span>Этот месяц</span><strong>${moneyMap(stats.monthly_personal_by_currency)}</strong><small>${stats.monthly_personal_count} затрат относятся на вас</small></div><div class="stats-grid statistics-grid"><div><small>Оплачено вами</small><b>${moneyMap(stats.monthly_paid_by_currency)}</b><span>${stats.monthly_paid_count} операций</span></div><div><small>Возвращено вами</small><b>${moneyMap(stats.monthly_repaid_by_currency)}</b><span>${stats.monthly_repaid_count} переводов</span></div><div><small>Получено возвратов</small><b>${moneyMap(stats.monthly_received_by_currency)}</b><span>${stats.monthly_received_count} переводов</span></div><div><small>Ваша доля за всё время</small><b>${moneyMap(stats.total_personal_by_currency)}</b><span>${stats.personal_count} затрат</span></div></div><div class="section-head"><h2>По сборам</h2></div><div class="statistics-collections">${collections || '<div class="card debt-row">Данных пока нет</div>'}</div><div class="sheet-actions"><button class="secondary-button" type="button" data-action="close-sheet">Закрыть</button></div>`);
 }
 
 function renderInvitation() {
@@ -1175,7 +1179,7 @@ app.addEventListener("touchmove", (event) => {
   const dx = touch.clientX - start.x;
   const dy = Math.abs(touch.clientY - start.y);
   if (dy > Math.abs(dx)) return;
-  const offset = Math.max(-96, Math.min(0, dx));
+  const offset = Math.max(-104, Math.min(0, dx));
   start.row.style.setProperty("--swipe-x", `${offset}px`);
 }, { passive: true });
 

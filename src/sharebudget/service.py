@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 from .db import Database
 from .money import CURRENCIES, split_amount
@@ -1112,7 +1112,8 @@ class BudgetService:
                 """
                 SELECT t.id,t.collection_id,t.creator_id,t.counterparty_id,t.amount,
                        t.comment,t.created_at,c.title collection_title,c.currency,
-                       creator.full_name creator_name,creator.username creator_username
+                       creator.full_name creator_name,creator.username creator_username,
+                       COUNT(*) OVER() pending_count
                 FROM transactions t
                 JOIN collections c ON c.id=t.collection_id
                 JOIN participants recipient
@@ -1129,6 +1130,86 @@ class BudgetService:
                 (user_id, user_id),
             )
             return await cursor.fetchone()
+
+    async def due_repayment_reminders(
+        self, now: datetime | None = None, *, limit: int = 100
+    ) -> list[dict]:
+        """Return pending confirmations whose first or final reminder is due."""
+        now_utc = (now or datetime.now(UTC)).astimezone(UTC)
+        # Belarus uses UTC+3 year-round; a fixed offset avoids a runtime tzdata dependency.
+        local_zone = timezone(timedelta(hours=3), "Europe/Minsk")
+        async with self.db.connect() as connection:
+            rows = await connection.execute_fetchall(
+                """
+                SELECT t.id,t.collection_id,t.creator_id,t.counterparty_id,t.amount,
+                       t.comment,t.created_at,t.confirmation_reminder_1_sent_at,
+                       t.confirmation_reminder_2_sent_at,c.title collection_title,
+                       c.currency,creator.full_name creator_name,
+                       creator.username creator_username
+                FROM transactions t
+                JOIN collections c ON c.id=t.collection_id AND c.status='active'
+                JOIN participants recipient
+                  ON recipient.collection_id=c.id AND recipient.user_id=t.counterparty_id
+                 AND recipient.active=1
+                JOIN participants sender
+                  ON sender.collection_id=c.id AND sender.user_id=t.creator_id
+                 AND sender.active=1
+                JOIN users recipient_user
+                  ON recipient_user.id=t.counterparty_id AND recipient_user.notify_reminders=1
+                JOIN users creator ON creator.id=t.creator_id
+                WHERE t.kind='repayment' AND t.status='active'
+                  AND t.confirmation_status='pending'
+                  AND (t.confirmation_reminder_1_sent_at IS NULL
+                       OR t.confirmation_reminder_2_sent_at IS NULL)
+                ORDER BY t.created_at,t.id
+                LIMIT ?
+                """,
+                (max(1, min(limit, 500)),),
+            )
+        due: list[dict] = []
+        for source in rows:
+            row = dict(source)
+            created_at = datetime.fromisoformat(row["created_at"].replace(" ", "T")).replace(
+                tzinfo=UTC
+            )
+            first_due = created_at + timedelta(hours=1)
+            created_local = created_at.astimezone(local_zone)
+            second_due = datetime.combine(
+                created_local.date() + timedelta(days=1),
+                datetime.min.time().replace(hour=10),
+                tzinfo=local_zone,
+            ).astimezone(UTC)
+            if row["confirmation_reminder_1_sent_at"] is None and now_utc >= first_due:
+                row["reminder_stage"] = 1
+                due.append(row)
+            elif (
+                row["confirmation_reminder_1_sent_at"] is not None
+                and row["confirmation_reminder_2_sent_at"] is None
+                and now_utc >= second_due
+            ):
+                first_sent_at = datetime.fromisoformat(
+                    row["confirmation_reminder_1_sent_at"].replace(" ", "T")
+                ).replace(tzinfo=UTC)
+                if now_utc >= first_sent_at + timedelta(hours=1):
+                    row["reminder_stage"] = 2
+                    due.append(row)
+        return due
+
+    async def mark_repayment_reminder_sent(self, transaction_id: int, stage: int) -> bool:
+        if stage not in (1, 2):
+            raise ValueError("Reminder stage must be 1 or 2")
+        column = f"confirmation_reminder_{stage}_sent_at"
+        async with self.db.connect() as connection:
+            cursor = await connection.execute(
+                f"""
+                UPDATE transactions SET {column}=CURRENT_TIMESTAMP
+                WHERE id=? AND kind='repayment' AND status='active'
+                  AND confirmation_status='pending' AND {column} IS NULL
+                """,
+                (transaction_id,),
+            )
+            await connection.commit()
+        return cursor.rowcount == 1
 
     async def global_history(
         self,
@@ -1176,39 +1257,107 @@ class BudgetService:
         async with self.db.connect() as connection:
             currency_rows = await connection.execute_fetchall(
                 """
-                SELECT c.currency,
-                       SUM(t.amount) total_amount,
-                       SUM(CASE WHEN t.created_at >= datetime('now','start of month')
-                                THEN t.amount ELSE 0 END) monthly_amount,
-                       COUNT(*) total_count,
-                       SUM(t.created_at >= datetime('now','start of month')) monthly_count
-                FROM transactions t JOIN collections c ON c.id=t.collection_id
-                WHERE t.creator_id=? AND t.kind='expense' AND t.status='active'
-                GROUP BY c.currency ORDER BY c.currency
+                WITH movements AS (
+                    SELECT t.collection_id,c.currency,t.created_at,'personal' metric,s.amount
+                    FROM expense_shares s
+                    JOIN transactions t ON t.id=s.transaction_id AND t.status='active'
+                    JOIN collections c ON c.id=t.collection_id
+                    WHERE s.user_id=?
+                    UNION ALL
+                    SELECT t.collection_id,c.currency,t.created_at,'paid',t.amount
+                    FROM transactions t JOIN collections c ON c.id=t.collection_id
+                    WHERE t.creator_id=? AND t.kind='expense' AND t.status='active'
+                    UNION ALL
+                    SELECT t.collection_id,c.currency,t.confirmed_at,'repaid',t.amount
+                    FROM transactions t JOIN collections c ON c.id=t.collection_id
+                    WHERE t.creator_id=? AND t.kind='repayment' AND t.status='active'
+                      AND t.confirmation_status='confirmed'
+                    UNION ALL
+                    SELECT t.collection_id,c.currency,t.confirmed_at,'received',t.amount
+                    FROM transactions t JOIN collections c ON c.id=t.collection_id
+                    WHERE t.counterparty_id=? AND t.kind='repayment' AND t.status='active'
+                      AND t.confirmation_status='confirmed'
+                )
+                SELECT currency,
+                       SUM(CASE WHEN metric='personal' THEN amount ELSE 0 END) personal_amount,
+                       SUM(CASE WHEN metric='paid' THEN amount ELSE 0 END) paid_amount,
+                       SUM(CASE WHEN metric='repaid' THEN amount ELSE 0 END) repaid_amount,
+                       SUM(CASE WHEN metric='received' THEN amount ELSE 0 END) received_amount,
+                       SUM(CASE WHEN metric='personal' AND created_at>=datetime('now','start of month') THEN amount ELSE 0 END) monthly_personal_amount,
+                       SUM(CASE WHEN metric='paid' AND created_at>=datetime('now','start of month') THEN amount ELSE 0 END) monthly_paid_amount,
+                       SUM(CASE WHEN metric='repaid' AND created_at>=datetime('now','start of month') THEN amount ELSE 0 END) monthly_repaid_amount,
+                       SUM(CASE WHEN metric='received' AND created_at>=datetime('now','start of month') THEN amount ELSE 0 END) monthly_received_amount,
+                       SUM(metric='personal') personal_count,
+                       SUM(metric='paid') paid_count,
+                       SUM(metric='repaid') repaid_count,
+                       SUM(metric='received') received_count,
+                       SUM(metric='personal' AND created_at>=datetime('now','start of month')) monthly_personal_count,
+                       SUM(metric='paid' AND created_at>=datetime('now','start of month')) monthly_paid_count,
+                       SUM(metric='repaid' AND created_at>=datetime('now','start of month')) monthly_repaid_count,
+                       SUM(metric='received' AND created_at>=datetime('now','start of month')) monthly_received_count
+                FROM movements GROUP BY currency ORDER BY currency
                 """,
-                (user_id,),
+                (user_id, user_id, user_id, user_id),
             )
             collection_rows = await connection.execute_fetchall(
                 """
-                SELECT c.id collection_id,c.title,c.currency,SUM(t.amount) amount,COUNT(*) count
-                FROM transactions t JOIN collections c ON c.id=t.collection_id
-                WHERE t.creator_id=? AND t.kind='expense' AND t.status='active'
+                WITH movements AS (
+                    SELECT t.id transaction_id,t.collection_id,'personal' metric,s.amount
+                    FROM expense_shares s JOIN transactions t ON t.id=s.transaction_id
+                    WHERE s.user_id=? AND t.status='active'
+                    UNION ALL
+                    SELECT t.id,t.collection_id,'paid',t.amount FROM transactions t
+                    WHERE t.creator_id=? AND t.kind='expense' AND t.status='active'
+                    UNION ALL
+                    SELECT t.id,t.collection_id,'repaid',t.amount FROM transactions t
+                    WHERE t.creator_id=? AND t.kind='repayment' AND t.status='active'
+                      AND t.confirmation_status='confirmed'
+                    UNION ALL
+                    SELECT t.id,t.collection_id,'received',t.amount FROM transactions t
+                    WHERE t.counterparty_id=? AND t.kind='repayment' AND t.status='active'
+                      AND t.confirmation_status='confirmed'
+                )
+                SELECT c.id collection_id,c.title,c.currency,
+                       SUM(CASE WHEN m.metric='personal' THEN m.amount ELSE 0 END) personal_amount,
+                       SUM(CASE WHEN m.metric='paid' THEN m.amount ELSE 0 END) paid_amount,
+                       SUM(CASE WHEN m.metric='repaid' THEN m.amount ELSE 0 END) repaid_amount,
+                       SUM(CASE WHEN m.metric='received' THEN m.amount ELSE 0 END) received_amount,
+                       COUNT(DISTINCT m.transaction_id) operation_count
+                FROM movements m JOIN collections c ON c.id=m.collection_id
                 GROUP BY c.id,c.title,c.currency
-                ORDER BY amount DESC,c.title LIMIT 10
+                ORDER BY personal_amount DESC,repaid_amount DESC,c.title LIMIT 20
                 """,
-                (user_id,),
+                (user_id, user_id, user_id, user_id),
             )
-        return {
-            "monthly_by_currency": {
-                row["currency"]: row["monthly_amount"] or 0 for row in currency_rows
-            },
-            "total_by_currency": {
-                row["currency"]: row["total_amount"] or 0 for row in currency_rows
-            },
-            "monthly_count": sum(row["monthly_count"] or 0 for row in currency_rows),
-            "total_count": sum(row["total_count"] or 0 for row in currency_rows),
+
+        def amounts(field: str) -> dict[str, int]:
+            return {row["currency"]: row[field] or 0 for row in currency_rows if row[field]}
+
+        result = {
+            "monthly_personal_by_currency": amounts("monthly_personal_amount"),
+            "monthly_paid_by_currency": amounts("monthly_paid_amount"),
+            "monthly_repaid_by_currency": amounts("monthly_repaid_amount"),
+            "monthly_received_by_currency": amounts("monthly_received_amount"),
+            "total_personal_by_currency": amounts("personal_amount"),
+            "total_paid_by_currency": amounts("paid_amount"),
+            "total_repaid_by_currency": amounts("repaid_amount"),
+            "total_received_by_currency": amounts("received_amount"),
+            "monthly_personal_count": sum(row["monthly_personal_count"] or 0 for row in currency_rows),
+            "monthly_paid_count": sum(row["monthly_paid_count"] or 0 for row in currency_rows),
+            "monthly_repaid_count": sum(row["monthly_repaid_count"] or 0 for row in currency_rows),
+            "monthly_received_count": sum(row["monthly_received_count"] or 0 for row in currency_rows),
+            "personal_count": sum(row["personal_count"] or 0 for row in currency_rows),
+            "paid_count": sum(row["paid_count"] or 0 for row in currency_rows),
+            "repaid_count": sum(row["repaid_count"] or 0 for row in currency_rows),
+            "received_count": sum(row["received_count"] or 0 for row in currency_rows),
             "by_collection": [dict(row) for row in collection_rows],
         }
+        # Backward-compatible aliases now represent expenses assigned to the user.
+        result["monthly_by_currency"] = result["monthly_personal_by_currency"]
+        result["total_by_currency"] = result["total_personal_by_currency"]
+        result["monthly_count"] = result["monthly_personal_count"]
+        result["total_count"] = result["personal_count"]
+        return result
 
     async def balance_overview(self, user_id: int) -> dict:
         """Return balances with a constant number of queries, regardless of collection count."""

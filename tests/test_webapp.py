@@ -358,11 +358,13 @@ async def test_repayment_can_be_confirmed_from_global_history(tmp_path):
     assert pending["counterparty_id"] == 1
     assert pending["is_participant"] == 1
     assert bootstrap_before_payload["pending_repayment_confirmation"]["id"] == repayment_id
+    assert bootstrap_before_payload["pending_repayment_count"] == 1
     assert response.status == 200
     assert response_payload["report_sent"] is False
     assert response_payload["notifications_queued"] is True
     assert confirmed["confirmation_status"] == "confirmed"
     assert bootstrap_after_payload["pending_repayment_confirmation"] is None
+    assert bootstrap_after_payload["pending_repayment_count"] == 0
     confirmation_message = bot.send_message.await_args_list[0].args[1]
     assert "Отправитель" in confirmation_message
     assert "За билеты" in confirmation_message
@@ -542,7 +544,8 @@ async def test_history_is_paginated_and_balance_has_personal_debts(tmp_path):
     assert first_payload["transaction_has_more"] is True
     assert len(second_payload["transactions"]) == 5
     assert second_payload["transaction_has_more"] is False
-    assert first_payload["expense_stats"]["monthly_by_currency"] == {"EUR": 2500}
+    assert first_payload["expense_stats"]["monthly_by_currency"] == {"EUR": 1250}
+    assert first_payload["expense_stats"]["monthly_paid_by_currency"] == {"EUR": 2500}
     assert len(details_payload["history"]) == 20
     assert details_payload["history_has_more"] is True
     assert balance_payload["collections"][0]["amount"] == 1250

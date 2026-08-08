@@ -25,6 +25,7 @@ from aiogram.types import (
 from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector, web
 
 from .config import Settings
+from .keyboards import repayment_confirmation
 from .links import parse_group_start_param
 from .money import CURRENCIES, format_money, parse_amount
 from .notifications import replace_repayment_prompt, report_collection_event, send_with_retry
@@ -404,6 +405,9 @@ async def bootstrap(request: web.Request) -> web.Response:
             "pending_repayment_confirmation": (
                 dict(pending_confirmation) if pending_confirmation else None
             ),
+            "pending_repayment_count": (
+                int(pending_confirmation["pending_count"]) if pending_confirmation else 0
+            ),
             "sync_version": await service.sync_token(user_id, context_chat_id),
         }
     )
@@ -680,20 +684,7 @@ async def add_repayment(request: web.Request) -> web.Response:
     )
     creditor = await _member(service, collection_id, creditor_id)
     comment_line = f"\nКомментарий: {escape(comment.strip())}" if comment.strip() else ""
-    confirm_markup = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Подтвердить получение",
-                    callback_data=f"repayconfirm:{transaction_id}",
-                ),
-                InlineKeyboardButton(
-                    text="❌ Отклонить",
-                    callback_data=f"repayreject:{transaction_id}",
-                ),
-            ]
-        ]
-    )
+    confirm_markup = repayment_confirmation(transaction_id)
 
     async def deliver_repayment() -> None:
         async def send_confirmation() -> None:

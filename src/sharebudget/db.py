@@ -83,6 +83,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     confirmed_by INTEGER REFERENCES users(id),
     confirmed_at TEXT,
     confirmation_message_id INTEGER,
+    confirmation_reminder_1_sent_at TEXT,
+    confirmation_reminder_2_sent_at TEXT,
     cancelled_by INTEGER REFERENCES users(id),
     cancelled_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -104,12 +106,19 @@ ON transactions(collection_id, kind, status, confirmation_status, creator_id, co
 CREATE INDEX IF NOT EXISTS idx_transactions_recipient_confirmation
 ON transactions(counterparty_id, kind, status, confirmation_status, created_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_transactions_confirmation_reminders
+ON transactions(kind, status, confirmation_status, created_at)
+WHERE kind='repayment' AND status='active' AND confirmation_status='pending';
+
 CREATE TABLE IF NOT EXISTS expense_shares (
     transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
     user_id INTEGER NOT NULL REFERENCES users(id),
     amount INTEGER NOT NULL CHECK (amount >= 0),
     PRIMARY KEY (transaction_id, user_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_expense_shares_user
+ON expense_shares(user_id, transaction_id);
 
 CREATE TABLE IF NOT EXISTS collection_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -234,6 +243,14 @@ class Database:
             if "confirmation_message_id" not in transaction_column_names:
                 await connection.execute(
                     "ALTER TABLE transactions ADD COLUMN confirmation_message_id INTEGER"
+                )
+            if "confirmation_reminder_1_sent_at" not in transaction_column_names:
+                await connection.execute(
+                    "ALTER TABLE transactions ADD COLUMN confirmation_reminder_1_sent_at TEXT"
+                )
+            if "confirmation_reminder_2_sent_at" not in transaction_column_names:
+                await connection.execute(
+                    "ALTER TABLE transactions ADD COLUMN confirmation_reminder_2_sent_at TEXT"
                 )
             await connection.execute(
                 """

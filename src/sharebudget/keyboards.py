@@ -3,8 +3,7 @@ from __future__ import annotations
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     WebAppInfo,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -12,14 +11,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from .money import CURRENCIES
 
 
-def main_menu() -> ReplyKeyboardMarkup:
-    app = KeyboardButton(text="Открыть приложение")
-    return ReplyKeyboardMarkup(
-        keyboard=[[app]],
-        resize_keyboard=True,
-        is_persistent=True,
-        input_field_placeholder="Открыть приложение «По рукам»",
-    )
+def main_menu() -> ReplyKeyboardRemove:
+    """Keep Telegram's command menu, but remove the legacy text keyboard."""
+    return ReplyKeyboardRemove()
 
 
 def webapp_launch(url: str) -> InlineKeyboardMarkup:
@@ -30,6 +24,23 @@ def webapp_launch(url: str) -> InlineKeyboardMarkup:
                     text="Открыть приложение",
                     web_app=WebAppInfo(url=url),
                 )
+            ]
+        ]
+    )
+
+
+def repayment_confirmation(transaction_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтвердить получение",
+                    callback_data=f"repayconfirm:{transaction_id}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отклонить",
+                    callback_data=f"repayreject:{transaction_id}",
+                ),
             ]
         ]
     )

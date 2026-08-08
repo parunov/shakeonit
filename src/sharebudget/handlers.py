@@ -32,6 +32,7 @@ from .keyboards import (
     main_menu,
     participant_picker,
     people_keyboard,
+    repayment_confirmation,
     transaction_actions,
     webapp_launch,
 )
@@ -810,20 +811,7 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
         parse_mode="HTML",
         reply_markup=main_menu(),
     )
-    confirm_markup = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Подтвердить получение",
-                    callback_data=f"repayconfirm:{transaction_id}",
-                ),
-                InlineKeyboardButton(
-                    text="❌ Отклонить",
-                    callback_data=f"repayreject:{transaction_id}",
-                ),
-            ]
-        ]
-    )
+    confirm_markup = repayment_confirmation(transaction_id)
     await report_collection_event(
         message.bot,
         service,

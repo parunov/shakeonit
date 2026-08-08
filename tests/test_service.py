@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -170,6 +171,57 @@ async def test_pending_repayment_confirmation_is_exposed_only_until_decision(ser
 
     await service.confirm_repayment(repayment_id, 1)
     assert await service.pending_repayment_confirmation(1) is None
+
+
+@pytest.mark.asyncio
+async def test_repayment_reminders_are_due_once_at_one_hour_and_next_day(service):
+    collection_id = await make_collection(service)
+    await service.add_expense(collection_id, 1, 1000, [1, 2], "Билеты")
+    repayment_id = await service.add_repayment(collection_id, 2, 1, 500, "Перевод")
+    created_at = datetime(2026, 1, 5, 8, 0, tzinfo=UTC)
+    async with service.db.connect() as connection:
+        await connection.execute(
+            "UPDATE transactions SET created_at=? WHERE id=?",
+            (created_at.strftime("%Y-%m-%d %H:%M:%S"), repayment_id),
+        )
+        await connection.commit()
+
+    assert await service.due_repayment_reminders(created_at + timedelta(minutes=59)) == []
+    first = await service.due_repayment_reminders(created_at + timedelta(hours=1))
+    assert [(row["id"], row["reminder_stage"]) for row in first] == [(repayment_id, 1)]
+    assert await service.mark_repayment_reminder_sent(repayment_id, 1) is True
+    assert await service.mark_repayment_reminder_sent(repayment_id, 1) is False
+    async with service.db.connect() as connection:
+        await connection.execute(
+            "UPDATE transactions SET confirmation_reminder_1_sent_at=? WHERE id=?",
+            ((created_at + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"), repayment_id),
+        )
+        await connection.commit()
+
+    # 10:00 in Minsk is 07:00 UTC on the next calendar day.
+    assert await service.due_repayment_reminders(datetime(2026, 1, 6, 6, 59, tzinfo=UTC)) == []
+    second = await service.due_repayment_reminders(datetime(2026, 1, 6, 7, 0, tzinfo=UTC))
+    assert [(row["id"], row["reminder_stage"]) for row in second] == [(repayment_id, 2)]
+    assert await service.mark_repayment_reminder_sent(repayment_id, 2) is True
+    assert await service.due_repayment_reminders(datetime(2026, 1, 7, 7, 0, tzinfo=UTC)) == []
+
+
+@pytest.mark.asyncio
+async def test_expense_statistics_separates_personal_share_paid_and_repaid(service):
+    collection_id = await make_collection(service)
+    await service.add_expense(collection_id, 2, 1200, [1, 2, 3], "Обед")
+    repayment_id = await service.add_repayment(collection_id, 1, 2, 400, "Моя доля")
+    await service.confirm_repayment(repayment_id, 2)
+    await service.add_expense(collection_id, 1, 600, [2, 3], "Такси")
+
+    stats = await service.expense_statistics(1)
+
+    assert stats["total_personal_by_currency"] == {"EUR": 400}
+    assert stats["total_paid_by_currency"] == {"EUR": 600}
+    assert stats["total_repaid_by_currency"] == {"EUR": 400}
+    assert stats["by_collection"][0]["personal_amount"] == 400
+    assert stats["by_collection"][0]["paid_amount"] == 600
+    assert stats["by_collection"][0]["repaid_amount"] == 400
 
 
 @pytest.mark.asyncio

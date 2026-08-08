@@ -205,6 +205,16 @@ button:disabled { opacity: .5; cursor: default; }
 .stats-grid small, .stats-grid b { display: block; }
 .stats-grid b { margin-top: 6px; overflow-wrap: anywhere; }
 .stats-grid span, .created-collection span { display: block; margin-top: 5px; color: var(--muted); font-size: 12px; }
+.statistics-period { display: grid; gap: 5px; margin: 15px 0 10px; padding: 17px; border-radius: 19px; color: #fff; background: linear-gradient(135deg, #238fcb, var(--accent)); box-shadow: 0 10px 26px color-mix(in srgb, var(--accent) 22%, transparent); }
+.statistics-period span { font-size: 12px; opacity: .82; }
+.statistics-period strong { font-size: 28px; line-height: 1.15; letter-spacing: -.035em; }
+.statistics-period small { font-size: 11px; opacity: .82; }
+.statistics-grid > div { min-height: 104px; }
+.statistics-collections { display: grid; gap: 9px; }
+.statistics-collection { padding: 14px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: 0 6px 20px rgba(27,39,51,.06); }
+.statistics-flow { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 12px; margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--line); }
+.statistics-flow span { display: grid; gap: 3px; color: var(--muted); font-size: 10px; }
+.statistics-flow b { color: var(--text); font-size: 12px; }
 .success-mark { display: grid; place-items: center; width: 58px; height: 58px; margin: 0 auto 14px; border-radius: 20px; color: #fff; background: var(--good); box-shadow: 0 10px 25px color-mix(in srgb, var(--good) 30%, transparent); font-size: 28px; font-weight: 850; }
 .created-collection { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 15px 0; }
 .created-collection span { margin: 0; }
@@ -218,8 +228,10 @@ button:disabled { opacity: .5; cursor: default; }
 }
 .bottom-nav[hidden] { display: none; }
 .bottom-nav button { border: 0; border-radius: 15px; padding: 7px 4px 6px; color: var(--muted); background: transparent; font-size: 11px; font-weight: 680; transition: color .18s ease, background .18s ease, transform .18s ease; }
-.bottom-nav .nav-icon { display: grid; place-items: center; width: 24px; height: 24px; margin: 0 auto 2px; opacity: .72; }
+.bottom-nav .nav-icon { position: relative; display: grid; place-items: center; width: 24px; height: 24px; margin: 0 auto 2px; opacity: .72; }
 .bottom-nav .nav-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.bottom-nav .nav-badge { position: absolute; top: -5px; right: -10px; display: grid; place-items: center; min-width: 17px; height: 17px; padding: 0 4px; border: 2px solid var(--surface); border-radius: 10px; color: #fff; background: var(--bad); font-size: 9px; font-style: normal; font-weight: 820; line-height: 1; box-shadow: 0 2px 7px color-mix(in srgb, var(--bad) 32%, transparent); }
+.bottom-nav .nav-badge[hidden] { display: none; }
 .bottom-nav button.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent); }
 .bottom-nav button.active .nav-icon { opacity: 1; transform: translateY(-1px); }
 
@@ -247,8 +259,8 @@ button:disabled { opacity: .5; cursor: default; }
 
 .collection-swipe-row { position: relative; overflow: hidden; border-radius: 23px; background: transparent; }
 .collection-swipe-row .swipe-card { position: relative; z-index: 1; width: 100%; border-radius: 23px; transform: translateX(var(--swipe-x, 0)); transition: transform .2s ease; }
-.collection-swipe-row.revealed .swipe-card { transform: translateX(-96px); }
-.swipe-danger-action { position: absolute; inset: 0 0 0 auto; width: 96px; border: 0; border-radius: 0 23px 23px 0; color: #fff; background: var(--bad); font-size: 12px; font-weight: 780; }
+.collection-swipe-row.revealed .swipe-card { transform: translateX(-104px); }
+.swipe-danger-action { position: absolute; z-index: 0; inset: 0 0 0 auto; width: 104px; padding-left: 8px; border: 0; border-radius: 0 23px 23px 0; color: #fff; background: var(--bad); font-size: 12px; font-weight: 780; }
 .history-stats-trigger { display: grid; grid-template-columns: 1fr auto; align-items: center; width: 100%; border: 0; text-align: left; }
 .history-stats-trigger > span { display: grid; }
 .history-stats-trigger > i { font-size: 30px; font-style: normal; opacity: .8; }

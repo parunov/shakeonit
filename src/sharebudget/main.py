@@ -5,6 +5,7 @@ import logging
 import signal
 import ssl
 from contextlib import suppress
+from html import escape
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -25,7 +26,11 @@ from aiohttp import web
 from .config import Settings
 from .db import Database
 from .handlers import router
+from .keyboards import repayment_confirmation
 from .links import group_start_param
+from .money import format_money
+from .notifications import send_with_retry
+from .render import telegram_user_link
 from .service import BudgetService
 from .webapp import setup_webapp_routes
 
@@ -36,6 +41,70 @@ async def archive_cleanup(service: BudgetService) -> None:
         expired = await service.expire_archives()
         if expired:
             logging.getLogger(__name__).info("Permanently closed %s expired archives", expired)
+
+
+async def dispatch_repayment_reminders_once(bot: Bot, service: BudgetService) -> int:
+    reminders = await service.due_repayment_reminders()
+    async def deliver(item: dict) -> bool:
+        stage = item["reminder_stage"]
+        heading = (
+            "⏳ <b>Ожидается подтверждение возврата</b>"
+            if stage == 1
+            else "🔔 <b>Повторное напоминание о возврате</b>"
+        )
+        intro = (
+            "Час назад отправитель сообщил(а) о возврате долга."
+            if stage == 1
+            else "Пожалуйста, подтвердите получение или отклоните возврат. Больше напоминаний не будет."
+        )
+        comment_line = (
+            f"\nКомментарий: {escape(item['comment'])}" if item["comment"] else ""
+        )
+        chat_id = item["counterparty_id"]
+        text = (
+            f"{heading}\n\n{intro}\n\n"
+            f"От: {telegram_user_link(item['creator_id'], item['creator_name'], item['creator_username'])}\n"
+            f"Сумма: <b>{format_money(item['amount'], item['currency'])}</b>\n"
+            f"Сбор: <b>«{escape(item['collection_title'])}»</b>{comment_line}"
+        )
+        markup = repayment_confirmation(item["id"])
+        try:
+            await send_with_retry(
+                lambda chat_id=chat_id, text=text, markup=markup: bot.send_message(
+                    chat_id,
+                    text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=markup,
+                    request_timeout=5,
+                )
+            )
+            return await service.mark_repayment_reminder_sent(item["id"], stage)
+        except TelegramAPIError:
+            logging.getLogger(__name__).info(
+                "Could not deliver repayment reminder %s stage %s",
+                item["id"],
+                stage,
+            )
+            return False
+
+    delivered = 0
+    batch_size = 20
+    for offset in range(0, len(reminders), batch_size):
+        delivered += sum(await asyncio.gather(*(deliver(item) for item in reminders[offset : offset + batch_size])))
+        if offset + batch_size < len(reminders):
+            await asyncio.sleep(1)
+    return delivered
+
+
+async def repayment_reminder_loop(bot: Bot, service: BudgetService) -> None:
+    while True:
+        try:
+            delivered = await dispatch_repayment_reminders_once(bot, service)
+            if delivered:
+                logging.getLogger(__name__).info("Delivered %s repayment reminders", delivered)
+        except Exception:
+            logging.getLogger(__name__).exception("Repayment reminder cycle failed")
+        await asyncio.sleep(5 * 60)
 
 
 async def refresh_group_launchers(bot: Bot, service: BudgetService, settings: Settings) -> None:
@@ -187,6 +256,7 @@ async def main() -> None:
         )
     cleanup_task = asyncio.create_task(archive_cleanup(service))
     launcher_task = asyncio.create_task(refresh_group_launchers(bot, service, settings))
+    reminder_task = asyncio.create_task(repayment_reminder_loop(bot, service))
     try:
         if settings.webhook_url:
             await start_webhook(bot, dispatcher, service, settings)
@@ -198,10 +268,13 @@ async def main() -> None:
     finally:
         cleanup_task.cancel()
         launcher_task.cancel()
+        reminder_task.cancel()
         with suppress(asyncio.CancelledError):
             await cleanup_task
         with suppress(asyncio.CancelledError):
             await launcher_task
+        with suppress(asyncio.CancelledError):
+            await reminder_task
         await bot.session.close()
 
 
