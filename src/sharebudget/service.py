@@ -817,12 +817,19 @@ class BudgetService:
         amount: int,
         participant_ids: Iterable[int],
         comment: str,
+        *,
+        exact_shares: dict[int, int] | None = None,
     ) -> int:
         if amount <= 0:
             raise DomainError("Сумма должна быть больше нуля")
-        shares = split_amount(amount, list(participant_ids))
+        if exact_shares is None:
+            shares = split_amount(amount, list(participant_ids))
+        else:
+            shares = {int(user_id): int(share) for user_id, share in exact_shares.items()}
+            if not shares or any(share <= 0 for share in shares.values()):
+                raise DomainError("Сумма каждого участника должна быть больше нуля")
         if sum(shares.values()) != amount:
-            raise RuntimeError("Нарушена целостность распределения затраты")
+            raise DomainError("Общая сумма не совпадает с индивидуальными суммами")
         if len(comment.strip()) > 200:
             raise DomainError("Комментарий не должен быть длиннее 200 символов")
         async with self._write_slots, self.db.connect() as connection:
@@ -1514,12 +1521,8 @@ class BudgetService:
         collection = await self._collection(transaction["collection_id"])
         if actor_id not in (transaction["creator_id"], collection["admin_id"]):
             raise DomainError("Можно отменять только свои транзакции")
-        if (
-            transaction["kind"] == "repayment"
-            and transaction["confirmation_status"] == "confirmed"
-            and actor_id != collection["admin_id"]
-        ):
-            raise DomainError("Подтверждённый возврат может отменить только администратор сбора")
+        if transaction["kind"] == "repayment" and transaction["confirmation_status"] == "confirmed":
+            raise DomainError("Подтверждённый возврат нельзя удалить")
         if collection["status"] != "active":
             raise DomainError("Архивный сбор нельзя изменять")
         async with self.db.connect() as connection:
@@ -1620,10 +1623,14 @@ class BudgetService:
                 shares = expense_shares
                 if shares is None:
                     rows = await connection.execute_fetchall(
-                        "SELECT user_id FROM expense_shares WHERE transaction_id=? ORDER BY user_id",
+                        "SELECT user_id,amount FROM expense_shares WHERE transaction_id=? ORDER BY user_id",
                         (transaction_id,),
                     )
-                    shares = split_amount(amount, [row["user_id"] for row in rows])
+                    shares = (
+                        {row["user_id"]: row["amount"] for row in rows}
+                        if amount == transaction["amount"]
+                        else split_amount(amount, [row["user_id"] for row in rows])
+                    )
                 if sum(shares.values()) != amount:
                     raise RuntimeError("Нарушена целостность распределения затраты")
                 await connection.execute(

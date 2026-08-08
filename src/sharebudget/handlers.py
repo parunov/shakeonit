@@ -198,6 +198,25 @@ async def show_collection(message: Message, collection_id: int, actor_id: int, s
     await safe_edit(message, text, keyboard)
 
 
+async def send_welcome(message: Message, settings: Settings) -> None:
+    markup = (
+        app_launch_markup(settings)
+        if settings.webapp_url and message.chat.type == ChatType.PRIVATE
+        else main_menu()
+    )
+    await message.answer(
+        "👋 <b>Добро пожаловать в «По рукам»</b>\n\n"
+        "Создавайте сборы для поездок и праздников, делите общие расходы и всегда "
+        "видьте, кто кому сколько должен(а).\n\n"
+        "📱 Откройте приложение, создайте сбор и пригласите друзей — дальше все траты, "
+        "возвраты и балансы будут собраны в одном месте.\n"
+        "⚡ Быструю затрату в группе можно добавить командой: "
+        "<code>/expense 40 @ivan @maxim билеты</code>.",
+        reply_markup=markup,
+        parse_mode=ParseMode.HTML,
+    )
+
+
 @router.message(CommandStart())
 async def start(
     message: Message,
@@ -277,22 +296,16 @@ async def start(
                 reply_markup=app_launch_markup(settings, f"collection_{collection['id']}"),
             )
         return
-    await message.answer(
-        "👋 <b>Добро пожаловать в «По рукам»</b>\n\n"
-        "Создавайте сборы для поездок и праздников, делите общие расходы и всегда "
-        "видьте, кто кому сколько должен(а).\n\n"
-        "📱 Откройте приложение, создайте сбор и пригласите друзей — дальше все траты, "
-        "возвраты и балансы будут собраны в одном месте.\n"
-        "⚡ Быструю затрату в группе можно добавить командой: "
-        "<code>/expense 40 @ivan @maxim билеты</code>.",
-        reply_markup=private_menu,
-        parse_mode=ParseMode.HTML,
-    )
-    if settings.webapp_url and message.chat.type == ChatType.PRIVATE:
-        await message.answer(
-            "📱 Или откройте полный интерфейс «По рукам»:",
-            reply_markup=app_launch_markup(settings),
-        )
+    await send_welcome(message, settings)
+
+
+@router.message(StateFilter(None), F.text.regexp(r"(?i)^/start(?:@ShakeOnIt_bot)?\s*$"))
+async def start_text_fallback(
+    message: Message, service: BudgetService, settings: Settings
+) -> None:
+    """Answer even when Telegram omitted the command entity for a plain /start message."""
+    await sync_user(service, message)
+    await send_welcome(message, settings)
 
 
 @router.message(Command("menu"))

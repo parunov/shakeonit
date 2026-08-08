@@ -96,8 +96,9 @@ def test_collection_invite_uses_safe_fallback_or_enabled_main_app():
     assert any(button.url == "https://t.me/ShakeOnIt_bot?start=collection_42" for button in buttons)
     assert any(button.callback_data == "join:42" for button in buttons)
     assert not any(button.callback_data == "decline:42" for button in buttons)
+    assert len(_collection_invite_markup(42, settings).inline_keyboard) == 1
     assert {button.text for button in buttons} == {
-        "🙋 Участвовать в сборе",
+        "🙋 Участвовать",
         "👀 Просмотреть",
     }
 
@@ -150,6 +151,8 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert "collectionHistoryLimit: 10" in script_text
         assert "paymentReminderDismissed" in script_text
         assert "payment-details-reminder/seen" not in script_text
+        assert "По суммам" in script_text
+        assert "participant_shares" in script_text
         assert "if (tg?.openTelegramLink) tg.openTelegramLink(url);" in script_text
         assert "if (username && tg?.openTelegramLink)" not in script_text
         assert "tg://user?id=" not in script_text
@@ -306,6 +309,59 @@ async def test_edit_expense_api_replaces_participants(tmp_path):
     assert "Ужин" in report and "Поздний ужин" in report
     assert "Организатор" in report and "Анна" in report and "Максим" in report
     assert f"#{transaction_id}" not in report
+
+
+@pytest.mark.asyncio
+async def test_expense_api_accepts_individual_participant_amounts(tmp_path):
+    database = Database(tmp_path / "custom-shares.db")
+    await database.initialize()
+    service = BudgetService(database)
+    await service.upsert_user(1, "owner", "Организатор")
+    await service.upsert_user(2, "anna", "Анна")
+    await service.upsert_user(3, "max", "Максим")
+    collection_id = await service.create_collection(0, "Поездка", "EUR", 1)
+    await service.join(collection_id, 2)
+    await service.join(collection_id, 3)
+    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    application = web.Application()
+    setup_webapp_routes(
+        application,
+        SimpleNamespace(send_message=AsyncMock()),
+        service,
+        settings,
+    )
+    auth = signed_init_data(user={"id": 1, "first_name": "Организатор"})
+
+    async with TestClient(TestServer(application)) as client:
+        response = await client.post(
+            f"/api/collections/{collection_id}/expenses",
+            json={
+                "comment": "Разные билеты",
+                "participant_shares": [
+                    {"user_id": 1, "amount": "10"},
+                    {"user_id": 2, "amount": "20,50"},
+                    {"user_id": 3, "amount": "30"},
+                ],
+            },
+            headers={"X-Telegram-Init-Data": auth},
+        )
+        payload = await response.json()
+        details = await client.get(
+            f"/api/collections/{collection_id}",
+            headers={"X-Telegram-Init-Data": auth},
+        )
+        details_payload = await details.json()
+
+    assert response.status == 200
+    transaction = next(
+        row for row in details_payload["history"] if row["id"] == payload["transaction_id"]
+    )
+    assert transaction["amount"] == 6050
+    assert sorted((row["user_id"], row["amount"]) for row in transaction["shares"]) == [
+        (1, 1000),
+        (2, 2050),
+        (3, 3000),
+    ]
 
 
 @pytest.mark.asyncio

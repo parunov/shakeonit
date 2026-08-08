@@ -269,10 +269,10 @@ def _collection_invite_markup(collection_id: int, settings: Settings) -> InlineK
         if settings.main_app_enabled
         else f"https://t.me/{username}?start=collection_{collection_id}"
     )
-    rows = [
-        [InlineKeyboardButton(text="🙋 Участвовать в сборе", callback_data=f"join:{collection_id}")],
-        [InlineKeyboardButton(text="👀 Просмотреть", url=collection_url)],
-    ]
+    rows = [[
+        InlineKeyboardButton(text="🙋 Участвовать", callback_data=f"join:{collection_id}"),
+        InlineKeyboardButton(text="👀 Просмотреть", url=collection_url),
+    ]]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -637,14 +637,35 @@ async def add_expense(request: web.Request) -> web.Response:
     collection_id = int(request.match_info["collection_id"])
     collection = await _require_member(service, collection_id, user["id"])
     payload = await _json_body(request)
-    amount = parse_amount(str(payload.get("amount", "")))
-    participants = payload.get("participant_ids")
-    if not isinstance(participants, list):
-        raise ApiError("Выберите участников")
-    participant_ids = [int(item) for item in participants]
+    participant_shares = None
+    raw_shares = payload.get("participant_shares")
+    if raw_shares is not None:
+        if not isinstance(raw_shares, list) or not raw_shares:
+            raise ApiError("Укажите сумму хотя бы для одного участника")
+        participant_shares = {}
+        for item in raw_shares:
+            if not isinstance(item, dict):
+                raise ApiError("Проверьте индивидуальные суммы")
+            participant_id = _integer(item, "user_id", "Проверьте участника")
+            if participant_id in participant_shares:
+                raise ApiError("Участник указан несколько раз")
+            participant_shares[participant_id] = parse_amount(str(item.get("amount", "")))
+        participant_ids = list(participant_shares)
+        amount = sum(participant_shares.values())
+    else:
+        amount = parse_amount(str(payload.get("amount", "")))
+        participants = payload.get("participant_ids")
+        if not isinstance(participants, list):
+            raise ApiError("Выберите участников")
+        participant_ids = [int(item) for item in participants]
     comment = str(payload.get("comment", ""))
     transaction_id = await service.add_expense(
-        collection_id, user["id"], amount, participant_ids, comment
+        collection_id,
+        user["id"],
+        amount,
+        participant_ids,
+        comment,
+        exact_shares=participant_shares,
     )
     sent, notifications_sent = _queue_report(
         request,

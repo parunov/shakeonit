@@ -294,6 +294,55 @@ async def test_cancel_removes_effect_but_keeps_history(service):
 
 
 @pytest.mark.asyncio
+async def test_custom_expense_shares_are_kept_exactly(service):
+    collection_id = await make_collection(service)
+    transaction_id = await service.add_expense(
+        collection_id,
+        1,
+        1000,
+        [1, 2, 3],
+        "Разные суммы",
+        exact_shares={1: 100, 2: 300, 3: 600},
+    )
+
+    assert await service.get_balances(collection_id) == {1: 900, 2: -300, 3: -600}
+    shares = (await service.expense_shares_for_transactions([transaction_id]))[transaction_id]
+    assert sorted((row["user_id"], row["amount"]) for row in shares) == [
+        (1, 100),
+        (2, 300),
+        (3, 600),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_confirmed_repayment_cannot_be_cancelled_even_by_admin(service):
+    collection_id = await make_collection(service)
+    await service.add_expense(collection_id, 1, 1000, [1, 2], "Такси")
+    repayment_id = await service.add_repayment(collection_id, 2, 1, 500)
+    await service.confirm_repayment(repayment_id, 1)
+
+    with pytest.raises(DomainError, match="нельзя удалить"):
+        await service.cancel_transaction(repayment_id, 1)
+
+
+@pytest.mark.asyncio
+async def test_archived_or_deleted_collection_transactions_cannot_change(service):
+    collection_id = await make_collection(service)
+    transaction_id = await service.add_expense(collection_id, 1, 1000, [1, 2], "Такси")
+    await service.archive(collection_id, 1)
+
+    with pytest.raises(DomainError, match="Архивный сбор"):
+        await service.cancel_transaction(transaction_id, 1)
+    with pytest.raises(DomainError, match="архиве"):
+        await service.edit_transaction(transaction_id, 1, 1200, "Новое такси")
+
+    await service.delete_archived(collection_id, 1)
+    assert await service.transaction(transaction_id) is None
+    with pytest.raises(DomainError, match="не найдена"):
+        await service.cancel_transaction(transaction_id, 1)
+
+
+@pytest.mark.asyncio
 async def test_member_cannot_cancel_someone_elses_transaction(service):
     collection_id = await make_collection(service)
     transaction_id = await service.add_expense(collection_id, 2, 1000, [1, 2], "Такси")
@@ -323,6 +372,28 @@ async def test_edit_expense_resplits_exactly(service):
     await service.edit_transaction(transaction_id, 1, 1001, "Ужин")
     assert await service.get_balances(collection_id) == {1: 667, 2: -334, 3: -333}
     assert sum((await service.get_balances(collection_id)).values()) == 0
+
+
+@pytest.mark.asyncio
+async def test_edit_custom_expense_comment_preserves_exact_shares(service):
+    collection_id = await make_collection(service)
+    transaction_id = await service.add_expense(
+        collection_id,
+        1,
+        1000,
+        [],
+        "Еда",
+        exact_shares={1: 100, 2: 300, 3: 600},
+    )
+
+    await service.edit_transaction(transaction_id, 1, 1000, "Ужин")
+
+    shares = (await service.expense_shares_for_transactions([transaction_id]))[transaction_id]
+    assert [(row["user_id"], row["amount"]) for row in shares] == [
+        (1, 100),
+        (2, 300),
+        (3, 600),
+    ]
 
 
 @pytest.mark.asyncio

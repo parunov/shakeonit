@@ -13,6 +13,7 @@ from sharebudget.handlers import (
     open_webapp,
     remember_group_when_bot_is_added,
     start,
+    start_text_fallback,
     unknown_action,
 )
 from sharebudget.service import BudgetService
@@ -47,10 +48,15 @@ async def test_contact_deep_link_renders_bot_api_profile_link_without_username(t
         message,
         SimpleNamespace(args="contact_2"),
         service,
-        Settings(bot_token="123456:test-token"),
+        Settings(
+            bot_token="123456:test-token",
+            webapp_url="https://example.com/app",
+            main_app_enabled=True,
+        ),
     )
 
     text = message.answer.await_args.args[0]
+    message.answer.assert_awaited_once()
     assert 'href="tg://user?id=2"' in text
     assert "Участник без ника" in text
 
@@ -81,6 +87,28 @@ async def test_welcome_explains_benefits_without_privacy_or_password_copy(
     assert "кто кому сколько" in text.lower()
     assert "privacy" not in text.lower()
     assert "парол" not in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_plain_start_fallback_sends_welcome(tmp_path, monkeypatch):
+    database = Database(tmp_path / "start-fallback.db")
+    await database.initialize()
+    service = BudgetService(database)
+    message = SimpleNamespace(
+        chat=SimpleNamespace(type=ChatType.PRIVATE, id=1),
+        from_user=SimpleNamespace(id=1, username=None, full_name="Анна"),
+        answer=AsyncMock(),
+    )
+    monkeypatch.setattr("sharebudget.handlers.sync_user", AsyncMock())
+
+    await start_text_fallback(
+        message,
+        service,
+        Settings(bot_token="123456:test-token", webapp_url="https://example.com/app"),
+    )
+
+    message.answer.assert_awaited_once()
+    assert "Добро пожаловать" in message.answer.await_args.args[0]
 
 
 @pytest.mark.asyncio

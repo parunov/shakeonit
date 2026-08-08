@@ -261,12 +261,12 @@ button:disabled { opacity: .5; cursor: default; }
 .collection-swipe-row .swipe-card { position: relative; z-index: 1; width: 100%; border-radius: 23px; transform: translateX(var(--swipe-x, 0)); transition: transform .2s ease; }
 .collection-swipe-row.revealed .swipe-card { transform: translateX(-120px); }
 .swipe-danger-action { position: absolute; z-index: 0; inset: 0 0 0 auto; width: 120px; padding-left: 14px; border: 0; border-radius: 0 23px 23px 0; color: #fff; background: var(--bad); font-size: 12px; font-weight: 780; }
-.payment-reminder { position: relative; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 11px; margin: 12px 0 15px; padding: 13px 38px 13px 13px; border: 1px solid color-mix(in srgb, #78a890 26%, var(--line)); border-radius: 19px; background: color-mix(in srgb, #dcefe5 62%, var(--surface)); box-shadow: 0 8px 24px rgba(45, 92, 70, .08); }
-.payment-reminder-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 13px; background: color-mix(in srgb, #78a890 18%, var(--surface)); font-size: 20px; }
+.payment-reminder { position: relative; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 11px; margin: 12px 0 15px; padding: 13px 38px 13px 13px; border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line)); border-radius: 19px; color: var(--text); background: var(--surface-strong); box-shadow: 0 9px 26px rgba(20, 48, 68, .11); }
+.payment-reminder-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 13px; background: color-mix(in srgb, var(--accent) 14%, var(--surface)); font-size: 20px; }
 .payment-reminder > span:nth-child(2) { display: grid; gap: 3px; }
 .payment-reminder b { font-size: 13px; }
-.payment-reminder small { color: var(--muted); font-size: 11px; line-height: 1.35; }
-.payment-reminder > button:not(.payment-reminder-close) { min-height: 34px; padding: 0 11px; border: 0; border-radius: 11px; color: #315f4a; background: color-mix(in srgb, #78a890 20%, var(--surface)); font-size: 11px; font-weight: 760; }
+.payment-reminder small { color: color-mix(in srgb, var(--text) 70%, transparent); font-size: 11px; line-height: 1.35; }
+.payment-reminder > button:not(.payment-reminder-close) { min-height: 34px; padding: 0 11px; border: 0; border-radius: 11px; color: #fff; background: var(--accent); font-size: 11px; font-weight: 760; }
 .payment-reminder-close { position: absolute; top: 5px; right: 7px; width: 27px; height: 27px; border: 0; color: var(--muted); background: transparent; font-size: 19px; line-height: 1; }
 .notification-destination { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 11px; margin: 2px 0 16px; padding: 13px; border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--line)); border-radius: 16px; background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
 .notification-destination > span:first-child { font-size: 20px; }
@@ -294,6 +294,18 @@ button:disabled { opacity: .5; cursor: default; }
 .check-list { display: grid; gap: 8px; margin: 12px 0 18px; }
 .check-row { display: flex; align-items: center; gap: 11px; padding: 12px; border-radius: 14px; background: var(--bg); }
 .check-row input { width: 20px; height: 20px; accent-color: var(--accent); }
+.expense-mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 14px 0 16px; padding: 4px; border-radius: 15px; background: var(--bg); }
+.expense-mode-switch button { min-height: 38px; border: 0; border-radius: 12px; color: var(--muted); background: transparent; font-size: 12px; font-weight: 760; }
+.expense-mode-switch button.active { color: var(--accent); background: var(--surface-strong); box-shadow: 0 4px 14px rgba(20, 40, 60, .09); }
+.custom-share-list { display: grid; gap: 8px; margin: 4px 0 12px; }
+.custom-share-row { display: grid; grid-template-columns: minmax(0, 1fr) 128px; align-items: center; gap: 10px; min-height: 52px; padding: 8px 10px 8px 13px; border: 1px solid var(--line); border-radius: 15px; background: var(--bg); }
+.custom-share-row > span { min-width: 0; font-size: 13px; font-weight: 680; }
+.custom-share-row label { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 5px; }
+.custom-share-row input { min-width: 0; width: 100%; padding: 9px 8px; border: 1px solid var(--line); border-radius: 11px; color: var(--text); background: var(--surface-strong); text-align: right; font-size: 15px; font-weight: 720; }
+.custom-share-row small { color: var(--muted); font-size: 10px; font-weight: 720; }
+.custom-share-total { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0 16px; padding: 13px 14px; border-radius: 15px; color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, var(--surface)); }
+.custom-share-total span { font-size: 12px; font-weight: 700; }
+.custom-share-total strong { font-size: 19px; }
 .sheet-actions { display: grid; gap: 9px; margin-top: 18px; }
 .repayment-prompt-mark { display: grid; place-items: center; width: 58px; height: 58px; margin: 0 auto 15px; border-radius: 20px; color: #fff; background: linear-gradient(145deg, var(--accent), #64c8e7); box-shadow: 0 12px 28px color-mix(in srgb, var(--accent) 28%, transparent); font-size: 31px; font-weight: 780; }
 .repayment-prompt-card { display: grid; gap: 12px; padding: 16px; border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line)); border-radius: 20px; background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
