@@ -157,6 +157,9 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert "теперь общие расходы считаются сами" in script_text
         assert 'trackScreen("collections", "Сборы")' in script_text
         assert 'trackEvent("collection-created", "Создан сбор")' in script_text
+        assert 'referrer: `telegram-user-${telegramId}`' in script_text
+        assert 'path: "event/app-session"' in script_text
+        assert 'trackEvent(`active-user-${telegramId}`' in script_text
         assert "Privacy Mode остается включённым" not in script_text
         assert "collectionHistoryLimit: 10" in script_text
         assert "paymentReminderDismissed" in script_text

@@ -50,6 +50,7 @@ const analyticsQueue = [];
 let analyticsRetryTimer = null;
 let analyticsAttempts = 0;
 let lastTrackedScreen = "";
+let analyticsSessionStarted = false;
 
 function flushAnalytics() {
   analyticsRetryTimer = null;
@@ -64,7 +65,11 @@ function flushAnalytics() {
 
 function trackAnalytics(payload) {
   if (!analyticsEnabled) return;
-  analyticsQueue.push(payload);
+  const telegramId = Number(state.bootstrap?.user?.id || 0);
+  analyticsQueue.push({
+    ...payload,
+    ...(telegramId ? { referrer: `telegram-user-${telegramId}` } : {}),
+  });
   if (!analyticsRetryTimer) flushAnalytics();
 }
 
@@ -77,6 +82,19 @@ function trackScreen(name, label) {
 
 function trackEvent(name, label) {
   trackAnalytics({ path: `event/${name}`, title: label, event: true });
+}
+
+function trackAnalyticsSession() {
+  if (analyticsSessionStarted || !state.bootstrap?.user?.id) return;
+  analyticsSessionStarted = true;
+  const telegramId = Number(state.bootstrap.user.id);
+  trackAnalytics({
+    path: "event/app-session",
+    title: "Запуск Mini App",
+    event: true,
+    no_session: true,
+  });
+  trackEvent(`active-user-${telegramId}`, `Активный Telegram ID ${telegramId}`);
 }
 
 const e = (value) => String(value ?? "")
@@ -265,6 +283,7 @@ function showPendingRepaymentConfirmation() {
 
 async function reloadBootstrap() {
   state.bootstrap = await api("/api/bootstrap");
+  trackAnalyticsSession();
   state.paymentReminderVisible = Boolean(
     state.bootstrap.payment_details_missing && !state.paymentReminderDismissed
   );
@@ -642,7 +661,10 @@ async function shareCollection(collection) {
     });
     return await new Promise((resolve) => {
       tg.shareMessage(prepared.prepared_message_id, (shared) => {
-        if (shared) toast("Приглашение отправлено");
+        if (shared) {
+          trackEvent("invitation-shared", "Отправлено приглашение в сбор");
+          toast("Приглашение отправлено");
+        }
         resolve(Boolean(shared));
       });
     });
@@ -881,6 +903,7 @@ app.addEventListener("click", async (event) => {
       if (!await confirmAction("Удалить архивный сбор навсегда? Все операции и история будут удалены без возможности восстановления.")) return;
       setBusy(target, true);
       const result = await api(`/api/collections/${target.dataset.id}`, { method: "DELETE" });
+      trackEvent("collection-deleted", "Удалён архивный сбор");
       reportToast(result, "Сбор удалён");
       await reloadBootstrap();
       return await renderCollections();
@@ -941,6 +964,7 @@ app.addEventListener("click", async (event) => {
       if (!await confirmAction("Отправить всем вашим должникам вежливое напоминание о расчёте?")) return;
       setBusy(target, true);
       const result = await api(`/api/collections/${state.collection.collection.id}/request-funds`, { method: "POST", body: "{}" });
+      trackEvent("funds-requested", "Отправлен запрос средств");
       if (result.notifications_queued) {
         toast(`Напоминания поставлены в отправку · ${result.debtors_count}`);
         return await refreshCurrent(state.collectionTab);
@@ -963,6 +987,7 @@ app.addEventListener("click", async (event) => {
       setBusy(target, true);
       const id = state.collection.collection.id;
       const result = await api(`/api/collections/${id}/notifications`, { method: "PATCH", body: JSON.stringify({ enabled: !enabled }) });
+      trackEvent(result.notifications_enabled ? "collection-notifications-enabled" : "collection-notifications-disabled", "Изменены уведомления сбора");
       toast(result.notifications_enabled ? "Уведомления включены" : enabled ? "Уведомления выключены" : "Telegram не разрешил уведомления", !enabled && !result.notifications_enabled);
       return await openCollection(id, state.collectionTab, true);
     }
@@ -979,6 +1004,7 @@ app.addEventListener("click", async (event) => {
       if (!await confirmAction(question)) return;
       setBusy(target, true);
       const result = await api(`/api/transactions/${target.dataset.id}/cancel`, { method: "POST", body: "{}" });
+      trackEvent("transaction-cancelled", "Отменена транзакция");
       reportToast(result, fromGlobalHistory ? "Транзакция удалена" : "Транзакция отменена");
       if (fromGlobalHistory) {
         await reloadBootstrap();
@@ -990,6 +1016,7 @@ app.addEventListener("click", async (event) => {
       if (!await confirmAction("Подтвердить, что деньги получены?")) return;
       setBusy(target, true);
       const result = await api(`/api/transactions/${target.dataset.id}/confirm`, { method: "POST", body: "{}" });
+      trackEvent("repayment-confirmed", "Подтверждено получение возврата");
       reportToast(result, "Получение подтверждено");
       if (target.dataset.return === "global") {
         await reloadBootstrap();
@@ -1001,6 +1028,7 @@ app.addEventListener("click", async (event) => {
       if (!await confirmAction("Отклонить получение? Возврат не будет учтён в балансах.")) return;
       setBusy(target, true);
       const result = await api(`/api/transactions/${target.dataset.id}/reject`, { method: "POST", body: "{}" });
+      trackEvent("repayment-rejected", "Отклонено получение возврата");
       reportToast(result, "Получение отклонено");
       if (target.dataset.return === "global") {
         await reloadBootstrap();
@@ -1014,6 +1042,8 @@ app.addEventListener("click", async (event) => {
       setBusy(target, true);
       const id = state.collection.collection.id;
       const result = await api(`/api/collections/${id}/${action}`, { method: "POST", body: "{}" });
+      const actionEvent = { leave: "collection-left", archive: "collection-archived", restore: "collection-restored" }[action];
+      trackEvent(actionEvent, "Изменён статус сбора");
       reportToast(result, action === "leave" ? "Вы вышли из сбора" : action === "archive" ? "Сбор в архиве" : "Сбор восстановлен");
       await reloadBootstrap();
       await renderCollections();
@@ -1023,6 +1053,7 @@ app.addEventListener("click", async (event) => {
       setBusy(target, true);
       const id = state.collection.collection.id;
       const result = await api(`/api/collections/${id}`, { method: "DELETE" });
+      trackEvent("collection-deleted", "Удалён архивный сбор");
       reportToast(result, "Сбор удалён");
       state.collection = null;
       await reloadBootstrap();
@@ -1063,6 +1094,7 @@ app.addEventListener("change", async (event) => {
       method: "PATCH",
       body: JSON.stringify({ currency: event.target.value }),
     });
+    trackEvent("balance-currency-changed", "Изменена валюта общего баланса");
     await reloadBootstrap();
     haptic();
     toast(`Общий баланс будет показан в ${event.target.value}`);
@@ -1107,6 +1139,7 @@ sheet.addEventListener("click", async (event) => {
       setBusy(target, true);
       const endpoint = confirming ? "confirm" : "reject";
       const result = await api(`/api/transactions/${target.dataset.id}/${endpoint}`, { method: "POST", body: "{}" });
+      trackEvent(confirming ? "repayment-confirmed" : "repayment-rejected", confirming ? "Подтверждено получение возврата" : "Отклонено получение возврата");
       closeSheet();
       reportToast(result, confirming ? "Получение подтверждено" : "Получение отклонено");
       await refreshVisibleView();
@@ -1259,6 +1292,7 @@ sheet.addEventListener("submit", async (event) => {
         if (selectedParticipants !== form.dataset.originalParticipants) payload.participant_ids = participantIds;
       }
       result = await api(`/api/transactions/${form.dataset.id}`, { method: "PATCH", body: JSON.stringify(payload) });
+      trackEvent("transaction-edited", "Изменена транзакция");
       closeSheet();
       reportToast(result, "Транзакция обновлена");
       if (form.dataset.return === "global") return await renderHistory();
@@ -1269,16 +1303,19 @@ sheet.addEventListener("submit", async (event) => {
       const details = values.getAll("method_details");
       const paymentMethods = details.map((value, index) => ({ bank_name: banks[index] || "", details: value })).filter((method) => method.details.trim());
       await api("/api/me/payment-methods", { method: "PUT", body: JSON.stringify({ payment_methods: paymentMethods }) });
+      trackEvent("payment-methods-saved", "Сохранены платёжные реквизиты");
       closeSheet(); haptic(); toast("Платежные данные сохранены"); await reloadBootstrap(); return renderProfile();
     }
     if (form.id === "name-form") {
       await api("/api/me/name", { method: "PATCH", body: JSON.stringify({ full_name: values.get("full_name") }) });
+      trackEvent("profile-name-updated", "Изменено имя профиля");
       closeSheet(); haptic(); toast("Имя сохранено"); await reloadBootstrap(); return renderProfile();
     }
     if (form.id === "member-action-form") {
       const type = form.dataset.type;
       const endpoint = type === "transfer" ? "transfer" : "remove";
       result = await api(`/api/collections/${state.collection.collection.id}/${endpoint}`, { method: "POST", body: JSON.stringify({ user_id: Number(values.get("user_id")) }) });
+      trackEvent(type === "transfer" ? "collection-admin-transferred" : "collection-member-removed", "Изменён состав сбора");
       closeSheet(); reportToast(result, type === "transfer" ? "Роль передана" : "Участник удалён"); return await refreshCurrent("members");
     }
   } catch (error) {
