@@ -52,7 +52,7 @@ async def refresh_group_launchers(bot: Bot, service: BudgetService, settings: Se
         )
         text = "📱 Все сборы этой группы — в приложении «По рукам»."
         markup = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="📱 Открыть приложение", url=url)]]
+            inline_keyboard=[[InlineKeyboardButton(text="Открыть приложение", url=url)]]
         )
         previous_id = await service.take_bot_message(chat_id, "app_link")
         if previous_id is not None:

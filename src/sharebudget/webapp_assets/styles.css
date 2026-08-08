@@ -217,10 +217,11 @@ button:disabled { opacity: .5; cursor: default; }
   background: color-mix(in srgb, var(--surface) 93%, transparent); box-shadow: 0 12px 36px rgba(20,32,45,.16); backdrop-filter: blur(20px);
 }
 .bottom-nav[hidden] { display: none; }
-.bottom-nav button { border: 0; border-radius: 15px; padding: 7px 4px 6px; color: var(--muted); background: transparent; font-size: 11px; font-weight: 680; }
-.bottom-nav span { display: block; margin-bottom: 2px; font-size: 18px; filter: grayscale(1); opacity: .7; }
+.bottom-nav button { border: 0; border-radius: 15px; padding: 7px 4px 6px; color: var(--muted); background: transparent; font-size: 11px; font-weight: 680; transition: color .18s ease, background .18s ease, transform .18s ease; }
+.bottom-nav .nav-icon { display: grid; place-items: center; width: 24px; height: 24px; margin: 0 auto 2px; opacity: .72; }
+.bottom-nav .nav-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .bottom-nav button.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent); }
-.bottom-nav button.active span { filter: none; opacity: 1; }
+.bottom-nav button.active .nav-icon { opacity: 1; transform: translateY(-1px); }
 
 .sheet-layer { position: fixed; z-index: 50; inset: 0; display: flex; align-items: flex-end; }
 .sheet-layer[hidden] { display: none; }
@@ -270,6 +271,14 @@ button:disabled { opacity: .5; cursor: default; }
 .check-row { display: flex; align-items: center; gap: 11px; padding: 12px; border-radius: 14px; background: var(--bg); }
 .check-row input { width: 20px; height: 20px; accent-color: var(--accent); }
 .sheet-actions { display: grid; gap: 9px; margin-top: 18px; }
+.repayment-prompt-mark { display: grid; place-items: center; width: 58px; height: 58px; margin: 0 auto 15px; border-radius: 20px; color: #fff; background: linear-gradient(145deg, var(--accent), #64c8e7); box-shadow: 0 12px 28px color-mix(in srgb, var(--accent) 28%, transparent); font-size: 31px; font-weight: 780; }
+.repayment-prompt-card { display: grid; gap: 12px; padding: 16px; border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line)); border-radius: 20px; background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
+.repayment-prompt-card > div:first-child { display: grid; gap: 5px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.repayment-prompt-card small { color: var(--muted); font-size: 11px; font-weight: 680; }
+.repayment-prompt-card strong { font-size: 27px; line-height: 1.1; letter-spacing: -.035em; }
+.repayment-prompt-row, .repayment-prompt-note { display: grid; grid-template-columns: 84px 1fr; align-items: center; gap: 10px; }
+.repayment-prompt-row > span, .repayment-prompt-note > span { min-width: 0; overflow-wrap: anywhere; font-size: 13px; font-weight: 680; text-align: right; }
+.repayment-prompt-actions .primary-button, .repayment-prompt-actions .danger-button { min-height: 49px; }
 .toast { position: fixed; z-index: 90; left: 50%; bottom: calc(92px + env(safe-area-inset-bottom)); transform: translateX(-50%); width: max-content; max-width: calc(100% - 32px); padding: 11px 15px; border-radius: 14px; background: #18232d; color: #fff; box-shadow: 0 10px 34px rgba(0,0,0,.24); font-size: 13px; animation: toast-in .18s ease-out; }
 .toast.error { background: #b83e48; }
 

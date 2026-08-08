@@ -34,6 +34,7 @@ const state = {
   swipeStart: null,
   collectionSwipe: null,
   quickPayExpanded: false,
+  promptedRepayments: new Set(),
   launchIntent: launchParams.get("intent")
     || launchParams.get("tgWebAppStartParam")
     || tg?.initDataUnsafe?.start_param,
@@ -167,6 +168,32 @@ function reportToast(result, fallback = "Готово") {
   } else {
     toast(result.report_sent === false ? fallback : `${fallback} · отчёт отправлен в чат`);
   }
+}
+
+function showPendingRepaymentConfirmation() {
+  const item = state.bootstrap?.pending_repayment_confirmation;
+  if (!item || !sheetLayer.hidden || state.promptedRepayments.has(Number(item.id))) return false;
+  state.promptedRepayments.add(Number(item.id));
+  const comment = item.comment
+    ? `<div class="repayment-prompt-note"><small>Комментарий</small><span>${e(item.comment)}</span></div>`
+    : "";
+  showSheet(`
+    <div class="repayment-prompt-mark" aria-hidden="true">↙</div>
+    <h2>Подтвердите получение</h2>
+    <p class="sheet-intro">Проверьте перевод — после подтверждения баланс сбора обновится.</p>
+    <section class="repayment-prompt-card">
+      <div><small>Сумма возврата</small><strong>${money(item.amount, item.currency)}</strong></div>
+      <div class="repayment-prompt-row"><small>От кого</small><span>${userLink(item.creator_id, item.creator_name, item.creator_username)}</span></div>
+      <div class="repayment-prompt-row"><small>Сбор</small><span>${e(item.collection_title)}</span></div>
+      ${comment}
+    </section>
+    <div class="sheet-actions repayment-prompt-actions">
+      <button class="primary-button" type="button" data-action="prompt-confirm-repayment" data-id="${item.id}">Подтвердить получение</button>
+      <button class="danger-button" type="button" data-action="prompt-reject-repayment" data-id="${item.id}">Отклонить</button>
+      <button class="secondary-button" type="button" data-action="close-sheet">Решить позже</button>
+    </div>`);
+  haptic("medium");
+  return true;
 }
 
 async function reloadBootstrap() {
@@ -411,10 +438,12 @@ function renderWelcome() {
     </section>`;
 }
 
-function continueAfterWelcome() {
+async function continueAfterWelcome() {
   nav.hidden = false;
   if (state.bootstrap.invitation?.is_participant) {
-    return openCollection(state.bootstrap.invitation.collection.id);
+    await openCollection(state.bootstrap.invitation.collection.id);
+    showPendingRepaymentConfirmation();
+    return;
   }
   if (state.bootstrap.invitation) return renderInvitation();
   if (state.launchIntent === "create") {
@@ -422,7 +451,8 @@ function continueAfterWelcome() {
     renderCollections();
     return createSheet();
   }
-  return renderCollections();
+  await renderCollections();
+  showPendingRepaymentConfirmation();
 }
 
 function updateNav() {
@@ -652,11 +682,12 @@ async function refreshVisibleView() {
   const collectionId = state.collection?.collection?.id;
   const collectionTab = state.collectionTab;
   await reloadBootstrap();
-  if (collectionId) return await openCollection(collectionId, collectionTab, true);
-  if (state.nav === "history") return await renderHistory();
-  if (state.nav === "balance") return await renderBalance();
-  if (state.nav === "profile") return renderProfile();
-  return renderCollections();
+  if (collectionId) await openCollection(collectionId, collectionTab, true);
+  else if (state.nav === "history") await renderHistory();
+  else if (state.nav === "balance") await renderBalance();
+  else if (state.nav === "profile") renderProfile();
+  else await renderCollections();
+  showPendingRepaymentConfirmation();
 }
 
 async function checkForUpdates(force = false) {
@@ -947,6 +978,27 @@ sheet.addEventListener("click", async (event) => {
   if (target.dataset.action === "open-user") {
     event.preventDefault();
     openTelegramUser(target);
+    return;
+  }
+  if (target.dataset.action === "prompt-confirm-repayment" || target.dataset.action === "prompt-reject-repayment") {
+    const confirming = target.dataset.action === "prompt-confirm-repayment";
+    const question = confirming
+      ? "Подтвердить, что деньги получены?"
+      : "Отклонить получение? Возврат не будет учтён в балансах.";
+    if (!await confirmAction(question)) return;
+    try {
+      setBusy(target, true);
+      const endpoint = confirming ? "confirm" : "reject";
+      const result = await api(`/api/transactions/${target.dataset.id}/${endpoint}`, { method: "POST", body: "{}" });
+      closeSheet();
+      reportToast(result, confirming ? "Получение подтверждено" : "Получение отклонено");
+      await refreshVisibleView();
+    } catch (error) {
+      haptic("heavy");
+      toast(error.message, true);
+    } finally {
+      setBusy(target, false);
+    }
     return;
   }
   if (target.dataset.action === "close-sheet") closeSheet();

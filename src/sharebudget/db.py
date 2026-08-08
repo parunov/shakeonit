@@ -101,6 +101,9 @@ ON transactions(creator_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_transactions_pending_repayments
 ON transactions(collection_id, kind, status, confirmation_status, creator_id, counterparty_id);
 
+CREATE INDEX IF NOT EXISTS idx_transactions_recipient_confirmation
+ON transactions(counterparty_id, kind, status, confirmation_status, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS expense_shares (
     transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
     user_id INTEGER NOT NULL REFERENCES users(id),

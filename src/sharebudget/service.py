@@ -1105,6 +1105,31 @@ class BudgetService:
                 connection, transaction_ids
             )
 
+    async def pending_repayment_confirmation(self, user_id: int):
+        """Return the newest repayment waiting for this recipient's decision."""
+        async with self.db.connect() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT t.id,t.collection_id,t.creator_id,t.counterparty_id,t.amount,
+                       t.comment,t.created_at,c.title collection_title,c.currency,
+                       creator.full_name creator_name,creator.username creator_username
+                FROM transactions t
+                JOIN collections c ON c.id=t.collection_id
+                JOIN participants recipient
+                  ON recipient.collection_id=c.id AND recipient.user_id=? AND recipient.active=1
+                JOIN participants sender
+                  ON sender.collection_id=c.id AND sender.user_id=t.creator_id AND sender.active=1
+                JOIN users creator ON creator.id=t.creator_id
+                WHERE t.kind='repayment' AND t.status='active'
+                  AND t.confirmation_status='pending' AND t.counterparty_id=?
+                  AND c.status='active'
+                ORDER BY t.created_at DESC,t.id DESC
+                LIMIT 1
+                """,
+                (user_id, user_id),
+            )
+            return await cursor.fetchone()
+
     async def global_history(
         self,
         user_id: int,

@@ -143,6 +143,8 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert 'data-action="${actionName}"' in script_text
         assert 'swipeAction === "delete"' in script_text
         assert "!canConfirm && !item.has_inactive_participants" in script_text
+        assert "showPendingRepaymentConfirmation" in script_text
+        assert "prompt-confirm-repayment" in script_text
         assert "if (tg?.openTelegramLink) tg.openTelegramLink(url);" in script_text
         assert "if (username && tg?.openTelegramLink)" not in script_text
         assert "tg://user?id=" not in script_text
@@ -319,6 +321,11 @@ async def test_repayment_can_be_confirmed_from_global_history(tmp_path):
     recipient_auth = signed_init_data(user={"id": 1, "first_name": "Получатель"})
 
     async with TestClient(TestServer(application)) as client:
+        bootstrap_before = await client.get(
+            "/api/bootstrap",
+            headers={"X-Telegram-Init-Data": recipient_auth},
+        )
+        bootstrap_before_payload = await bootstrap_before.json()
         before = await client.get(
             "/api/history",
             headers={"X-Telegram-Init-Data": recipient_auth},
@@ -340,15 +347,22 @@ async def test_repayment_can_be_confirmed_from_global_history(tmp_path):
         )
         after_payload = await after.json()
         confirmed = next(row for row in after_payload["transactions"] if row["id"] == repayment_id)
+        bootstrap_after = await client.get(
+            "/api/bootstrap",
+            headers={"X-Telegram-Init-Data": recipient_auth},
+        )
+        bootstrap_after_payload = await bootstrap_after.json()
 
     assert before.status == 200
     assert pending["confirmation_status"] == "pending"
     assert pending["counterparty_id"] == 1
     assert pending["is_participant"] == 1
+    assert bootstrap_before_payload["pending_repayment_confirmation"]["id"] == repayment_id
     assert response.status == 200
     assert response_payload["report_sent"] is False
     assert response_payload["notifications_queued"] is True
     assert confirmed["confirmation_status"] == "confirmed"
+    assert bootstrap_after_payload["pending_repayment_confirmation"] is None
     confirmation_message = bot.send_message.await_args_list[0].args[1]
     assert "Отправитель" in confirmation_message
     assert "За билеты" in confirmation_message

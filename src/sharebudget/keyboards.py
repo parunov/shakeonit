@@ -27,7 +27,7 @@ def webapp_launch(url: str) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📱 Открыть приложение",
+                    text="Открыть приложение",
                     web_app=WebAppInfo(url=url),
                 )
             ]
@@ -67,7 +67,7 @@ def collection_actions(
     collection_id = collection["id"]
     if collection["status"] == "active":
         if app_url:
-            builder.button(text="📱 Открыть приложение", url=app_url)
+            builder.button(text="Открыть приложение", url=app_url)
         if start_url:
             builder.button(text="🚀 Начать и участвовать", url=start_url)
         builder.button(text="🙋 Участвовать в сборе", callback_data=f"join:{collection_id}")

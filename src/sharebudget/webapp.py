@@ -356,6 +356,7 @@ async def bootstrap(request: web.Request) -> web.Response:
     chats = await service.list_user_collection_chats(user_id)
     user = await service.get_user(user_id)
     payment_methods = [dict(row) for row in await service.list_payment_methods(user_id)]
+    pending_confirmation = await service.pending_repayment_confirmation(user_id)
     invitation = None
     if start_param.startswith("collection_"):
         try:
@@ -400,6 +401,9 @@ async def bootstrap(request: web.Request) -> web.Response:
             "context_chat_id": context_chat_id,
             "bot_username": request.app[SETTINGS_KEY].bot_username.lstrip("@"),
             "main_app_enabled": request.app[SETTINGS_KEY].main_app_enabled,
+            "pending_repayment_confirmation": (
+                dict(pending_confirmation) if pending_confirmation else None
+            ),
             "sync_version": await service.sync_token(user_id, context_chat_id),
         }
     )

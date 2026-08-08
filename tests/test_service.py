@@ -157,6 +157,22 @@ async def test_expense_and_repayment_update_balances(service):
 
 
 @pytest.mark.asyncio
+async def test_pending_repayment_confirmation_is_exposed_only_until_decision(service):
+    collection_id = await make_collection(service)
+    await service.add_expense(collection_id, 1, 1000, [1, 2], "Билеты")
+    repayment_id = await service.add_repayment(collection_id, 2, 1, 500, "Перевод")
+
+    prompt = await service.pending_repayment_confirmation(1)
+    assert prompt["id"] == repayment_id
+    assert prompt["creator_name"] == "Борис"
+    assert prompt["collection_title"] == "Берлин"
+    assert await service.pending_repayment_confirmation(2) is None
+
+    await service.confirm_repayment(repayment_id, 1)
+    assert await service.pending_repayment_confirmation(1) is None
+
+
+@pytest.mark.asyncio
 async def test_visible_collections_include_group_catalog_and_user_collections(service):
     own_group_collection = await service.create_collection(-100, "Берлин", "EUR", 1)
     available_group_collection = await service.create_collection(-100, "Подарок", "EUR", 2)

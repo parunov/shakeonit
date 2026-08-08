@@ -99,7 +99,7 @@ Privacy Mode остается включённым."""
 def app_launch_markup(
     settings: Settings,
     start_param: str = "home",
-    button_text: str = "📱 Открыть приложение",
+    button_text: str = "Открыть приложение",
     *,
     in_group: bool = False,
 ) -> InlineKeyboardMarkup:
@@ -345,7 +345,7 @@ async def open_webapp(message: Message, settings: Settings, service: BudgetServi
             chat_param = group_start_param(message.chat.id, settings.bot_token)
             app_url = f"https://t.me/{username}?startapp={chat_param}&mode=compact"
             text = "📱 Откройте сборы этой группы прямо в приложении «По рукам»."
-            button_text = "📱 Запустить приложение"
+            button_text = "Открыть приложение"
         else:
             app_url = f"https://t.me/{username}?start=app"
             text = "📱 Перейдите в личный чат и откройте защищённую кнопку приложения."
@@ -429,7 +429,7 @@ async def remember_group_when_bot_is_added(
         event.chat.id,
         "👋 <b>«По рукам» добавлено</b>\n\nГруппа готова. Открывайте приложение "
         "по кнопке ниже — она работает при включённом Privacy Mode.",
-        reply_markup=app_launch_markup(settings, chat_param, "📱 Открыть приложение", in_group=True),
+        reply_markup=app_launch_markup(settings, chat_param, "Открыть приложение", in_group=True),
         request_timeout=5,
     )
     await service.replace_bot_message(event.chat.id, "app_link", sent_message.message_id)
@@ -1484,7 +1484,7 @@ async def inline_hint(inline_query: InlineQuery) -> None:
                 ),
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text="📱 Открыть приложение", url=app_url)]
+                        [InlineKeyboardButton(text="Открыть приложение", url=app_url)]
                     ]
                 ),
             )
