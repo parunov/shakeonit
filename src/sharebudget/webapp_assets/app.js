@@ -92,7 +92,6 @@ function trackAnalyticsSession() {
     path: "event/app-session",
     title: "Запуск Mini App",
     event: true,
-    no_session: true,
   });
   trackEvent(`active-user-${telegramId}`, `Активный Telegram ID ${telegramId}`);
 }

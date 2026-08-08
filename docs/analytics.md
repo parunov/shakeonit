@@ -8,7 +8,7 @@
 2. Войдите под адресом администратора, указанным при первоначальной настройке.
 3. На главной странице смотрите посещения экранов. Они имеют адреса `/app/collections`, `/app/collection`, `/app/balance`, `/app/history`, `/app/profile`, `/app/welcome` и `/app/invitation`.
 4. Действия отображаются как события. Основные: `event/collection-created`, `event/collection-joined`, `event/expense-added-equal`, `event/expense-added-custom`, `event/repayment-submitted`, `event/repayment-confirmed`, `event/repayment-rejected`, `event/transaction-edited`, `event/transaction-cancelled`, `event/invitation-shared`, `event/funds-requested`, `event/collection-archived` и `event/expense-statistics-opened`.
-5. `event/app-session` показывает количество запусков Mini App. События `event/active-user-<Telegram ID>` позволяют увидеть активные ID, а источник `telegram-user-<Telegram ID>` — связать экраны и действия с конкретным пользователем.
+5. `event/app-session` показывает запуски в рамках аналитических сессий. События `event/active-user-<Telegram ID>` позволяют увидеть активные ID, а источник `telegram-user-<Telegram ID>` — связать экраны и действия с конкретным пользователем.
 
 В аналитику передаётся только числовой Telegram ID. Имена, username, названия сборов, суммы, комментарии и платёжные реквизиты не передаются.
 
