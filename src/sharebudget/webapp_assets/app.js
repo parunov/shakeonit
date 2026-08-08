@@ -10,6 +10,7 @@ const sheet = document.getElementById("sheet");
 const toastNode = document.getElementById("toast");
 const historyBadge = document.getElementById("history-badge");
 const botUsername = document.querySelector('meta[name="telegram-bot-username"]')?.content;
+const analyticsEnabled = Boolean(document.querySelector("script[data-goatcounter]"));
 const launchParams = new URLSearchParams(window.location.search);
 const moneyFormatters = new Map();
 const dateFormatter = new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
@@ -29,6 +30,8 @@ const state = {
   balanceMode: "collections",
   balanceData: null,
   globalHistory: null,
+  historyPromise: null,
+  historyVersion: 0,
   collectionHistoryLimit: 10,
   collectionEventsLimit: 10,
   viewStack: [],
@@ -42,6 +45,39 @@ const state = {
     || launchParams.get("tgWebAppStartParam")
     || tg?.initDataUnsafe?.start_param,
 };
+
+const analyticsQueue = [];
+let analyticsRetryTimer = null;
+let analyticsAttempts = 0;
+let lastTrackedScreen = "";
+
+function flushAnalytics() {
+  analyticsRetryTimer = null;
+  if (!analyticsEnabled || !analyticsQueue.length) return;
+  if (window.goatcounter?.count) {
+    analyticsQueue.splice(0).forEach((payload) => window.goatcounter.count(payload));
+    analyticsAttempts = 0;
+    return;
+  }
+  if (analyticsAttempts++ < 10) analyticsRetryTimer = setTimeout(flushAnalytics, 400);
+}
+
+function trackAnalytics(payload) {
+  if (!analyticsEnabled) return;
+  analyticsQueue.push(payload);
+  if (!analyticsRetryTimer) flushAnalytics();
+}
+
+function trackScreen(name, label) {
+  const path = `/app/${name}`;
+  if (lastTrackedScreen === path) return;
+  lastTrackedScreen = path;
+  trackAnalytics({ path, title: label, event: false });
+}
+
+function trackEvent(name, label) {
+  trackAnalytics({ path: `event/${name}`, title: label, event: true });
+}
 
 const e = (value) => String(value ?? "")
   .replaceAll("&", "&amp;")
@@ -141,6 +177,28 @@ async function api(path, options = {}) {
   return data;
 }
 
+function loadInitialHistory() {
+  if (state.globalHistory) return Promise.resolve(state.globalHistory);
+  if (state.historyPromise) return state.historyPromise;
+  const version = state.historyVersion;
+  const request = api("/api/history")
+    .then((page) => {
+      if (state.historyVersion === version) state.globalHistory = page;
+      return page;
+    })
+    .finally(() => {
+      if (state.historyPromise === request) state.historyPromise = null;
+    });
+  state.historyPromise = request;
+  return request;
+}
+
+function prefetchHistory() {
+  const start = () => loadInitialHistory().catch(() => {});
+  if (window.requestIdleCallback) window.requestIdleCallback(start, { timeout: 1200 });
+  else setTimeout(start, 300);
+}
+
 function setBusy(button, busy) {
   state.busy = busy;
   if (button) {
@@ -212,8 +270,10 @@ async function reloadBootstrap() {
   );
   state.syncVersion = state.bootstrap.sync_version;
   state.details.clear();
-  state.balanceData = null;
+  state.balanceData = state.bootstrap.initial_balance || null;
   state.globalHistory = null;
+  state.historyPromise = null;
+  state.historyVersion += 1;
   const initials = state.bootstrap.user.full_name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2);
   avatar.textContent = initials || "S";
   const pendingCount = Number(state.bootstrap.pending_repayment_count || 0);
@@ -269,6 +329,8 @@ async function renderCollections() {
     ${collectionCards(active, "archive")}
     ${archived.length ? `<div class="section-head"><h2>Архив</h2></div>${collectionCards(archived, "delete")}` : ""}`;
   updateNav();
+  trackScreen("collections", "Сборы");
+  prefetchHistory();
 }
 
 async function renderBalance() {
@@ -278,6 +340,7 @@ async function renderBalance() {
   tg?.BackButton?.hide();
   app.innerHTML = `<section class="loading-card"><div class="spinner"></div><p>Считаем ваш баланс…</p></section>`;
   updateNav();
+  trackScreen("balance", "Баланс");
   const overview = state.balanceData || await api("/api/balance");
   state.balanceData = { ...overview, exchange: state.balanceData?.exchange || null };
   paintBalance();
@@ -365,6 +428,7 @@ function renderProfile() {
     <section class="card notification-preferences">${Object.entries(notificationLabels).map(([key, labels]) => `<label class="preference-row"><span><b>${labels[0]}</b><small>${labels[1]}</small></span><input class="switch-input" type="checkbox" data-notification-pref="${key}" ${user.notification_preferences?.[key] ? "checked" : ""}></label>`).join("")}</section>
     <div class="status-banner">🔒 Вход подтверждается Telegram. Пароли и отдельная регистрация не нужны.</div>`;
   updateNav();
+  trackScreen("profile", "Профиль");
 }
 
 function quickPaymentRows(debts) {
@@ -383,7 +447,7 @@ async function renderHistory(loadKind = null) {
   const current = state.globalHistory;
   const offset = loadKind === "transactions" ? current.transactions.length : loadKind === "events" ? current.events.length : 0;
   const query = loadKind ? `?section=${loadKind}&${loadKind === "transactions" ? "transaction_offset" : "event_offset"}=${offset}` : "";
-  const page = await api(`/api/history${query}`);
+  const page = loadKind ? await api(`/api/history${query}`) : await loadInitialHistory();
   if (!loadKind) {
     state.globalHistory = page;
   } else if (loadKind === "transactions") {
@@ -415,6 +479,7 @@ async function renderHistory(loadKind = null) {
   }).join("");
   const events = data.events.map((item) => `<article class="history-row"><div class="row-title">${item.is_participant ? `<button class="collection-link" type="button" data-action="open-collection" data-id="${item.collection_id}">${e(item.collection_title)}</button>` : e(item.collection_title)}</div><div class="row-note">${shortDate(item.created_at)} · ${userLink(item.actor_id, item.actor_name, item.actor_username)} ${e(eventLabels[item.kind] || item.kind)}${item.target_name && item.target_name !== item.actor_name ? ` · ${userLink(item.target_user_id, item.target_name, item.target_username)}` : ""}</div></article>`).join("");
   app.innerHTML = `<button class="hero history-stats-trigger" type="button" data-action="expense-statistics"><span><span class="hero-label">МОИ РАСХОДЫ С НАЧАЛА МЕСЯЦА</span><span class="hero-value">${moneyMap(data.expense_stats.monthly_personal_by_currency)}</span><span class="hero-meta">На меня распределено · возвращено ${moneyMap(data.expense_stats.monthly_repaid_by_currency)}</span></span><i>›</i></button><div class="section-head"><h2>Транзакции</h2></div>${transactions ? `<div class="card">${transactions}</div>` : empty("📜", "Транзакций пока нет")}${data.transaction_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="transactions">Загрузить ещё</button>' : ""}<div class="section-head"><h2>История сборов</h2></div>${events ? `<div class="card">${events}</div>` : empty("🧾", "Событий пока нет")}${data.event_has_more ? '<button class="load-more" type="button" data-action="load-history" data-kind="events">Загрузить ещё</button>' : ""}`;
+  trackScreen("history", "История");
 }
 
 function expenseStatisticsSheet() {
@@ -430,6 +495,7 @@ function renderInvitation() {
   title.textContent = invitation.collection.title;
   updateNav();
   app.innerHTML = `<section class="hero"><div class="hero-label">ПРИГЛАШЕНИЕ В СБОР</div><div class="hero-value">${e(invitation.collection.title)}</div><div class="hero-meta">Валюта · ${e(invitation.collection.currency)}</div></section><div class="status-banner">Telegram безопасно передаст ваш ID. Разрешите уведомления, чтобы узнавать о тратах и возвратах, даже если вас нет в группе сбора.</div><div class="sheet-actions"><button class="primary-button" type="button" data-action="join-subscribe" data-id="${invitation.collection.id}">🔔 Участвовать и получать уведомления</button><button class="secondary-button" type="button" data-action="join-invitation" data-id="${invitation.collection.id}">Участвовать без уведомлений</button></div>`;
+  trackScreen("invitation", "Приглашение в сбор");
 }
 
 function renderWelcome() {
@@ -438,17 +504,18 @@ function renderWelcome() {
   nav.hidden = true;
   app.innerHTML = `
     <section class="welcome-card">
-      <div class="welcome-mark">S</div>
-      <div class="hero-label">SHAKEONIT</div>
-      <h2>${e(firstName)}, общие расходы — без неловких подсчётов</h2>
-      <p>Создайте сбор, пригласите друзей и ведите общие расходы без таблиц и ручных подсчётов.</p>
+      <div class="welcome-mark">🤝</div>
+      <div class="hero-label">ПО РУКАМ</div>
+      <h2>${e(firstName)}, теперь общие расходы считаются сами</h2>
+      <p>Один оплатил билеты, другой — жильё, а кто-то уже вернул долг? Добавляйте операции, и приложение сразу покажет итог.</p>
       <div class="welcome-points">
-        <div><span>🧾</span><b>Все сборы рядом</b><small>Расходы, долги и история в одном месте</small></div>
-        <div><span>⚡</span><b>Начать очень просто</b><small>Название, валюта и приглашение друзьям</small></div>
-        <div><span>🤝</span><b>Расчёты понятны всем</b><small>Сразу видно, кто кому и сколько должен(а)</small></div>
+        <div><span>1</span><b>Создайте сбор</b><small>Для поездки, праздника или любых общих трат</small></div>
+        <div><span>2</span><b>Пригласите друзей</b><small>Они вступят одним нажатием из Telegram</small></div>
+        <div><span>3</span><b>Записывайте траты</b><small>Баланс и долги пересчитаются автоматически</small></div>
       </div>
       <button class="primary-button" type="button" data-action="welcome-continue">Начать</button>
     </section>`;
+  trackScreen("welcome", "Первое знакомство");
 }
 
 async function continueAfterWelcome() {
@@ -492,6 +559,7 @@ async function openCollection(id, tab = "overview", force = false) {
   title.textContent = data.collection.title;
   tg?.BackButton?.show();
   renderCollection();
+  trackScreen("collection", "Карточка сбора");
 }
 
 function renderCollection() {
@@ -804,6 +872,7 @@ app.addEventListener("click", async (event) => {
       if (!await confirmAction("Завершить сбор и отправить его в архив на 30 дней?")) return;
       setBusy(target, true);
       const result = await api(`/api/collections/${target.dataset.id}/archive`, { method: "POST", body: "{}" });
+      trackEvent("collection-archived", "Сбор отправлен в архив");
       reportToast(result, "Сбор в архиве");
       await reloadBootstrap();
       return await renderCollections();
@@ -832,6 +901,7 @@ app.addEventListener("click", async (event) => {
         setBusy(target, true);
         state.globalHistory.expense_stats = await api("/api/expense-statistics");
       }
+      trackEvent("expense-statistics-opened", "Открыта статистика затрат");
       return expenseStatisticsSheet();
     }
     if (action === "load-collection-history") {
@@ -851,6 +921,7 @@ app.addEventListener("click", async (event) => {
       const requestedSubscription = action === "join-subscribe";
       const subscribe = requestedSubscription ? await requestWritePermission() : false;
       const result = await api(`/api/collections/${target.dataset.id}/join`, { method: "POST", body: JSON.stringify({ subscribe }) });
+      if (!result.already_participant) trackEvent("collection-joined", "Вступление в сбор");
       if (result.already_participant) toast("Вы уже участвуете в этом сборе");
       else reportToast(result, result.notifications_enabled ? "Вы участвуете · уведомления включены" : "Вы участвуете в сборе");
       if (requestedSubscription && !result.notifications_enabled) toast("Вы участвуете, но Telegram не разрешил личные уведомления", true);
@@ -1140,6 +1211,7 @@ sheet.addEventListener("submit", async (event) => {
         if (!subscribe) throw new Error("Разрешите боту присылать уведомления для сбора без группы");
       }
       result = await api("/api/collections", { method: "POST", body: JSON.stringify({ chat_id: chatId, title: values.get("title"), currency: values.get("currency"), subscribe }) });
+      trackEvent("collection-created", "Создан сбор");
       closeSheet();
       if (chatId === 0) toast(result.notifications_enabled ? "Личный сбор создан · уведомления включены" : "Сбор создан, но уведомления не включены", !result.notifications_enabled);
       else reportToast(result, "Сбор создан");
@@ -1161,10 +1233,12 @@ sheet.addEventListener("submit", async (event) => {
         payload.amount = values.get("amount");
       }
       result = await api(`/api/collections/${state.collection.collection.id}/expenses`, { method: "POST", body: JSON.stringify(payload) });
+      trackEvent(values.get("distribution_mode") === "custom" ? "expense-added-custom" : "expense-added-equal", "Добавлена затрата");
       closeSheet(); reportToast(result, "Затрата добавлена"); return await refreshCurrent("overview");
     }
     if (form.id === "repay-form") {
       result = await api(`/api/collections/${state.collection.collection.id}/repayments`, { method: "POST", body: JSON.stringify({ amount: values.get("amount"), comment: values.get("comment"), creditor_id: Number(values.get("creditor_id")) }) });
+      trackEvent("repayment-submitted", "Возврат отправлен на подтверждение");
       closeSheet(); reportToast(result, "Возврат записан"); return await refreshCurrent("overview");
     }
     if (form.id === "edit-form") {

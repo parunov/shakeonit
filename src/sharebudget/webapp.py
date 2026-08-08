@@ -8,9 +8,10 @@ import logging
 import secrets
 import socket
 import time
+from contextlib import suppress
 from html import escape
 from pathlib import Path
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlsplit
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
@@ -34,6 +35,9 @@ from .service import BudgetService, DomainError
 
 LOGGER = logging.getLogger(__name__)
 WEBAPP_DIR = Path(__file__).with_name("webapp_assets")
+ASSET_VERSION = hashlib.sha256(
+    b"".join((WEBAPP_DIR / name).read_bytes() for name in ("styles.css", "app.js"))
+).hexdigest()[:12]
 BOT_KEY = web.AppKey("bot", Bot)
 SERVICE_KEY = web.AppKey("service", BudgetService)
 SETTINGS_KEY = web.AppKey("settings", Settings)
@@ -353,27 +357,40 @@ async def bootstrap(request: web.Request) -> web.Response:
     user_id = telegram_user["id"]
     start_param = request[AUTH_KEY].get("start_param", "")
     context_chat_id = parse_group_start_param(start_param, request.app[SETTINGS_KEY].bot_token)
-    rows = await service.list_visible_collections(user_id, context_chat_id)
-    chats = await service.list_user_collection_chats(user_id)
-    user = await service.get_user(user_id)
-    payment_methods = [dict(row) for row in await service.list_payment_methods(user_id)]
+    target_id = 0
+    if start_param.startswith("collection_"):
+        with suppress(ValueError):
+            target_id = int(start_param.removeprefix("collection_"))
+    (
+        rows,
+        chats,
+        user,
+        payment_method_rows,
+        pending_confirmation,
+        initial_balance,
+        sync_version,
+        target,
+    ) = await asyncio.gather(
+        service.list_visible_collections(user_id, context_chat_id),
+        service.list_user_collection_chats(user_id),
+        service.get_user(user_id),
+        service.list_payment_methods(user_id),
+        service.pending_repayment_confirmation(user_id),
+        service.balance_overview(user_id),
+        service.sync_token(user_id, context_chat_id),
+        service.get_collection(target_id) if target_id else asyncio.sleep(0, result=None),
+    )
+    payment_methods = [dict(row) for row in payment_method_rows]
     payment_details_missing = bool(
         not payment_methods
         and any(row["status"] == "active" and row["is_participant"] for row in rows)
     )
-    pending_confirmation = await service.pending_repayment_confirmation(user_id)
     invitation = None
-    if start_param.startswith("collection_"):
-        try:
-            target_id = int(start_param.removeprefix("collection_"))
-        except ValueError:
-            target_id = 0
-        target = await service.get_collection(target_id) if target_id else None
-        if target and target["status"] == "active":
-            invitation = {
-                "collection": _collection(target),
-                "is_participant": await service.is_participant(target_id, user_id),
-            }
+    if target and target["status"] == "active":
+        invitation = {
+            "collection": _collection(target),
+            "is_participant": await service.is_participant(target_id, user_id),
+        }
     return web.json_response(
         {
             "ok": True,
@@ -414,7 +431,8 @@ async def bootstrap(request: web.Request) -> web.Response:
                 int(pending_confirmation["pending_count"]) if pending_confirmation else 0
             ),
             "payment_details_missing": payment_details_missing,
-            "sync_version": await service.sync_token(user_id, context_chat_id),
+            "initial_balance": initial_balance,
+            "sync_version": sync_version,
         }
     )
 
@@ -1471,9 +1489,25 @@ async def remove_member(request: web.Request) -> web.Response:
 
 async def app_index(request: web.Request) -> web.Response:
     template = (WEBAPP_DIR / "index.html").read_text(encoding="utf-8")
-    username = escape(request.app[SETTINGS_KEY].bot_username.lstrip("@"), quote=True)
+    settings = request.app[SETTINGS_KEY]
+    username = escape(settings.bot_username.lstrip("@"), quote=True)
+    analytics_script = ""
+    analytics_origin = _analytics_origin(settings.analytics_url)
+    if analytics_origin:
+        counter_url = escape(f"{analytics_origin}/count", quote=True)
+        script_url = escape(f"{analytics_origin}/count.js", quote=True)
+        analytics_script = (
+            f'<script data-goatcounter="{counter_url}" '
+            "data-goatcounter-settings='"
+            '{"no_onload":true,"no_events":true,"allow_frame":true}'
+            f"' async src=\"{script_url}\"></script>"
+        )
     response = web.Response(
-        text=template.replace("__BOT_USERNAME__", username),
+        text=(
+            template.replace("__BOT_USERNAME__", username)
+            .replace("__ASSET_VERSION__", ASSET_VERSION)
+            .replace("__ANALYTICS_SCRIPT__", analytics_script)
+        ),
         content_type="text/html",
     )
     response.headers["Cache-Control"] = "no-store"
@@ -1485,19 +1519,31 @@ async def app_asset(request: web.Request) -> web.FileResponse:
     if filename not in {"app.js", "styles.css"}:
         raise web.HTTPNotFound()
     response = web.FileResponse(WEBAPP_DIR / filename)
-    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     return response
+
+
+def _analytics_origin(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = urlsplit(value.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        LOGGER.warning("Ignoring invalid ANALYTICS_URL")
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 @web.middleware
 async def security_headers(request: web.Request, handler):
     response = await handler(request)
+    analytics_origin = _analytics_origin(request.app[SETTINGS_KEY].analytics_url)
+    analytics_source = f" {analytics_origin}" if analytics_origin else ""
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; script-src 'self' https://telegram.org; "
-        "style-src 'self'; img-src 'self' data: https:; connect-src 'self'; "
+        f"default-src 'self'; script-src 'self' https://telegram.org{analytics_source}; "
+        f"style-src 'self'; img-src 'self' data: https:; connect-src 'self'{analytics_source}; "
         "frame-ancestors https://web.telegram.org https://*.telegram.org"
     )
     return response

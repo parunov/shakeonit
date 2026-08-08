@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     webhook_cert_path: Path | None = None
     webhook_key_path: Path | None = None
     webapp_url: str | None = None
+    analytics_url: str | None = None
     webapp_auth_max_age: int = 86400
     bot_username: str = "ShakeOnIt_bot"
     main_app_enabled: bool = False

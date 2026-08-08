@@ -120,7 +120,11 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
     service = BudgetService(database)
     await service.upsert_user(1, "owner", "Организатор")
     collection_id = await service.create_collection(-100500, "Поездка", "EUR", 1)
-    settings = Settings(bot_token=TOKEN, database_path=database.path)
+    settings = Settings(
+        bot_token=TOKEN,
+        database_path=database.path,
+        analytics_url="https://stats.example.com",
+    )
     application = web.Application()
     setup_webapp_routes(application, object(), service, settings)
 
@@ -132,10 +136,14 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert "По рукам — делим расходы" in page_text
         assert 'name="telegram-bot-username" content="ShakeOnIt_bot"' in page_text
         assert "__BOT_USERNAME__" not in page_text
+        assert "__ASSET_VERSION__" not in page_text
+        assert 'data-goatcounter="https://stats.example.com/count"' in page_text
+        assert "https://stats.example.com/count.js" in page_text
+        assert "https://stats.example.com" in page.headers["Content-Security-Policy"]
 
         script = await client.get("/app/static/app.js")
         assert script.status == 200
-        assert script.headers["Cache-Control"] == "no-cache"
+        assert script.headers["Cache-Control"] == "public, max-age=31536000, immutable"
         script_text = await script.text()
         assert "delete-collection" in script_text
         assert "Сколько я должен(а)" in script_text
@@ -146,7 +154,9 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert "!canConfirm && !item.has_inactive_participants" in script_text
         assert "showPendingRepaymentConfirmation" in script_text
         assert "prompt-confirm-repayment" in script_text
-        assert "Создайте сбор, пригласите друзей" in script_text
+        assert "теперь общие расходы считаются сами" in script_text
+        assert 'trackScreen("collections", "Сборы")' in script_text
+        assert 'trackEvent("collection-created", "Создан сбор")' in script_text
         assert "Privacy Mode остается включённым" not in script_text
         assert "collectionHistoryLimit: 10" in script_text
         assert "paymentReminderDismissed" in script_text
@@ -175,6 +185,7 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert payload["main_app_enabled"] is False
         assert payload["is_new_user"] is True
         assert payload["sync_version"]
+        assert payload["initial_balance"] == {"collections": [], "personal_debts": []}
 
         sync = await client.get(
             "/api/sync",

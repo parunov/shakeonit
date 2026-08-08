@@ -85,6 +85,8 @@ async def test_welcome_explains_benefits_without_privacy_or_password_copy(
     text = message.answer.await_args.args[0]
     assert "создайте сбор" in text.lower()
     assert "кто кому сколько" in text.lower()
+    assert "начать можно за минуту" in text.lower()
+    assert "балансы пересчитаются автоматически" in text.lower()
     assert "privacy" not in text.lower()
     assert "парол" not in text.lower()
 

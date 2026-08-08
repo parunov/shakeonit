@@ -1,0 +1,24 @@
+[Unit]
+Description=GoatCounter analytics for ShakeOnIt Mini App
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=goatcounter
+Group=goatcounter
+WorkingDirectory=/var/lib/goatcounter
+ExecStart=/usr/local/bin/goatcounter serve -listen=127.0.0.1:8090 -db=sqlite+/var/lib/goatcounter/goatcounter.sqlite3 -automigrate -store-every=30
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/goatcounter
+MemoryMax=192M
+
+[Install]
+WantedBy=multi-user.target

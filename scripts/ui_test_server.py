@@ -70,8 +70,12 @@ window.Telegram = {{ WebApp: {{
 </script>
 """
     return index.replace(
-        '<script src="https://telegram.org/js/telegram-web-app.js"></script>', mock
-    ).replace("__BOT_USERNAME__", "ShakeOnIt_bot")
+        '<script src="https://telegram.org/js/telegram-web-app.js" defer></script>', mock
+    ).replace("__BOT_USERNAME__", "ShakeOnIt_bot").replace(
+        "__ASSET_VERSION__", "ui-test"
+    ).replace(
+        "__ANALYTICS_SCRIPT__", ""
+    )
 
 
 async def create_application(database_path: Path) -> web.Application:
