@@ -23,7 +23,6 @@ CREATE TABLE IF NOT EXISTS users (
     notify_repayments INTEGER NOT NULL DEFAULT 1 CHECK (notify_repayments IN (0, 1)),
     notify_collection_events INTEGER NOT NULL DEFAULT 1 CHECK (notify_collection_events IN (0, 1)),
     notify_reminders INTEGER NOT NULL DEFAULT 1 CHECK (notify_reminders IN (0, 1)),
-    payment_details_reminded_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -200,7 +199,6 @@ class Database:
                 "notify_repayments": "INTEGER NOT NULL DEFAULT 1",
                 "notify_collection_events": "INTEGER NOT NULL DEFAULT 1",
                 "notify_reminders": "INTEGER NOT NULL DEFAULT 1",
-                "payment_details_reminded_at": "TEXT",
             }
             for column_name, definition in user_migrations.items():
                 if column_name not in user_column_names:

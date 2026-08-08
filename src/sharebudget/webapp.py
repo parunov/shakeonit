@@ -8,7 +8,6 @@ import logging
 import secrets
 import socket
 import time
-from datetime import UTC, datetime, timedelta
 from html import escape
 from pathlib import Path
 from urllib.parse import parse_qsl
@@ -358,13 +357,8 @@ async def bootstrap(request: web.Request) -> web.Response:
     chats = await service.list_user_collection_chats(user_id)
     user = await service.get_user(user_id)
     payment_methods = [dict(row) for row in await service.list_payment_methods(user_id)]
-    reminded_at = user["payment_details_reminded_at"]
-    reminder_interval_elapsed = not reminded_at or datetime.fromisoformat(reminded_at).replace(
-        tzinfo=UTC
-    ) <= datetime.now(UTC) - timedelta(days=1)
-    payment_details_reminder_due = bool(
+    payment_details_missing = bool(
         not payment_methods
-        and reminder_interval_elapsed
         and any(row["status"] == "active" and row["is_participant"] for row in rows)
     )
     pending_confirmation = await service.pending_repayment_confirmation(user_id)
@@ -419,7 +413,7 @@ async def bootstrap(request: web.Request) -> web.Response:
             "pending_repayment_count": (
                 int(pending_confirmation["pending_count"]) if pending_confirmation else 0
             ),
-            "payment_details_reminder_due": payment_details_reminder_due,
+            "payment_details_missing": payment_details_missing,
             "sync_version": await service.sync_token(user_id, context_chat_id),
         }
     )
@@ -463,11 +457,8 @@ async def collection_details(request: web.Request) -> web.Response:
     history = view.history[:history_limit]
     events = view.events[:events_limit]
     shares = view.shares
-    inactive_transaction_ids = await service.transactions_with_inactive_participants(
-        row["id"] for row in history
-    )
     people = {row["id"]: row for row in snapshot.participants}
-    payment_methods = await service.payment_methods_for_users(people)
+    payment_methods = view.payment_methods
     pending = view.pending_repayments
     return web.json_response(
         {
@@ -521,7 +512,7 @@ async def collection_details(request: web.Request) -> web.Response:
                     "cancelled_by": row["cancelled_by"],
                     "created_at": row["created_at"],
                     "shared_with": row["shared_with"],
-                    "has_inactive_participants": row["id"] in inactive_transaction_ids,
+                    "has_inactive_participants": row["id"] in view.inactive_transaction_ids,
                     "shares": shares.get(row["id"], []),
                 }
                 for row in history
@@ -1120,12 +1111,6 @@ async def save_payment_methods(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-async def mark_payment_details_reminder_seen(request: web.Request) -> web.Response:
-    service, _, user = _context(request)
-    await service.mark_payment_details_reminder_seen(user["id"])
-    return web.json_response({"ok": True})
-
-
 async def save_display_name(request: web.Request) -> web.Response:
     service, _, user = _context(request)
     payload = await _json_body(request)
@@ -1476,9 +1461,6 @@ def setup_webapp_routes(
     application.router.add_post("/api/transactions/{transaction_id}/reject", reject_repayment)
     application.router.add_patch("/api/me/payment", save_payment)
     application.router.add_put("/api/me/payment-methods", save_payment_methods)
-    application.router.add_post(
-        "/api/me/payment-details-reminder/seen", mark_payment_details_reminder_seen
-    )
     application.router.add_patch("/api/me/name", save_display_name)
     application.router.add_patch("/api/me/notifications", save_notification_preferences)
     application.router.add_patch("/api/me/currency", save_preferred_currency)

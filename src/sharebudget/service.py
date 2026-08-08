@@ -37,6 +37,8 @@ class CollectionView:
     shares: dict[int, list[dict]]
     notifications_enabled: bool
     pending_repayments: dict[int, int]
+    payment_methods: dict[int, list[dict]]
+    inactive_transaction_ids: set[int]
 
 
 async def _fetchone(connection, query: str, params=()):
@@ -246,19 +248,6 @@ class BudgetService:
                 WHERE id=?
                 """,
                 (primary_bank, primary_details, user_id),
-            )
-            await connection.commit()
-
-    async def mark_payment_details_reminder_seen(self, user_id: int) -> None:
-        async with self.db.connect() as connection:
-            await connection.execute(
-                """
-                UPDATE users SET payment_details_reminded_at=CURRENT_TIMESTAMP
-                WHERE id=? AND NOT EXISTS (
-                    SELECT 1 FROM payment_methods pm WHERE pm.user_id=users.id
-                )
-                """,
-                (user_id,),
             )
             await connection.commit()
 
@@ -727,7 +716,7 @@ class BudgetService:
             collection = await _fetchone(
                 connection,
                 """
-                SELECT c.*,u.full_name AS admin_name
+                SELECT c.*,u.full_name AS admin_name,p.notifications_enabled
                 FROM collections c
                 JOIN users u ON u.id=c.admin_id
                 JOIN participants p ON p.collection_id=c.id
@@ -767,14 +756,6 @@ class BudgetService:
                 """,
                 (collection_id, events_limit),
             )
-            subscription = await _fetchone(
-                connection,
-                """
-                SELECT notifications_enabled FROM participants
-                WHERE collection_id=? AND user_id=? AND active=1
-                """,
-                (collection_id, user_id),
-            )
             expense_ids = [row["id"] for row in history if row["kind"] == "expense"]
             shares: dict[int, list[dict]] = {}
             if expense_ids:
@@ -799,14 +780,34 @@ class BudgetService:
                 """,
                 (collection_id, user_id),
             )
+            inactive_transaction_ids = await self._transactions_with_inactive_participants_on(
+                connection, (row["id"] for row in history)
+            )
+            participant_ids = [row["id"] for row in snapshot.participants]
+            payment_methods: dict[int, list[dict]] = {
+                participant_id: [] for participant_id in participant_ids
+            }
+            if participant_ids:
+                placeholders = ",".join("?" for _ in participant_ids)
+                method_rows = await connection.execute_fetchall(
+                    f"""
+                    SELECT id,user_id,bank_name,details,position FROM payment_methods
+                    WHERE user_id IN ({placeholders}) ORDER BY user_id,position,id
+                    """,
+                    participant_ids,
+                )
+                for row in method_rows:
+                    payment_methods[row["user_id"]].append(dict(row))
         return CollectionView(
             collection=collection,
             snapshot=snapshot,
             history=history,
             events=events,
             shares=shares,
-            notifications_enabled=bool(subscription and subscription["notifications_enabled"]),
+            notifications_enabled=bool(collection["notifications_enabled"]),
             pending_repayments={row["counterparty_id"]: row["amount"] for row in pending_rows},
+            payment_methods=payment_methods,
+            inactive_transaction_ids=inactive_transaction_ids,
         )
 
     async def add_expense(

@@ -148,7 +148,8 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert "Создайте сбор, пригласите друзей" in script_text
         assert "Privacy Mode остается включённым" not in script_text
         assert "collectionHistoryLimit: 10" in script_text
-        assert "payment-details-reminder/seen" in script_text
+        assert "paymentReminderDismissed" in script_text
+        assert "payment-details-reminder/seen" not in script_text
         assert "if (tg?.openTelegramLink) tg.openTelegramLink(url);" in script_text
         assert "if (username && tg?.openTelegramLink)" not in script_text
         assert "tg://user?id=" not in script_text
@@ -569,7 +570,7 @@ async def test_history_is_paginated_and_balance_has_personal_debts(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_payment_details_reminder_is_shown_at_most_once_per_day(tmp_path):
+async def test_payment_details_reminder_stays_until_details_are_added(tmp_path):
     database = Database(tmp_path / "payment-reminder.db")
     await database.initialize()
     service = BudgetService(database)
@@ -583,17 +584,20 @@ async def test_payment_details_reminder_is_shown_at_most_once_per_day(tmp_path):
     async with TestClient(TestServer(application)) as client:
         first = await client.get("/api/bootstrap", headers={"X-Telegram-Init-Data": auth})
         first_payload = await first.json()
-        seen = await client.post(
-            "/api/me/payment-details-reminder/seen",
-            json={},
-            headers={"X-Telegram-Init-Data": auth},
-        )
         second = await client.get("/api/bootstrap", headers={"X-Telegram-Init-Data": auth})
         second_payload = await second.json()
+        saved = await client.put(
+            "/api/me/payment-methods",
+            json={"payment_methods": [{"bank_name": "Банк", "details": "Карта •• 1234"}]},
+            headers={"X-Telegram-Init-Data": auth},
+        )
+        third = await client.get("/api/bootstrap", headers={"X-Telegram-Init-Data": auth})
+        third_payload = await third.json()
 
-    assert first_payload["payment_details_reminder_due"] is True
-    assert seen.status == 200
-    assert second_payload["payment_details_reminder_due"] is False
+    assert first_payload["payment_details_missing"] is True
+    assert second_payload["payment_details_missing"] is True
+    assert saved.status == 200
+    assert third_payload["payment_details_missing"] is False
 
 
 @pytest.mark.asyncio

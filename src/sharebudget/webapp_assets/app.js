@@ -37,7 +37,7 @@ const state = {
   quickPayExpanded: false,
   promptedRepayments: new Set(),
   paymentReminderVisible: false,
-  paymentReminderAcknowledged: false,
+  paymentReminderDismissed: false,
   launchIntent: launchParams.get("intent")
     || launchParams.get("tgWebAppStartParam")
     || tg?.initDataUnsafe?.start_param,
@@ -201,11 +201,9 @@ function showPendingRepaymentConfirmation() {
 
 async function reloadBootstrap() {
   state.bootstrap = await api("/api/bootstrap");
-  if (state.bootstrap.user.payment_methods?.length) {
-    state.paymentReminderVisible = false;
-  } else if (state.bootstrap.payment_details_reminder_due) {
-    state.paymentReminderVisible = true;
-  }
+  state.paymentReminderVisible = Boolean(
+    state.bootstrap.payment_details_missing && !state.paymentReminderDismissed
+  );
   state.syncVersion = state.bootstrap.sync_version;
   state.details.clear();
   state.balanceData = null;
@@ -254,12 +252,6 @@ async function renderCollections() {
   const owed = Object.keys(owedTotals).length ? moneyMap(owedTotals) : emptySummary;
   const active = state.bootstrap.collections.filter((item) => item.status === "active");
   const archived = state.bootstrap.collections.filter((item) => item.status === "archived");
-  if (state.paymentReminderVisible && !state.paymentReminderAcknowledged) {
-    state.paymentReminderAcknowledged = true;
-    api("/api/me/payment-details-reminder/seen", { method: "POST", body: "{}" }).catch(() => {
-      state.paymentReminderAcknowledged = false;
-    });
-  }
   app.innerHTML = `
     <div class="collection-summaries">
       <button class="summary-tile summary-owe" type="button" data-action="collections-summary"><small>Сколько я должен(а)</small><b>${owe}</b></button>
@@ -794,6 +786,7 @@ app.addEventListener("click", async (event) => {
       return await renderCollections();
     }
     if (action === "dismiss-payment-reminder") {
+      state.paymentReminderDismissed = true;
       state.paymentReminderVisible = false;
       return await renderCollections();
     }
