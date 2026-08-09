@@ -171,6 +171,18 @@ class BudgetService:
             await connection.commit()
         return row["message_id"] if row else None
 
+    async def take_bot_messages_by_prefix(self, kind_prefix: str) -> list[tuple[int, int]]:
+        """Return and forget every tracked bot message whose kind starts with a prefix."""
+        pattern = f"{kind_prefix}%"
+        async with self.db.connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            rows = await connection.execute_fetchall(
+                "SELECT chat_id,message_id FROM bot_messages WHERE kind LIKE ?", (pattern,)
+            )
+            await connection.execute("DELETE FROM bot_messages WHERE kind LIKE ?", (pattern,))
+            await connection.commit()
+        return [(row["chat_id"], row["message_id"]) for row in rows]
+
     async def get_user(self, user_id: int):
         async with self.db.connect() as connection:
             return await _fetchone(connection, "SELECT * FROM users WHERE id=?", (user_id,))

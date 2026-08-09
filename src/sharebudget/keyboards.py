@@ -8,8 +8,6 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from .money import CURRENCIES
-
 
 def main_menu() -> ReplyKeyboardRemove:
     """Keep Telegram's command menu, but remove the legacy text keyboard."""
@@ -44,14 +42,6 @@ def repayment_confirmation(transaction_id: int) -> InlineKeyboardMarkup:
             ]
         ]
     )
-
-
-def currencies() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    for currency in CURRENCIES:
-        builder.button(text=currency, callback_data=f"currency:{currency}")
-    builder.adjust(2)
-    return builder.as_markup()
 
 
 def collections_keyboard(rows, action: str = "open") -> InlineKeyboardMarkup:

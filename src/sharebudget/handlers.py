@@ -12,7 +12,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
     ChatMemberUpdated,
-    ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InlineQuery,
@@ -27,7 +26,6 @@ from .keyboards import (
     collection_actions,
     collections_keyboard,
     confirmation,
-    currencies,
     history_keyboard,
     main_menu,
     participant_picker,
@@ -38,7 +36,12 @@ from .keyboards import (
 )
 from .links import group_start_param
 from .money import format_money, parse_amount
-from .notifications import replace_repayment_prompt, report_collection_event, send_with_retry
+from .notifications import (
+    clear_repayment_prompts,
+    replace_repayment_prompt,
+    report_collection_event,
+    send_with_retry,
+)
 from .render import (
     collection_text,
     history_text,
@@ -48,7 +51,7 @@ from .render import (
     user_label,
 )
 from .service import BudgetService, DomainError
-from .states import AddExpense, AddRepayment, CreateCollection, EditTransaction, PaymentDetails
+from .states import AddExpense, AddRepayment, EditTransaction, PaymentDetails
 
 LOGGER = logging.getLogger(__name__)
 
@@ -275,8 +278,7 @@ async def start(
             (
                 "✅ <b>Подключение завершено</b>\n\n"
                 f"Вы {'уже участвовали' if was_member else 'теперь участвуете'} в сборе "
-                f"<b>«{escape(collection['title'])}»</b>. "
-                "Бот запомнил ваш Telegram ID.\n\n"
+                f"<b>«{escape(collection['title'])}»</b>.\n\n"
                 "🔔 Личные уведомления по этому сбору включены."
             ),
             reply_markup=private_menu,
@@ -457,103 +459,6 @@ async def remember_group_when_bot_is_added(
     await service.replace_bot_message(event.chat.id, "app_link", sent_message.message_id)
 
 
-@router.message(Command("new"))
-@router.message(F.text == "➕ Создать сбор")
-async def new_collection(
-    message: Message,
-    state: FSMContext,
-    service: BudgetService,
-    settings: Settings,
-) -> None:
-    await sync_user(service, message)
-    in_group = message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
-    if settings.webapp_url:
-        markup = app_launch_markup(
-            settings,
-            "create",
-            "➕ Создать сбор в приложении",
-            in_group=in_group,
-        )
-        if not in_group:
-            markup.inline_keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        text="👥 Добавить бота в группу",
-                        url=f"https://t.me/{settings.bot_username.lstrip('@')}?startgroup=shakeonit",
-                    )
-                ]
-            )
-        sent_message = await message.answer(
-            "➕ <b>Новый сбор</b>\n\nОткройте форму создания в Mini App. Сбор можно "
-            "вести в Telegram-группе или без группы.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=markup,
-        )
-        if in_group and isinstance(getattr(sent_message, "message_id", None), int):
-            previous_message_id = await service.replace_bot_message(
-                message.chat.id, "create_collection_prompt", sent_message.message_id
-            )
-            if previous_message_id is not None:
-                try:
-                    await message.bot.delete_message(
-                        message.chat.id, previous_message_id, request_timeout=5
-                    )
-                except TelegramAPIError:
-                    LOGGER.info(
-                        "Could not delete previous collection prompt %s in chat %s",
-                        previous_message_id,
-                        message.chat.id,
-                    )
-        return
-    if not in_group:
-        await message.answer(
-            "Создавать сбор нужно в общей Telegram-группе. Добавьте туда бота и повторите команду."
-        )
-        return
-    await state.set_state(CreateCollection.title)
-    await state.update_data(chat_id=message.chat.id)
-    await message.answer(
-        "Как назовем сбор? Например: <b>Поездка в Берлин</b>\n\n"
-        "Ответьте прямо на это сообщение — так бот увидит название при включённом Privacy Mode.",
-        parse_mode="HTML",
-        reply_markup=ForceReply(
-            selective=True,
-            input_field_placeholder="Название сбора",
-        ),
-    )
-
-
-@router.message(CreateCollection.title)
-async def collection_title(message: Message, state: FSMContext) -> None:
-    title = (message.text or "").strip()
-    if not 2 <= len(title) <= 80:
-        await message.answer("Название должно содержать от 2 до 80 символов. Попробуйте еще раз.")
-        return
-    await state.update_data(title=title)
-    await state.set_state(CreateCollection.currency)
-    await message.answer("Выберите единую валюту этого сбора:", reply_markup=currencies())
-
-
-@router.callback_query(CreateCollection.currency, F.data.startswith("currency:"))
-async def collection_currency(
-    callback: CallbackQuery, state: FSMContext, service: BudgetService
-) -> None:
-    await sync_user(service, callback)
-    data = await state.get_data()
-    currency = callback.data.split(":", 1)[1]
-    collection_id = await service.create_collection(
-        data["chat_id"], data["title"], currency, callback.from_user.id
-    )
-    await state.clear()
-    await callback.answer("Сбор создан")
-    collection = await service.get_collection(collection_id)
-    await callback.message.edit_text(
-        "✅ <b>Сбор создан</b>\n\n" + await collection_text(service, collection),
-        reply_markup=await collection_markup(callback.message, collection, True, True),
-        parse_mode=ParseMode.HTML,
-    )
-
-
 @router.message(Command("collections"))
 @router.message(F.text == "📋 Сборы")
 @router.message(F.text == "📋 Мои сборы")
@@ -585,7 +490,9 @@ async def open_collection(callback: CallbackQuery, service: BudgetService) -> No
 
 
 @router.callback_query(F.data.startswith("join:"))
-async def join_collection(callback: CallbackQuery, service: BudgetService) -> None:
+async def join_collection(
+    callback: CallbackQuery, service: BudgetService, settings: Settings
+) -> None:
     await sync_user(service, callback)
     collection_id = int(callback.data.split(":")[1])
     message = callback.message
@@ -593,17 +500,27 @@ async def join_collection(callback: CallbackQuery, service: BudgetService) -> No
     joined_now = await service.join(collection_id, callback.from_user.id, subscribe=subscribe)
     collection = await service.get_collection(collection_id)
     if joined_now:
+        group_markup = app_launch_markup(
+            settings,
+            f"collection_{collection_id}",
+            "Открыть сбор",
+            in_group=bool(collection["chat_id"]),
+        )
         await report_collection_event(
             callback.bot,
             service,
             collection,
             f"🙋 {event_user_link(callback.from_user)} участвует в сборе.",
+            group_markup,
             exclude_user_ids={callback.from_user.id},
+            subscriber_reply_markup=app_launch_markup(
+                settings, f"collection_{collection_id}", "Открыть сбор"
+            ),
         )
     await callback.answer(
         "✅ Вы уже участвуете в сборе."
         if not joined_now
-        else "🎉 Готово! Вы участвуете — без регистрации и переходов.",
+        else "🎉 Готово! Вы участвуете в сборе.",
         show_alert=True,
     )
     if message is None or message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
@@ -825,13 +742,18 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
     )
     collection = await service.get_collection(data["collection_id"])
     await state.clear()
-    await message.answer(
+    sender_prompt = await message.answer(
         "⏳ Возврат на сумму "
         f"<b>{format_money(amount, collection['currency'])}</b> отправлен получателю на "
         "подтверждение. До подтверждения баланс не изменится.",
         parse_mode="HTML",
         reply_markup=main_menu(),
     )
+    prompt_prefix = f"repayment_prompt:{transaction_id}"
+    if isinstance(getattr(sender_prompt, "message_id", None), int):
+        await service.replace_bot_message(
+            message.chat.id, f"{prompt_prefix}:sender", sender_prompt.message_id
+        )
     confirm_markup = repayment_confirmation(transaction_id)
     await report_collection_event(
         message.bot,
@@ -843,6 +765,7 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
         confirm_markup,
         exclude_user_ids={message.from_user.id, data["creditor_id"]},
         category="repayments",
+        message_kind=f"{prompt_prefix}:event",
     )
     if await service.notification_enabled_for_user(data["creditor_id"], "repayments"):
         try:
@@ -858,8 +781,10 @@ async def repay_amount(message: Message, state: FSMContext, service: BudgetServi
                     request_timeout=5,
                 )
             )
-            await service.set_repayment_confirmation_message(
-                transaction_id, confirmation_message.message_id
+            await service.replace_bot_message(
+                data["creditor_id"],
+                f"{prompt_prefix}:confirmation",
+                confirmation_message.message_id,
             )
         except TelegramAPIError:
             await message.answer(
@@ -883,6 +808,7 @@ async def repayment_confirm(callback: CallbackQuery, service: BudgetService) -> 
     collection = await service.get_collection(collection_id)
     transaction = await service.transaction(transaction_id)
     sender = await service.get_user(transaction["creator_id"])
+    await clear_repayment_prompts(callback.bot, service, transaction_id)
     comment_line = (
         f" Комментарий: {escape(transaction['comment'])}." if transaction["comment"] else ""
     )
@@ -907,18 +833,12 @@ async def repayment_confirm(callback: CallbackQuery, service: BudgetService) -> 
         f"Сбор: <b>«{escape(collection['title'])}»</b>"
         f"{comment_detail}"
     )
-    if callback.message.chat.type == ChatType.PRIVATE:
-        await replace_repayment_prompt(
-            callback.bot,
-            callback.message.chat.id,
-            transaction["confirmation_message_id"] or callback.message.message_id,
-            final_text,
-        )
-    else:
-        try:
-            await callback.message.delete()
-        except TelegramAPIError:
-            await safe_edit(callback.message, final_text)
+    await replace_repayment_prompt(
+        callback.bot,
+        callback.from_user.id,
+        transaction["confirmation_message_id"],
+        final_text,
+    )
 
 
 @router.callback_query(F.data.startswith("history:"))
@@ -1017,7 +937,8 @@ async def transaction_cancel(callback: CallbackQuery, service: BudgetService) ->
         callback.bot,
         service,
         collection,
-        f"↩️ {event_user_link(callback.from_user)} отменил(а) транзакцию #{transaction_id}. "
+        f"↩️ {event_user_link(callback.from_user)} отменил(а) транзакцию на "
+        f"<b>{format_money(transaction['amount'], collection['currency'])}</b>. "
         "Балансы пересчитаны.",
         exclude_user_ids={callback.from_user.id},
         category="expenses" if transaction["kind"] == "expense" else "repayments",
@@ -1112,6 +1033,7 @@ async def repayment_reject(callback: CallbackQuery, service: BudgetService) -> N
     collection = await service.get_collection(collection_id)
     transaction = await service.transaction(transaction_id)
     sender = await service.get_user(transaction["creator_id"])
+    await clear_repayment_prompts(callback.bot, service, transaction_id)
     comment_line = (
         f" Комментарий: {escape(transaction['comment'])}." if transaction["comment"] else ""
     )
@@ -1135,18 +1057,12 @@ async def repayment_reject(callback: CallbackQuery, service: BudgetService) -> N
         f"Сбор: <b>«{escape(collection['title'])}»</b>"
         f"{comment_detail}"
     )
-    if callback.message.chat.type == ChatType.PRIVATE:
-        await replace_repayment_prompt(
-            callback.bot,
-            callback.message.chat.id,
-            transaction["confirmation_message_id"] or callback.message.message_id,
-            final_text,
-        )
-    else:
-        try:
-            await callback.message.delete()
-        except TelegramAPIError:
-            await safe_edit(callback.message, final_text)
+    await replace_repayment_prompt(
+        callback.bot,
+        callback.from_user.id,
+        transaction["confirmation_message_id"],
+        final_text,
+    )
 
 
 @router.message(Command("balance"))

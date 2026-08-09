@@ -581,6 +581,19 @@ async def test_current_bot_message_replaces_previous_message(service):
 
 
 @pytest.mark.asyncio
+async def test_bot_messages_can_be_taken_by_kind_prefix(service):
+    await service.replace_bot_message(1, "repayment_prompt:7:sender", 10)
+    await service.replace_bot_message(1, "repayment_prompt:7:event", 11)
+    await service.replace_bot_message(2, "repayment_prompt:7:confirmation", 12)
+    await service.replace_bot_message(1, "repayment_prompt:8:event", 20)
+
+    messages = await service.take_bot_messages_by_prefix("repayment_prompt:7:")
+
+    assert sorted(messages) == [(1, 10), (1, 11), (2, 12)]
+    assert await service.take_bot_message(1, "repayment_prompt:8:event") == 20
+
+
+@pytest.mark.asyncio
 async def test_expense_share_breakdown_is_exact(service):
     collection_id = await make_collection(service)
     transaction_id = await service.add_expense(collection_id, 1, 1001, [3, 1, 2], "Билеты")

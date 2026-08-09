@@ -9,7 +9,6 @@ from sharebudget.db import Database
 from sharebudget.handlers import (
     app_launch_markup,
     join_collection,
-    new_collection,
     open_webapp,
     remember_group_when_bot_is_added,
     start,
@@ -136,8 +135,9 @@ async def test_shared_inline_invitation_join_works_without_message_or_collection
         answer=AsyncMock(),
     )
 
-    await join_collection(callback, service)
-    await join_collection(callback, service)
+    settings = Settings(bot_token="123456:test-token", webapp_url="https://example.com/app")
+    await join_collection(callback, service, settings)
+    await join_collection(callback, service, settings)
 
     assert await service.is_participant(collection_id, 2)
     assert callback.answer.await_count == 2
@@ -188,36 +188,6 @@ def test_create_collection_link_opens_main_mini_app_form():
 
 
 @pytest.mark.asyncio
-async def test_group_create_prompt_is_tracked_until_collection_is_created(tmp_path):
-    database = Database(tmp_path / "create-prompt.db")
-    await database.initialize()
-    service = BudgetService(database)
-    bot = SimpleNamespace(delete_message=AsyncMock())
-    chat = SimpleNamespace(type=ChatType.SUPERGROUP, id=-100500)
-    message = SimpleNamespace(
-        chat=chat,
-        message=SimpleNamespace(chat=chat),
-        from_user=SimpleNamespace(id=7, username="owner", full_name="Владелец"),
-        answer=AsyncMock(return_value=SimpleNamespace(message_id=55)),
-        bot=bot,
-    )
-    settings = Settings(
-        bot_token="123456:test-token",
-        webapp_url="https://example.com/app",
-        bot_username="ShakeOnIt_bot",
-        main_app_enabled=True,
-    )
-
-    await new_collection(message, SimpleNamespace(), service, settings)
-
-    sent = message.answer.await_args
-    assert "Откройте форму создания" in sent.args[0]
-    assert sent.kwargs["reply_markup"].inline_keyboard[0][0].text == (
-        "➕ Создать сбор в приложении"
-    )
-    assert await service.take_bot_message(-100500, "create_collection_prompt") == 55
-
-
 @pytest.mark.asyncio
 async def test_open_app_button_returns_group_scoped_main_app_link_and_removes_previous(tmp_path):
     database = Database(tmp_path / "group-link.db")

@@ -35,6 +35,7 @@ async def notify_subscribers(
     exclude_user_ids: Collection[int] = (),
     reply_markup=None,
     category: str = "collection_events",
+    message_kind: str | None = None,
 ) -> int:
     """Deliver a collection event to opted-in participants via private chat."""
     excluded = set(exclude_user_ids)
@@ -47,7 +48,7 @@ async def notify_subscribers(
     async def deliver(row) -> bool:
         user_id = row["user_id"]
         try:
-            await send_with_retry(
+            message = await send_with_retry(
                 lambda: bot.send_message(
                     user_id,
                     f"🔔 <b>{escape(collection['title'])}</b>\n\n{text}",
@@ -57,6 +58,8 @@ async def notify_subscribers(
                     request_timeout=5,
                 )
             )
+            if message_kind and isinstance(getattr(message, "message_id", None), int):
+                await service.replace_bot_message(user_id, message_kind, message.message_id)
             return True
         except TelegramForbiddenError:
             await service.set_notification_subscription(collection["id"], user_id, False)
@@ -92,6 +95,7 @@ async def report_collection_event(
     exclude_user_ids: Collection[int] = (),
     subscriber_reply_markup=None,
     category: str = "collection_events",
+    message_kind: str | None = None,
 ) -> tuple[bool, int]:
     """Publish an event to the linked group and opted-in private subscribers."""
 
@@ -99,7 +103,7 @@ async def report_collection_event(
         if not collection["chat_id"]:
             return False
         try:
-            await send_with_retry(
+            message = await send_with_retry(
                 lambda: bot.send_message(
                     collection["chat_id"],
                     f"🔔 <b>{escape(collection['title'])}</b>\n\n{text}",
@@ -109,6 +113,10 @@ async def report_collection_event(
                     request_timeout=5,
                 )
             )
+            if message_kind and isinstance(getattr(message, "message_id", None), int):
+                await service.replace_bot_message(
+                    collection["chat_id"], message_kind, message.message_id
+                )
             return True
         except TelegramAPIError:
             LOGGER.warning(
@@ -128,6 +136,7 @@ async def report_collection_event(
             exclude_user_ids=exclude_user_ids,
             reply_markup=subscriber_reply_markup,
             category=category,
+            message_kind=message_kind,
         ),
     )
     return group_sent, delivered
@@ -160,3 +169,13 @@ async def replace_repayment_prompt(
         await bot.send_message(chat_id, text, parse_mode="HTML", request_timeout=5)
     except TelegramAPIError:
         LOGGER.info("Could not deliver final repayment status to chat %s", chat_id)
+
+
+async def clear_repayment_prompts(bot: Bot, service: BudgetService, transaction_id: int) -> None:
+    """Remove every tracked request message for a resolved repayment."""
+    messages = await service.take_bot_messages_by_prefix(f"repayment_prompt:{transaction_id}:")
+    for chat_id, message_id in messages:
+        try:
+            await bot.delete_message(chat_id, message_id, request_timeout=5)
+        except TelegramAPIError:
+            LOGGER.info("Could not remove repayment prompt %s in chat %s", message_id, chat_id)

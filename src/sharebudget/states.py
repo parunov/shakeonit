@@ -1,11 +1,6 @@
 from aiogram.fsm.state import State, StatesGroup
 
 
-class CreateCollection(StatesGroup):
-    title = State()
-    currency = State()
-
-
 class AddExpense(StatesGroup):
     collection = State()
     amount = State()

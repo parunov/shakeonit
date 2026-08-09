@@ -3,7 +3,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from sharebudget.notifications import replace_repayment_prompt, report_collection_event
+from sharebudget.notifications import (
+    clear_repayment_prompts,
+    replace_repayment_prompt,
+    report_collection_event,
+)
 
 
 @pytest.mark.asyncio
@@ -46,3 +50,16 @@ async def test_repayment_prompt_is_deleted_and_replaced_with_final_status():
     bot.send_message.assert_awaited_once_with(
         42, "✅ Получение подтверждено", parse_mode="HTML", request_timeout=5
     )
+
+
+@pytest.mark.asyncio
+async def test_all_tracked_repayment_prompts_are_deleted():
+    service = SimpleNamespace(
+        take_bot_messages_by_prefix=AsyncMock(return_value=[(1, 10), (-100, 20), (2, 30)])
+    )
+    bot = SimpleNamespace(delete_message=AsyncMock())
+
+    await clear_repayment_prompts(bot, service, 7)
+
+    service.take_bot_messages_by_prefix.assert_awaited_once_with("repayment_prompt:7:")
+    assert bot.delete_message.await_count == 3

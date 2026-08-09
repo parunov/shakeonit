@@ -54,8 +54,7 @@ def transaction_update_report(
         else escape(actor_name)
     )
     return (
-        f"✏️ {actor} изменил(а) {kind} по сбору "
-        f"<b>«{escape(collection['title'])}»</b>.\n"
+        f"✏️ {actor} изменил(а) {kind}.\n"
         f"Было: {state_text(before, before_participants)}\n"
         f"Стало: {state_text(after, after_participants)}"
     )
