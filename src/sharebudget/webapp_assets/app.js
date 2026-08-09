@@ -12,6 +12,7 @@ const historyBadge = document.getElementById("history-badge");
 const botUsername = document.querySelector('meta[name="telegram-bot-username"]')?.content;
 const analyticsEnabled = Boolean(document.querySelector("script[data-goatcounter]"));
 const launchParams = new URLSearchParams(window.location.search);
+const COLLECTION_SWIPE_REVEAL = 124;
 const moneyFormatters = new Map();
 const dateFormatter = new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 
@@ -37,6 +38,7 @@ const state = {
   viewStack: [],
   swipeStart: null,
   collectionSwipe: null,
+  collectionClickBlockedUntil: 0,
   quickPayExpanded: false,
   promptedRepayments: new Set(),
   paymentReminderVisible: false,
@@ -65,10 +67,14 @@ function flushAnalytics() {
 
 function trackAnalytics(payload) {
   if (!analyticsEnabled) return;
-  const telegramId = Number(state.bootstrap?.user?.id || 0);
+  const telegramName = String(state.bootstrap?.user?.telegram_full_name || "Пользователь")
+    .replace(/[\\/?#&\u0000-\u001f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80) || "Пользователь";
   analyticsQueue.push({
     ...payload,
-    ...(telegramId ? { referrer: `telegram-user-${telegramId}` } : {}),
+    referrer: `telegram-user-${telegramName}`,
   });
   if (!analyticsRetryTimer) flushAnalytics();
 }
@@ -85,15 +91,19 @@ function trackEvent(name, label) {
 }
 
 function trackAnalyticsSession() {
-  if (analyticsSessionStarted || !state.bootstrap?.user?.id) return;
+  if (analyticsSessionStarted || !state.bootstrap?.user?.telegram_full_name) return;
   analyticsSessionStarted = true;
-  const telegramId = Number(state.bootstrap.user.id);
+  const telegramName = String(state.bootstrap.user.telegram_full_name)
+    .replace(/[\\/?#&\u0000-\u001f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80) || "Пользователь";
   trackAnalytics({
     path: "event/app-session",
     title: "Запуск Mini App",
     event: true,
   });
-  trackEvent(`active-user-${telegramId}`, `Активный Telegram ID ${telegramId}`);
+  trackEvent(`active-user-${telegramName}`, `Активный пользователь ${telegramName}`);
 }
 
 const e = (value) => String(value ?? "")
@@ -758,7 +768,15 @@ function paymentSheet() {
 }
 
 function paymentMethodEditor(method = {}) {
-  return `<div class="payment-method-editor"><button type="button" class="remove-method" data-action="remove-payment-method" aria-label="Удалить">×</button><label class="field"><span>Банк</span><input name="method_bank" maxlength="100" placeholder="Например, Альфа-Банк" value="${e(method.bank_name || "")}"></label><label class="field"><span>Реквизиты</span><textarea name="method_details" maxlength="500" placeholder="Телефон СБП или номер карты">${e(method.details || "")}</textarea></label></div>`;
+  return `<div class="payment-method-editor"><button type="button" class="remove-method" data-action="remove-payment-method" aria-label="Удалить">×</button><label class="field"><span>Банк</span><input name="method_bank" maxlength="100" placeholder="Например, Альфа-Банк" value="${e(method.bank_name || "")}"></label><label class="field"><span>Реквизиты</span><textarea name="method_details" data-payment-details maxlength="500" placeholder="Телефон СБП или номер карты">${e(formatPaymentDetails(method.details || ""))}</textarea></label></div>`;
+}
+
+function formatPaymentDetails(value) {
+  const text = String(value || "");
+  const digits = text.replace(/[\s-]/g, "");
+  return /^\d{16}$/.test(digits) && /^[\d\s-]+$/.test(text)
+    ? digits.replace(/(\d{4})(?=\d)/g, "$1 ")
+    : text;
 }
 
 function nameSheet() {
@@ -864,6 +882,10 @@ app.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-action]");
   if (!target || state.busy) return;
   const action = target.dataset.action;
+  if (target.closest(".collection-swipe-row") && performance.now() < state.collectionClickBlockedUntil) {
+    event.preventDefault();
+    return;
+  }
   const revealedSwipe = target.closest(".collection-swipe-row.revealed");
   if (revealedSwipe && action === "open-collection") {
     revealedSwipe.classList.remove("revealed");
@@ -1219,6 +1241,14 @@ sheet.addEventListener("change", (event) => {
 });
 
 sheet.addEventListener("input", (event) => {
+  if (event.target.matches("[data-payment-details]")) {
+    const formatted = formatPaymentDetails(event.target.value);
+    if (formatted !== event.target.value) {
+      event.target.value = formatted;
+      event.target.setSelectionRange(formatted.length, formatted.length);
+    }
+    return;
+  }
   if (event.target.name !== "custom_share") return;
   const total = [...sheet.querySelectorAll('input[name="custom_share"]')]
     .reduce((sum, input) => sum + inputMinorUnits(input.value), 0);
@@ -1344,37 +1374,65 @@ avatar.addEventListener("click", () => {
 document.getElementById("sheet-backdrop").addEventListener("click", closeSheet);
 tg?.BackButton?.onClick(() => navigateBack(true));
 
-app.addEventListener("touchstart", (event) => {
+app.addEventListener("pointerdown", (event) => {
   const row = event.target.closest(".collection-swipe-row");
-  const touch = event.changedTouches[0];
-  if (!row || !touch || event.target.closest("button.swipe-danger-action")) return;
-  state.collectionSwipe = { row, x: touch.clientX, y: touch.clientY };
-}, { passive: true });
+  if (!row || event.button !== 0 || event.target.closest("button.swipe-danger-action")) return;
+  const baseOffset = row.classList.contains("revealed") ? -COLLECTION_SWIPE_REVEAL : 0;
+  state.collectionSwipe = {
+    row,
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    baseOffset,
+    currentOffset: baseOffset,
+    axis: null,
+    startedAt: performance.now(),
+  };
+  row.setPointerCapture?.(event.pointerId);
+  row.classList.add("dragging");
+  row.style.setProperty("--swipe-x", `${baseOffset}px`);
+});
 
-app.addEventListener("touchmove", (event) => {
+app.addEventListener("pointermove", (event) => {
   const start = state.collectionSwipe;
-  const touch = event.changedTouches[0];
-  if (!start || !touch) return;
-  const dx = touch.clientX - start.x;
-  const dy = Math.abs(touch.clientY - start.y);
-  if (dy > Math.abs(dx)) return;
-  const offset = Math.max(-120, Math.min(0, dx));
+  if (!start || event.pointerId !== start.pointerId) return;
+  const dx = event.clientX - start.x;
+  const dy = event.clientY - start.y;
+  if (!start.axis && Math.max(Math.abs(dx), Math.abs(dy)) >= 7) {
+    start.axis = Math.abs(dx) > Math.abs(dy) ? "horizontal" : "vertical";
+  }
+  if (start.axis !== "horizontal" || (start.baseOffset === 0 && dx > 0)) return;
+  event.preventDefault();
+  const offset = Math.max(-COLLECTION_SWIPE_REVEAL, Math.min(0, start.baseOffset + dx));
+  start.currentOffset = offset;
   start.row.style.setProperty("--swipe-x", `${offset}px`);
-}, { passive: true });
+});
 
-app.addEventListener("touchend", (event) => {
+function finishCollectionSwipe(event, cancelled = false) {
   const start = state.collectionSwipe;
+  if (!start || event.pointerId !== start.pointerId) return;
   state.collectionSwipe = null;
-  if (!start) return;
-  const touch = event.changedTouches[0];
-  const reveal = touch && touch.clientX - start.x < -54;
+  const dx = event.clientX - start.x;
+  const elapsed = Math.max(1, performance.now() - start.startedAt);
+  const velocity = dx / elapsed;
+  let reveal = start.baseOffset < 0;
+  if (!cancelled && start.axis === "horizontal") {
+    state.collectionClickBlockedUntil = performance.now() + 450;
+    reveal = start.currentOffset <= -COLLECTION_SWIPE_REVEAL / 2;
+    if (velocity < -0.45 && dx < -24) reveal = true;
+    if (velocity > 0.45 && dx > 24) reveal = false;
+  }
   app.querySelectorAll(".collection-swipe-row.revealed").forEach((row) => {
     if (row !== start.row) row.classList.remove("revealed");
   });
   start.row.classList.toggle("revealed", Boolean(reveal));
+  start.row.classList.remove("dragging");
   start.row.style.removeProperty("--swipe-x");
-  if (reveal) haptic();
-}, { passive: true });
+  if (reveal !== (start.baseOffset < 0)) haptic();
+}
+
+app.addEventListener("pointerup", (event) => finishCollectionSwipe(event));
+app.addEventListener("pointercancel", (event) => finishCollectionSwipe(event, true));
 
 document.addEventListener("touchstart", (event) => {
   const touch = event.changedTouches[0];

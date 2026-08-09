@@ -397,6 +397,15 @@ async def bootstrap(request: web.Request) -> web.Response:
             "user": {
                 "id": user_id,
                 "full_name": user["full_name"],
+                "telegram_full_name": " ".join(
+                    part
+                    for part in (
+                        telegram_user.get("first_name"),
+                        telegram_user.get("last_name"),
+                    )
+                    if part
+                ).strip()
+                or user["full_name"],
                 "username": user["username"],
                 "payment_details": user["payment_details"],
                 "bank_name": user["bank_name"],

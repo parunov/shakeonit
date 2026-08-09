@@ -79,16 +79,23 @@ async def test_welcome_explains_benefits_without_privacy_or_password_copy(
         message,
         SimpleNamespace(args=None),
         service,
-        Settings(bot_token="123456:test-token"),
+        Settings(
+            bot_token="123456:test-token",
+            webapp_url="https://example.com/app",
+            main_app_enabled=True,
+        ),
     )
 
-    text = message.answer.await_args.args[0]
-    assert "создайте сбор" in text.lower()
-    assert "кто кому сколько" in text.lower()
-    assert "начать можно за минуту" in text.lower()
-    assert "балансы пересчитаются автоматически" in text.lower()
-    assert "privacy" not in text.lower()
-    assert "парол" not in text.lower()
+    assert message.answer.await_count == 2
+    welcome = message.answer.await_args_list[0]
+    launch = message.answer.await_args_list[1]
+    assert "создайте сбор" in welcome.args[0].lower()
+    assert "кто кому сколько" in welcome.args[0].lower()
+    assert "privacy" not in welcome.args[0].lower()
+    assert "парол" not in welcome.args[0].lower()
+    assert not hasattr(welcome.kwargs["reply_markup"], "inline_keyboard")
+    assert launch.args[0] == "📱 <b>Все сборы в одном удобном приложении</b>"
+    assert launch.kwargs["reply_markup"].inline_keyboard[0][0].text == "Открыть приложение"
 
 
 @pytest.mark.asyncio
@@ -109,8 +116,9 @@ async def test_plain_start_fallback_sends_welcome(tmp_path, monkeypatch):
         Settings(bot_token="123456:test-token", webapp_url="https://example.com/app"),
     )
 
-    message.answer.assert_awaited_once()
-    assert "Добро пожаловать" in message.answer.await_args.args[0]
+    assert message.answer.await_count == 2
+    assert "Добро пожаловать" in message.answer.await_args_list[0].args[0]
+    assert "Все сборы в одном удобном приложении" in message.answer.await_args_list[1].args[0]
 
 
 @pytest.mark.asyncio

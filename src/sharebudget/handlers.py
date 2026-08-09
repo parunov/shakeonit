@@ -199,23 +199,24 @@ async def show_collection(message: Message, collection_id: int, actor_id: int, s
 
 
 async def send_welcome(message: Message, settings: Settings) -> None:
-    markup = (
-        app_launch_markup(settings)
-        if settings.webapp_url and message.chat.type == ChatType.PRIVATE
-        else main_menu()
-    )
     await message.answer(
         "🤝 <b>Добро пожаловать в «По рукам»</b>\n\n"
-        "Один оплатил билеты, другой — жильё, а кто-то уже вернул долг? "
-        "Приложение само сведёт расчёты и покажет, кто кому сколько должен(а).\n\n"
-        "<b>Начать можно за минуту:</b>\n"
-        "1. Откройте приложение.\n"
-        "2. Создайте сбор и пригласите друзей.\n"
-        "3. Добавляйте траты и возвраты — балансы пересчитаются автоматически.\n\n"
-        "Все сборы, история и расчёты всегда будут под рукой.",
-        reply_markup=markup,
+        "Делите расходы в поездках, на праздниках и в повседневной жизни — "
+        "без таблиц и неловких напоминаний.\n\n"
+        "Создайте сбор, пригласите друзей и добавляйте траты или возвраты. "
+        "«По рукам» автоматически пересчитает балансы и покажет, кто кому сколько должен(а).",
+        reply_markup=main_menu(),
         parse_mode=ParseMode.HTML,
     )
+    if settings.webapp_url or settings.main_app_enabled:
+        await message.answer(
+            "📱 <b>Все сборы в одном удобном приложении</b>",
+            reply_markup=app_launch_markup(
+                settings,
+                in_group=message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP),
+            ),
+            parse_mode=ParseMode.HTML,
+        )
 
 
 @router.message(CommandStart())

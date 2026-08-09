@@ -157,9 +157,14 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert "теперь общие расходы считаются сами" in script_text
         assert 'trackScreen("collections", "Сборы")' in script_text
         assert 'trackEvent("collection-created", "Создан сбор")' in script_text
-        assert 'referrer: `telegram-user-${telegramId}`' in script_text
+        assert 'referrer: `telegram-user-${telegramName}`' in script_text
         assert 'path: "event/app-session"' in script_text
-        assert 'trackEvent(`active-user-${telegramId}`' in script_text
+        assert 'trackEvent(`active-user-${telegramName}`' in script_text
+        assert "formatPaymentDetails" in script_text
+        assert "data-payment-details" in script_text
+        assert "COLLECTION_SWIPE_REVEAL = 124" in script_text
+        assert 'addEventListener("pointercancel"' in script_text
+        assert "collectionClickBlockedUntil" in script_text
         assert "Privacy Mode остается включённым" not in script_text
         assert "collectionHistoryLimit: 10" in script_text
         assert "paymentReminderDismissed" in script_text
@@ -183,12 +188,18 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         payload = await authorized.json()
         assert authorized.status == 200
         assert payload["user"]["id"] == 42
+        assert payload["user"]["telegram_full_name"] == "Анна"
         assert payload["user"]["preferred_currency"] == "BYN"
         assert payload["user"]["bank_name"] == ""
         assert payload["main_app_enabled"] is False
         assert payload["is_new_user"] is True
         assert payload["sync_version"]
         assert payload["initial_balance"] == {"collections": [], "personal_debts": []}
+
+        styles = await client.get("/app/static/styles.css")
+        styles_text = await styles.text()
+        assert ".collection-swipe-row.dragging .swipe-card" in styles_text
+        assert "width: 100%; padding: 17px 24px" in styles_text
 
         sync = await client.get(
             "/api/sync",
