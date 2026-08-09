@@ -70,7 +70,7 @@ window.Telegram = {{ WebApp: {{
 </script>
 """
     return index.replace(
-        '<script src="https://telegram.org/js/telegram-web-app.js" defer></script>', mock
+        '<script src="https://telegram.org/js/telegram-web-app.js" async></script>', mock
     ).replace("__BOT_USERNAME__", "ShakeOnIt_bot").replace(
         "__ASSET_VERSION__", "ui-test"
     ).replace(

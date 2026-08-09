@@ -257,11 +257,14 @@ button:disabled { opacity: .5; cursor: default; }
 .amount-input input { font-size: 22px; font-weight: 760; letter-spacing: -.02em; }
 .amount-input button { min-width: 60px; border: 0; border-radius: 14px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); font-weight: 800; }
 
-.collection-swipe-row { --swipe-x: 0px; position: relative; overflow: hidden; border-radius: 23px; background: var(--bad); touch-action: pan-y; }
-.collection-swipe-row .swipe-card { position: relative; z-index: 1; width: 100%; border-radius: 23px; transform: translate3d(var(--swipe-x), 0, 0); transition: transform .28s cubic-bezier(.22, .8, .25, 1); will-change: transform; }
+.collection-swipe-row { --swipe-x: 0px; position: relative; overflow: hidden; contain: paint; border-radius: 23px; background: var(--bad); touch-action: pan-y; }
+.collection-swipe-row .swipe-card { position: relative; z-index: 1; width: 100%; border-radius: 23px; transform: translate3d(var(--swipe-x), 0, 0); transition: transform .26s cubic-bezier(.22, .8, .25, 1); }
 .collection-swipe-row.revealed { --swipe-x: -124px; }
-.collection-swipe-row.dragging .swipe-card { transition: none; }
+.collection-swipe-row.revealed .swipe-card, .collection-swipe-row.dragging .swipe-card { will-change: transform; }
+.collection-swipe-row.dragging .swipe-card { transition: none; user-select: none; -webkit-user-select: none; }
 .swipe-danger-action { position: absolute; z-index: 0; inset: 0; display: flex; align-items: center; justify-content: flex-end; width: 100%; padding: 17px 24px; border: 0; border-radius: 23px; color: #fff; background: var(--bad); font-size: 13px; font-weight: 780; text-align: right; }
+html.collection-swipe-active { overflow: hidden; overscroll-behavior: none; }
+html.collection-swipe-active body { position: fixed; top: var(--collection-scroll-offset, 0); right: 0; left: 0; width: 100%; overflow: hidden; touch-action: none; }
 .payment-reminder { position: relative; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 11px; margin: 12px 0 15px; padding: 13px 38px 13px 13px; border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line)); border-radius: 19px; color: var(--text); background: var(--surface-strong); box-shadow: 0 9px 26px rgba(20, 48, 68, .11); }
 .payment-reminder-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 13px; background: color-mix(in srgb, var(--accent) 14%, var(--surface)); font-size: 20px; }
 .payment-reminder > span:nth-child(2) { display: grid; gap: 3px; }

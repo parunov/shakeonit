@@ -1,6 +1,6 @@
 "use strict";
 
-const tg = window.Telegram?.WebApp;
+let tg = window.Telegram?.WebApp;
 const app = document.getElementById("app");
 const title = document.getElementById("page-title");
 const avatar = document.getElementById("avatar");
@@ -13,7 +13,10 @@ const botUsername = document.querySelector('meta[name="telegram-bot-username"]')
 const analyticsEnabled = Boolean(document.querySelector("script[data-goatcounter]"));
 const launchParams = new URLSearchParams(window.location.search);
 const COLLECTION_SWIPE_REVEAL = 124;
+const API_TIMEOUT_MS = 9000;
+const TELEGRAM_READY_TIMEOUT_MS = 5000;
 const moneyFormatters = new Map();
+const busyButtonContents = new WeakMap();
 const dateFormatter = new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 
 const state = {
@@ -189,8 +192,30 @@ function toast(message, isError = false) {
   toast.timer = setTimeout(() => { toastNode.hidden = true; }, 2600);
 }
 
+const wait = (delay) => new Promise((resolve) => setTimeout(resolve, delay));
+
+async function waitForTelegram(timeout = TELEGRAM_READY_TIMEOUT_MS) {
+  const deadline = performance.now() + timeout;
+  while (!window.Telegram?.WebApp && performance.now() < deadline) await wait(50);
+  tg = window.Telegram?.WebApp;
+  return tg;
+}
+
+async function fetchApi(path, options, timeout = API_TIMEOUT_MS) {
+  if (!window.AbortController) return fetch(path, options);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    return await fetch(path, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const method = String(options.method || "GET").toUpperCase();
+  const attempts = method === "GET" && path !== "/api/rates" ? 2 : 1;
+  const requestOptions = {
     ...options,
     cache: "no-store",
     headers: {
@@ -198,10 +223,29 @@ async function api(path, options = {}) {
       "X-Telegram-Init-Data": tg?.initData || "",
       ...(options.headers || {}),
     },
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok || !data.ok) throw new Error(data.error || "Не удалось выполнить действие");
-  return data;
+  };
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = await fetchApi(path, requestOptions);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) {
+        const error = new Error(data.error || "Не удалось выполнить действие");
+        error.status = response.status;
+        throw error;
+      }
+      return data;
+    } catch (error) {
+      lastError = error;
+      const retryable = !error.status || [502, 503, 504].includes(error.status);
+      if (attempt + 1 >= attempts || !retryable) break;
+      await wait(350 * (attempt + 1));
+    }
+  }
+  if (lastError?.name === "AbortError") {
+    throw new Error("Сервер отвечает дольше обычного. Проверьте интернет и попробуйте ещё раз");
+  }
+  throw lastError || new Error("Не удалось выполнить действие");
 }
 
 function loadInitialHistory() {
@@ -231,10 +275,13 @@ function setBusy(button, busy) {
   if (button) {
     button.disabled = busy;
     if (busy) {
-      button.dataset.oldText = button.textContent;
+      if (!busyButtonContents.has(button)) busyButtonContents.set(button, button.innerHTML);
+      button.setAttribute("aria-busy", "true");
       button.textContent = "Сохраняем…";
-    } else if (button.dataset.oldText) {
-      button.textContent = button.dataset.oldText;
+    } else if (busyButtonContents.has(button)) {
+      button.innerHTML = busyButtonContents.get(button);
+      busyButtonContents.delete(button);
+      button.removeAttribute("aria-busy");
     }
   }
 }
@@ -1372,7 +1419,6 @@ avatar.addEventListener("click", () => {
   renderProfile();
 });
 document.getElementById("sheet-backdrop").addEventListener("click", closeSheet);
-tg?.BackButton?.onClick(() => navigateBack(true));
 
 app.addEventListener("pointerdown", (event) => {
   const row = event.target.closest(".collection-swipe-row");
@@ -1386,6 +1432,8 @@ app.addEventListener("pointerdown", (event) => {
     baseOffset,
     currentOffset: baseOffset,
     axis: null,
+    scrollLocked: false,
+    scrollY: 0,
     startedAt: performance.now(),
   };
   row.setPointerCapture?.(event.pointerId);
@@ -1393,15 +1441,38 @@ app.addEventListener("pointerdown", (event) => {
   row.style.setProperty("--swipe-x", `${baseOffset}px`);
 });
 
+function lockCollectionSwipeScroll(start) {
+  if (start.scrollLocked) return;
+  start.scrollLocked = true;
+  start.scrollY = window.scrollY;
+  document.documentElement.style.setProperty("--collection-scroll-offset", `-${start.scrollY}px`);
+  document.documentElement.classList.add("collection-swipe-active");
+}
+
+function unlockCollectionSwipeScroll(start) {
+  if (!start?.scrollLocked) return;
+  document.documentElement.classList.remove("collection-swipe-active");
+  document.documentElement.style.removeProperty("--collection-scroll-offset");
+  window.scrollTo(0, start.scrollY);
+  start.scrollLocked = false;
+}
+
 app.addEventListener("pointermove", (event) => {
   const start = state.collectionSwipe;
   if (!start || event.pointerId !== start.pointerId) return;
   const dx = event.clientX - start.x;
   const dy = event.clientY - start.y;
-  if (!start.axis && Math.max(Math.abs(dx), Math.abs(dy)) >= 7) {
-    start.axis = Math.abs(dx) > Math.abs(dy) ? "horizontal" : "vertical";
+  const absX = Math.abs(dx);
+  const absY = Math.abs(dy);
+  if (!start.axis && Math.max(absX, absY) >= 8) {
+    if (absX > absY * 1.2) {
+      start.axis = start.baseOffset === 0 && dx > 0 ? "ignored" : "horizontal";
+      if (start.axis === "horizontal") lockCollectionSwipeScroll(start);
+    } else if (absY > absX * 1.2) {
+      start.axis = "vertical";
+    }
   }
-  if (start.axis !== "horizontal" || (start.baseOffset === 0 && dx > 0)) return;
+  if (start.axis !== "horizontal") return;
   event.preventDefault();
   const offset = Math.max(-COLLECTION_SWIPE_REVEAL, Math.min(0, start.baseOffset + dx));
   start.currentOffset = offset;
@@ -1412,6 +1483,7 @@ function finishCollectionSwipe(event, cancelled = false) {
   const start = state.collectionSwipe;
   if (!start || event.pointerId !== start.pointerId) return;
   state.collectionSwipe = null;
+  unlockCollectionSwipeScroll(start);
   const dx = event.clientX - start.x;
   const elapsed = Math.max(1, performance.now() - start.startedAt);
   const velocity = dx / elapsed;
@@ -1433,6 +1505,7 @@ function finishCollectionSwipe(event, cancelled = false) {
 
 app.addEventListener("pointerup", (event) => finishCollectionSwipe(event));
 app.addEventListener("pointercancel", (event) => finishCollectionSwipe(event, true));
+app.addEventListener("lostpointercapture", (event) => finishCollectionSwipe(event, true));
 
 document.addEventListener("touchstart", (event) => {
   const touch = event.changedTouches[0];
@@ -1455,11 +1528,21 @@ document.addEventListener("touchend", async (event) => {
 }, { passive: true });
 
 async function init() {
+  const slowLoadingTimer = setTimeout(() => {
+    const message = app.querySelector(".loading-card p");
+    if (message && !state.bootstrap) {
+      message.textContent = "Соединение заняло чуть больше времени. Ещё немного…";
+    }
+  }, 3500);
+  await waitForTelegram();
+  state.launchIntent = state.launchIntent || tg?.initDataUnsafe?.start_param;
+  tg?.BackButton?.onClick(() => navigateBack(true));
   tg?.ready();
   tg?.expand();
   tg?.setHeaderColor?.("bg_color");
   tg?.setBackgroundColor?.("bg_color");
   if (!tg?.initData) {
+    clearTimeout(slowLoadingTimer);
     nav.hidden = true;
     app.innerHTML = `<section class="auth-error"><span class="empty-icon">🔐</span><h2>Нужен защищённый запуск</h2><p class="row-note">Telegram открыл старую кнопку без данных профиля. Нажмите ниже — вход произойдёт автоматически, без логина и пароля.</p><div class="sheet-actions"><button class="primary-button" type="button" id="secure-open">Открыть в Telegram</button></div></section>`;
     document.getElementById("secure-open")?.addEventListener("click", () => {
@@ -1482,6 +1565,8 @@ async function init() {
     nav.hidden = true;
     app.innerHTML = `<section class="auth-error"><span class="empty-icon">↻</span><h2>Не удалось открыть приложение</h2><p class="row-note">${e(error.message)}</p><div class="sheet-actions"><button class="primary-button" type="button" id="retry">Попробовать снова</button></div></section>`;
     document.getElementById("retry")?.addEventListener("click", () => window.location.reload());
+  } finally {
+    clearTimeout(slowLoadingTimer);
   }
 }
 

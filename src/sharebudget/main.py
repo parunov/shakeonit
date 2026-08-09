@@ -167,7 +167,7 @@ async def start_webhook(
 ) -> None:
     if not settings.webhook_secret:
         raise RuntimeError("WEBHOOK_SECRET is required when WEBHOOK_URL is configured")
-    application = web.Application()
+    application = web.Application(client_max_size=128 * 1024)
     application.router.add_get("/health", health)
     setup_webapp_routes(application, bot, service, settings)
     SimpleRequestHandler(
@@ -188,7 +188,10 @@ async def start_webhook(
         ssl_context.load_cert_chain(settings.webhook_cert_path, settings.webhook_key_path)
         webhook_certificate = FSInputFile(settings.webhook_cert_path)
 
-    runner = web.AppRunner(application)
+    runner = web.AppRunner(
+        application,
+        access_log_format='%a %t "%r" %s %b "%{Referer}i" "%{User-Agent}i" %Tf',
+    )
     await runner.setup()
     site = web.TCPSite(
         runner,

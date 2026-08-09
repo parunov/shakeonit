@@ -35,6 +35,7 @@ from .service import BudgetService, DomainError
 
 LOGGER = logging.getLogger(__name__)
 WEBAPP_DIR = Path(__file__).with_name("webapp_assets")
+WEBAPP_TEMPLATE = (WEBAPP_DIR / "index.html").read_text(encoding="utf-8")
 ASSET_VERSION = hashlib.sha256(
     b"".join((WEBAPP_DIR / name).read_bytes() for name in ("styles.css", "app.js"))
 ).hexdigest()[:12]
@@ -51,7 +52,7 @@ USER_SYNC_CACHE_KEY = web.AppKey("user_sync_cache", dict)
 AUTH_CACHE_KEY = web.AppKey("auth_cache", dict)
 NBRB_RATES_URL = "https://api.nbrb.by/exrates/rates?periodicity=0"
 FX_CACHE_SECONDS = 30 * 60
-FX_RETRY_SECONDS = 60
+FX_RETRY_SECONDS = 5 * 60
 USER_SYNC_CACHE_SECONDS = 10 * 60
 USER_SYNC_CACHE_LIMIT = 10_000
 AUTH_CACHE_SECONDS = 5 * 60
@@ -612,19 +613,24 @@ async def create_collection(request: web.Request) -> web.Response:
 
 async def prepare_chat_request(request: web.Request) -> web.Response:
     _, bot, user = _context(request)
-    prepared = await bot.save_prepared_keyboard_button(
-        user_id=user["id"],
-        button=KeyboardButton(
-            text="Выбрать группу",
-            request_chat=KeyboardButtonRequestChat(
-                request_id=secrets.randbelow(2**31),
-                chat_is_channel=False,
-                bot_is_member=True,
-                request_title=True,
-                request_username=True,
+    try:
+        prepared = await bot.save_prepared_keyboard_button(
+            user_id=user["id"],
+            button=KeyboardButton(
+                text="Выбрать группу",
+                request_chat=KeyboardButtonRequestChat(
+                    request_id=secrets.randbelow(2**31),
+                    chat_is_channel=False,
+                    bot_is_member=True,
+                    request_title=True,
+                    request_username=True,
+                ),
             ),
-        ),
-    )
+            request_timeout=5,
+        )
+    except TelegramAPIError as exc:
+        LOGGER.warning("Telegram could not prepare the chat selector: %s", exc)
+        raise ApiError("Telegram временно не отвечает. Попробуйте ещё раз", 503) from exc
     return web.json_response({"ok": True, "request_id": prepared.id})
 
 
@@ -632,30 +638,35 @@ async def prepare_collection_share(request: web.Request) -> web.Response:
     service, bot, user = _context(request)
     collection_id = int(request.match_info["collection_id"])
     collection = await _require_member(service, collection_id, user["id"])
-    prepared = await bot.save_prepared_inline_message(
-        user_id=user["id"],
-        result=InlineQueryResultArticle(
-            id=f"collection-{collection_id}",
-            title=f"Сбор «{collection['title']}»",
-            description="Приглашение вести общие расходы вместе",
-            input_message_content=InputTextMessageContent(
-                message_text=(
-                    f"🤝 Присоединяйтесь к сбору <b>«{escape(collection['title'])}»</b>\n\n"
-                    f"Инициатор: {_name(user)}\n\n"
-                    "Вступайте легко в совместный сбор средств, контролируйте расходы "
-                    "и возвраты долгов."
+    try:
+        prepared = await bot.save_prepared_inline_message(
+            user_id=user["id"],
+            result=InlineQueryResultArticle(
+                id=f"collection-{collection_id}",
+                title=f"Сбор «{collection['title']}»",
+                description="Приглашение вести общие расходы вместе",
+                input_message_content=InputTextMessageContent(
+                    message_text=(
+                        f"🤝 Присоединяйтесь к сбору <b>«{escape(collection['title'])}»</b>\n\n"
+                        f"Инициатор: {_name(user)}\n\n"
+                        "Вступайте легко в совместный сбор средств, контролируйте расходы "
+                        "и возвраты долгов."
+                    ),
+                    parse_mode="HTML",
                 ),
-                parse_mode="HTML",
+                reply_markup=_collection_invite_markup(
+                    collection_id, request.app[SETTINGS_KEY]
+                ),
             ),
-            reply_markup=_collection_invite_markup(
-                collection_id, request.app[SETTINGS_KEY]
-            ),
-        ),
-        allow_user_chats=True,
-        allow_group_chats=True,
-        allow_bot_chats=False,
-        allow_channel_chats=False,
-    )
+            allow_user_chats=True,
+            allow_group_chats=True,
+            allow_bot_chats=False,
+            allow_channel_chats=False,
+            request_timeout=5,
+        )
+    except TelegramAPIError as exc:
+        LOGGER.warning("Telegram could not prepare collection %s sharing: %s", collection_id, exc)
+        raise ApiError("Telegram временно не подготовил приглашение. Попробуйте ещё раз", 503) from exc
     return web.json_response({"ok": True, "prepared_message_id": prepared.id})
 
 
@@ -1340,9 +1351,9 @@ async def _refresh_exchange_rates(application: web.Application) -> bool:
             except Exception:
                 LOGGER.exception("Could not persist NBRB exchange rates")
             return True
-        except (ClientError, OSError, ValueError, TypeError, KeyError, TimeoutError):
+        except (ClientError, OSError, ValueError, TypeError, KeyError, TimeoutError) as exc:
             cache["retry_at"] = time.monotonic() + FX_RETRY_SECONDS
-            LOGGER.warning("Could not load NBRB exchange rates", exc_info=True)
+            LOGGER.warning("Could not load NBRB exchange rates: %s", exc)
             return False
 
 
@@ -1497,7 +1508,6 @@ async def remove_member(request: web.Request) -> web.Response:
 
 
 async def app_index(request: web.Request) -> web.Response:
-    template = (WEBAPP_DIR / "index.html").read_text(encoding="utf-8")
     settings = request.app[SETTINGS_KEY]
     username = escape(settings.bot_username.lstrip("@"), quote=True)
     analytics_script = ""
@@ -1513,7 +1523,7 @@ async def app_index(request: web.Request) -> web.Response:
         )
     response = web.Response(
         text=(
-            template.replace("__BOT_USERNAME__", username)
+            WEBAPP_TEMPLATE.replace("__BOT_USERNAME__", username)
             .replace("__ASSET_VERSION__", ASSET_VERSION)
             .replace("__ANALYTICS_SCRIPT__", analytics_script)
         ),
@@ -1548,11 +1558,17 @@ async def security_headers(request: web.Request, handler):
     analytics_origin = _analytics_origin(request.app[SETTINGS_KEY].analytics_url)
     analytics_source = f" {analytics_origin}" if analytics_origin else ""
     response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Permitted-Cross-Domain-Policies"] = "none"
+    response.headers["X-Robots-Tag"] = "noindex, nofollow"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    if request.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
     response.headers["Content-Security-Policy"] = (
         f"default-src 'self'; script-src 'self' https://telegram.org{analytics_source}; "
         f"style-src 'self'; img-src 'self' data: https:; connect-src 'self'{analytics_source}; "
+        "base-uri 'none'; object-src 'none'; form-action 'self'; "
         "frame-ancestors https://web.telegram.org https://*.telegram.org"
     )
     return response

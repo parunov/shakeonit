@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 from urllib.parse import urlencode
 
 import pytest
+from aiogram.exceptions import TelegramAPIError
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -140,6 +141,10 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert 'data-goatcounter="https://stats.example.com/count"' in page_text
         assert "https://stats.example.com/count.js" in page_text
         assert "https://stats.example.com" in page.headers["Content-Security-Policy"]
+        assert 'telegram-web-app.js" async' in page_text
+        assert "base-uri 'none'" in page.headers["Content-Security-Policy"]
+        assert page.headers["Strict-Transport-Security"].startswith("max-age=31536000")
+        assert page.headers["X-Robots-Tag"] == "noindex, nofollow"
 
         script = await client.get("/app/static/app.js")
         assert script.status == 200
@@ -163,8 +168,17 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert "formatPaymentDetails" in script_text
         assert "data-payment-details" in script_text
         assert "COLLECTION_SWIPE_REVEAL = 124" in script_text
+        assert "API_TIMEOUT_MS = 9000" in script_text
+        assert "waitForTelegram" in script_text
+        assert "busyButtonContents" in script_text
+        assert script_text.index("await waitForTelegram();") < script_text.index(
+            "tg?.BackButton?.onClick"
+        )
+        assert "Соединение заняло чуть больше времени" in script_text
         assert 'addEventListener("pointercancel"' in script_text
+        assert 'addEventListener("lostpointercapture"' in script_text
         assert "collectionClickBlockedUntil" in script_text
+        assert "lockCollectionSwipeScroll" in script_text
         assert "Privacy Mode остается включённым" not in script_text
         assert "collectionHistoryLimit: 10" in script_text
         assert "paymentReminderDismissed" in script_text
@@ -187,6 +201,7 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         )
         payload = await authorized.json()
         assert authorized.status == 200
+        assert authorized.headers["Cache-Control"] == "no-store"
         assert payload["user"]["id"] == 42
         assert payload["user"]["telegram_full_name"] == "Анна"
         assert payload["user"]["preferred_currency"] == "BYN"
@@ -200,6 +215,7 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         styles_text = await styles.text()
         assert ".collection-swipe-row.dragging .swipe-card" in styles_text
         assert "width: 100%; padding: 17px 24px" in styles_text
+        assert "html.collection-swipe-active body" in styles_text
 
         sync = await client.get(
             "/api/sync",
@@ -1267,6 +1283,7 @@ async def test_collection_share_prepares_message_for_people_and_groups(tmp_path)
     assert call.kwargs["allow_user_chats"] is True
     assert call.kwargs["allow_group_chats"] is True
     assert call.kwargs["allow_bot_chats"] is False
+    assert call.kwargs["request_timeout"] == 5
     assert "Летний отпуск" in call.kwargs["result"].input_message_content.message_text
     assert call.kwargs["result"].input_message_content.message_text.count("Летний отпуск") == 1
     assert "Инициатор:" in call.kwargs["result"].input_message_content.message_text
@@ -1293,6 +1310,40 @@ async def test_collection_share_prepares_message_for_people_and_groups(tmp_path)
     assert buttons[1].url == (
         f"https://t.me/ShakeOnIt_bot?startapp=collection_{collection_id}&mode=compact"
     )
+
+
+@pytest.mark.asyncio
+async def test_collection_share_returns_temporary_error_when_telegram_times_out(tmp_path):
+    database = Database(tmp_path / "prepared-share-timeout.db")
+    await database.initialize()
+    service = BudgetService(database)
+    await service.upsert_user(7, "owner", "Владелец")
+    collection_id = await service.create_collection(0, "Летний отпуск", "EUR", 7)
+    bot = SimpleNamespace(
+        save_prepared_inline_message=AsyncMock(
+            side_effect=TelegramAPIError(SimpleNamespace(), "Request timeout error")
+        )
+    )
+    application = web.Application()
+    setup_webapp_routes(
+        application,
+        bot,
+        service,
+        Settings(bot_token=TOKEN, database_path=database.path),
+    )
+    auth = signed_init_data(user={"id": 7, "first_name": "Владелец"})
+
+    async with TestClient(TestServer(application)) as client:
+        response = await client.post(
+            f"/api/collections/{collection_id}/prepare-share",
+            json={},
+            headers={"X-Telegram-Init-Data": auth},
+        )
+        payload = await response.json()
+
+    assert response.status == 503
+    assert payload["ok"] is False
+    assert "Telegram временно" in payload["error"]
 
 
 @pytest.mark.asyncio
