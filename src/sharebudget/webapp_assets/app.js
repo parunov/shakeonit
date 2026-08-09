@@ -735,13 +735,19 @@ function createdCollectionInviteSheet(collection) {
 }
 
 function createSheet() {
-  const chatId = state.bootstrap.context_chat_id || 0;
-  const chat = state.bootstrap.chats.find((item) => Number(item.chat_id) === Number(chatId));
+  const contextChatId = Number(state.bootstrap.context_chat_id || 0);
+  const chats = [...(state.bootstrap.chats || [])].filter((item) => Number(item.chat_id) < 0);
+  const chat = chats.find((item) => Number(item.chat_id) === contextChatId);
   const telegramChatTitle = tg?.initDataUnsafe?.chat?.title;
-  const destination = chatId
-    ? `<b>Уведомления в группу</b><span>${e(telegramChatTitle || chat?.title || chat?.label || "Текущая Telegram-группа")}</span>`
-    : "<b>Уведомления лично от бота</b><span>Важные действия придут участникам в Telegram</span>";
-  showSheet(`<h2>Новый сбор</h2><p class="sheet-intro">Укажите название и валюту — сбор появится сразу после создания.</p><div class="notification-destination"><span>🔔</span><span>${destination}</span></div><form id="create-form"><input type="hidden" name="chat_id" value="${chatId}"><label class="field"><span>Название</span><input name="title" minlength="2" maxlength="80" placeholder="Например, Поездка в Варшаву" required></label><label class="field"><span>Валюта</span><select name="currency">${state.bootstrap.currencies.map((currency) => `<option>${currency}</option>`).join("")}</select></label><div class="sheet-actions"><button class="primary-button" type="submit">Создать сбор</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
+  if (contextChatId && !chat) chats.unshift({ chat_id: contextChatId, title: telegramChatTitle || "Текущая Telegram-группа" });
+  const options = [
+    `<option value="0" ${contextChatId ? "" : "selected"}>Лично через бота</option>`,
+    ...chats.map((item) => `<option value="${Number(item.chat_id)}" ${Number(item.chat_id) === contextChatId ? "selected" : ""}>Группа · ${e(item.title || item.label || "Telegram-группа")}</option>`),
+  ].join("");
+  const destination = contextChatId
+    ? `<b>Уведомления в группу и лично</b><span>${e(telegramChatTitle || chat?.title || chat?.label || "Текущая Telegram-группа")}</span>`
+    : "<b>Уведомления лично от бота</b><span>Получат все участники, которые их не отключили</span>";
+  showSheet(`<h2>Новый сбор</h2><p class="sheet-intro">Укажите название, валюту и куда дополнительно отправлять уведомления.</p><form id="create-form"><label class="field"><span>Название</span><input name="title" minlength="2" maxlength="80" placeholder="Например, Поездка в Варшаву" required></label><label class="field"><span>Валюта</span><select name="currency">${state.bootstrap.currencies.map((currency) => `<option>${currency}</option>`).join("")}</select></label><label class="field"><span>Куда отправлять уведомления</span><select name="chat_id" data-action="notification-destination">${options}</select></label><div class="notification-destination" data-notification-summary><span>🔔</span><span>${destination}</span></div><div class="sheet-actions"><button class="primary-button" type="submit">Создать сбор</button><button class="secondary-button" type="button" data-action="close-sheet">Отмена</button></div></form>`);
 }
 
 function expenseSheet() {
@@ -1288,6 +1294,16 @@ sheet.addEventListener("change", (event) => {
   });
 });
 
+sheet.addEventListener("change", (event) => {
+  if (!event.target.matches('[data-action="notification-destination"]')) return;
+  const selected = event.target.options[event.target.selectedIndex];
+  const summary = event.target.closest("form")?.querySelector(":scope [data-notification-summary] > span:last-child");
+  if (!summary) return;
+  summary.innerHTML = Number(event.target.value)
+    ? `<b>Уведомления в группу и лично</b><span>${e(selected.textContent.replace(/^Группа · /, ""))}</span>`
+    : "<b>Уведомления лично от бота</b><span>Получат все участники, которые их не отключили</span>";
+});
+
 sheet.addEventListener("input", (event) => {
   if (event.target.matches("[data-payment-details]")) {
     const formatted = formatPaymentDetails(event.target.value);
@@ -1314,7 +1330,7 @@ sheet.addEventListener("submit", async (event) => {
   try {
     let result;
     if (form.id === "create-form") {
-      const chatId = Number(values.get("chat_id"));
+      const chatId = Number(values.get("chat_id") || 0);
       let subscribe = false;
       if (chatId === 0) {
         subscribe = await requestWritePermission();

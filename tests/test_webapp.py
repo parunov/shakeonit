@@ -162,6 +162,9 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert "теперь общие расходы считаются сами" in script_text
         assert 'trackScreen("collections", "Сборы")' in script_text
         assert 'trackEvent("collection-created", "Создан сбор")' in script_text
+        assert "Куда отправлять уведомления" in script_text
+        assert "Уведомления в группу и лично" in script_text
+        assert 'data-action="notification-destination"' in script_text
         assert 'referrer: `telegram-user-${telegramName}`' in script_text
         assert 'path: "event/app-session"' in script_text
         assert 'trackEvent(`active-user-${telegramName}`' in script_text
@@ -1093,7 +1096,7 @@ async def test_join_can_enable_private_collection_notifications(tmp_path):
     assert response.status == 200
     assert payload["notifications_enabled"] is True
     assert await service.notification_subscription(collection_id, 2) is True
-    assert bot.send_message.await_count == 2
+    assert bot.send_message.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -1161,7 +1164,7 @@ async def test_personal_collection_uses_bot_notifications_without_group(tmp_path
     assert payload["notifications_enabled"] is True
     assert details_payload["collection"]["is_personal"] is True
     assert details_payload["events"][0]["kind"] == "created"
-    bot.send_message.assert_awaited_once()
+    assert bot.send_message.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -1193,7 +1196,7 @@ async def test_group_collection_creation_posts_actionable_invitation(tmp_path):
     assert payload["notifications_queued"] is True
     bot.delete_message.assert_awaited_once_with(-100500, 55, request_timeout=5)
     assert await service.take_bot_message(-100500, "create_collection_prompt") is None
-    call = bot.send_message.await_args
+    call = next(call for call in bot.send_message.await_args_list if call.args[0] == -100500)
     assert call.args[0] == -100500
     assert "День рождения" in call.args[1]
     assert call.args[1].count("День рождения") == 1

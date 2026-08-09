@@ -42,12 +42,9 @@ async def notify_subscribers(
     message_kind: str | None = None,
 ) -> int:
     """Deliver a collection event to opted-in participants via private chat."""
-    excluded = set(exclude_user_ids)
-    subscribers = [
-        row
-        for row in await service.notification_subscribers(collection["id"], category)
-        if row["user_id"] not in excluded
-    ]
+    # Every participant who explicitly allows this category receives the event.
+    # Group publication is additional and must not replace a personal notification.
+    subscribers = await service.notification_subscribers(collection["id"], category)
 
     async def deliver(row) -> bool:
         user_id = row["user_id"]

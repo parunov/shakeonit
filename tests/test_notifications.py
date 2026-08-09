@@ -31,8 +31,8 @@ async def test_collection_event_reaches_group_and_private_subscribers():
     )
 
     assert group_sent is True
-    assert delivered == 2
-    assert sorted(call.args[0] for call in bot.send_message.await_args_list) == [-100500, 2, 3]
+    assert delivered == 3
+    assert sorted(call.args[0] for call in bot.send_message.await_args_list) == [-100500, 1, 2, 3]
     assert all("Поездка" in call.args[1] for call in bot.send_message.await_args_list)
     assert all(
         "startapp=collection_" not in call.args[1] for call in bot.send_message.await_args_list
