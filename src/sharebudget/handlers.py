@@ -933,6 +933,14 @@ async def transaction_cancel(callback: CallbackQuery, service: BudgetService) ->
     transaction = await service.transaction(transaction_id)
     collection_id = await service.cancel_transaction(transaction_id, callback.from_user.id)
     collection = await service.get_collection(collection_id)
+    if transaction["kind"] == "repayment":
+        await clear_repayment_prompts(
+            callback.bot,
+            service,
+            transaction_id,
+            legacy_chat_id=transaction["counterparty_id"],
+            legacy_message_id=transaction["confirmation_message_id"],
+        )
     await report_collection_event(
         callback.bot,
         service,
@@ -999,23 +1007,65 @@ async def transaction_edit_comment(
     await state.clear()
     await message.answer("✅ Транзакция обновлена.", reply_markup=main_menu())
     collection = await service.get_collection(collection_id)
-    await report_collection_event(
-        message.bot,
-        service,
+    update_text = transaction_update_report(
+        message.from_user.full_name,
         collection,
-        transaction_update_report(
-            message.from_user.full_name,
-            collection,
-            before,
-            after,
-            before_shares,
-            after_shares,
-            actor_id=message.from_user.id,
-            actor_username=message.from_user.username,
-        ),
-        exclude_user_ids={message.from_user.id},
-        category="expenses" if before["kind"] == "expense" else "repayments",
+        before,
+        after,
+        before_shares,
+        after_shares,
+        actor_id=message.from_user.id,
+        actor_username=message.from_user.username,
     )
+    if before["kind"] == "repayment" and after["confirmation_status"] == "pending":
+        await clear_repayment_prompts(
+            message.bot,
+            service,
+            after["id"],
+            legacy_chat_id=after["counterparty_id"],
+            legacy_message_id=after["confirmation_message_id"],
+        )
+        markup = repayment_confirmation(after["id"])
+        prompt_prefix = f"repayment_prompt:{after['id']}"
+        await report_collection_event(
+            message.bot,
+            service,
+            collection,
+            update_text,
+            markup,
+            exclude_user_ids={message.from_user.id, after["counterparty_id"]},
+            category="repayments",
+            message_kind=f"{prompt_prefix}:event",
+        )
+        if await service.notification_enabled_for_user(after["counterparty_id"], "repayments"):
+            comment_line = f"\nКомментарий: {escape(after['comment'])}" if after["comment"] else ""
+            prompt = await send_with_retry(
+                lambda: message.bot.send_message(
+                    after["counterparty_id"],
+                    "🤝 <b>Подтвердите получение</b>\n\n"
+                    f"От: {event_user_link(message.from_user)}\n"
+                    f"Сумма: <b>{format_money(after['amount'], collection['currency'])}</b>\n"
+                    f"Сбор: <b>«{escape(collection['title'])}»</b>{comment_line}",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=markup,
+                    request_timeout=5,
+                )
+            )
+            if isinstance(getattr(prompt, "message_id", None), int):
+                await service.replace_bot_message(
+                    after["counterparty_id"],
+                    f"{prompt_prefix}:confirmation",
+                    prompt.message_id,
+                )
+    else:
+        await report_collection_event(
+            message.bot,
+            service,
+            collection,
+            update_text,
+            exclude_user_ids={message.from_user.id},
+            category="expenses" if before["kind"] == "expense" else "repayments",
+        )
     await message.answer(
         await collection_text(service, collection),
         reply_markup=await collection_markup(

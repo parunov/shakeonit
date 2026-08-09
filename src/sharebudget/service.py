@@ -86,6 +86,14 @@ class BudgetService:
                     "INSERT INTO users(id,username,full_name,private_started) VALUES (?,?,?,?)",
                     (user_id, normalized_username, full_name, int(private_started)),
                 )
+            if private_started:
+                await connection.execute(
+                    """
+                    UPDATE participants SET notifications_enabled=1
+                    WHERE user_id=? AND active=1 AND notifications_configured=0
+                    """,
+                    (user_id,),
+                )
             await connection.commit()
             return existing is None
 
@@ -352,7 +360,12 @@ class BudgetService:
             )
             collection_id = cursor.lastrowid
             await connection.execute(
-                "INSERT INTO participants(collection_id,user_id) VALUES (?,?)",
+                """
+                INSERT INTO participants(
+                    collection_id,user_id,notifications_enabled,notifications_configured
+                )
+                SELECT ?,id,private_started,0 FROM users WHERE id=?
+                """,
                 (collection_id, admin_id),
             )
             await connection.execute(
@@ -525,11 +538,29 @@ class BudgetService:
             await connection.execute("BEGIN IMMEDIATE")
             existing = await _fetchone(
                 connection,
-                "SELECT active FROM participants WHERE collection_id=? AND user_id=?",
+                """
+                SELECT p.active,p.notifications_configured,u.private_started
+                FROM users u LEFT JOIN participants p
+                  ON p.user_id=u.id AND p.collection_id=?
+                WHERE u.id=?
+                """,
                 (collection_id, user_id),
             )
-            if existing and existing["active"]:
+            if not existing:
+                await connection.rollback()
+                raise DomainError("Пользователь не зарегистрирован")
+            enable_notifications = bool(subscribe or existing["private_started"])
+            if existing["active"]:
                 if subscribe:
+                    await connection.execute(
+                        """
+                        UPDATE participants SET notifications_enabled=1,
+                            notifications_configured=1
+                        WHERE collection_id=? AND user_id=?
+                        """,
+                        (collection_id, user_id),
+                    )
+                elif enable_notifications and not existing["notifications_configured"]:
                     await connection.execute(
                         """
                         UPDATE participants SET notifications_enabled=1
@@ -542,16 +573,32 @@ class BudgetService:
             await connection.execute(
                 """
                 INSERT INTO participants(
-                    collection_id,user_id,active,notifications_enabled
-                ) VALUES (?,?,1,?)
+                    collection_id,user_id,active,notifications_enabled,notifications_configured
+                ) VALUES (?,?,1,?,?)
                 ON CONFLICT(collection_id,user_id) DO UPDATE SET
                     active=1,
-                    notifications_enabled=MAX(
-                        participants.notifications_enabled,excluded.notifications_enabled
-                    )
+                    notifications_enabled=CASE
+                        WHEN participants.notifications_configured=1
+                        THEN participants.notifications_enabled
+                        ELSE excluded.notifications_enabled
+                    END
                 """,
-                (collection["id"], user_id, int(subscribe)),
+                (
+                    collection["id"],
+                    user_id,
+                    int(enable_notifications),
+                    int(bool(subscribe)),
+                ),
             )
+            if subscribe:
+                await connection.execute(
+                    """
+                    UPDATE participants SET notifications_enabled=1,
+                        notifications_configured=1
+                    WHERE collection_id=? AND user_id=?
+                    """,
+                    (collection_id, user_id),
+                )
             if not existing or not existing["active"]:
                 await connection.execute(
                     "INSERT INTO collection_events(collection_id,kind,actor_id,target_user_id) "
@@ -582,7 +629,7 @@ class BudgetService:
         async with self.db.connect() as connection:
             await connection.execute(
                 """
-                UPDATE participants SET notifications_enabled=?
+                UPDATE participants SET notifications_enabled=?,notifications_configured=1
                 WHERE collection_id=? AND user_id=? AND active=1
                 """,
                 (int(enabled), collection_id, user_id),
@@ -948,28 +995,43 @@ class BudgetService:
         return {row["counterparty_id"]: row["amount"] for row in rows}
 
     async def confirm_repayment(self, transaction_id: int, actor_id: int) -> int:
-        transaction = await self.transaction(transaction_id)
-        if not transaction or transaction["kind"] != "repayment":
-            raise DomainError("Возврат долга не найден")
-        if transaction["status"] != "active":
-            raise DomainError("Возврат долга отменён")
-        if transaction["confirmation_status"] == "confirmed":
-            raise DomainError("Получение уже подтверждено")
-        if transaction["counterparty_id"] != actor_id:
-            raise DomainError("Подтвердить получение может только получатель")
-        await self._require_member_active(transaction["collection_id"], actor_id)
-        direct_debt = next(
-            (
-                debt
-                for debt in await self.settlement(transaction["collection_id"])
-                if debt.debtor_id == transaction["creator_id"]
-                and debt.creditor_id == transaction["counterparty_id"]
-            ),
-            None,
-        )
-        if direct_debt is None or transaction["amount"] > direct_debt.amount:
-            raise DomainError("Баланс изменился: этот возврат больше нельзя подтвердить")
         async with self.db.connect() as connection:
+            # The debt check and confirmation must see one SQLite state. Otherwise two
+            # simultaneous confirmations can both validate an already changed balance.
+            await connection.execute("BEGIN IMMEDIATE")
+            transaction = await _fetchone(
+                connection, "SELECT * FROM transactions WHERE id=?", (transaction_id,)
+            )
+            if not transaction or transaction["kind"] != "repayment":
+                raise DomainError("Возврат долга не найден")
+            if transaction["status"] != "active":
+                raise DomainError("Возврат долга отменён")
+            if transaction["confirmation_status"] == "confirmed":
+                raise DomainError("Получение уже подтверждено")
+            if transaction["counterparty_id"] != actor_id:
+                raise DomainError("Подтвердить получение может только получатель")
+            membership = await _fetchone(
+                connection,
+                """
+                SELECT 1 FROM participants p JOIN collections c ON c.id=p.collection_id
+                WHERE p.collection_id=? AND p.user_id=? AND p.active=1 AND c.status='active'
+                """,
+                (transaction["collection_id"], actor_id),
+            )
+            if not membership:
+                raise DomainError("Сначала нажмите «Участвовать в сборе»")
+            snapshot = await self._snapshot_on(connection, transaction["collection_id"])
+            direct_debt = next(
+                (
+                    debt
+                    for debt in snapshot.debts
+                    if debt.debtor_id == transaction["creator_id"]
+                    and debt.creditor_id == transaction["counterparty_id"]
+                ),
+                None,
+            )
+            if direct_debt is None or transaction["amount"] > direct_debt.amount:
+                raise DomainError("Баланс изменился: этот возврат больше нельзя подтвердить")
             cursor = await connection.execute(
                 """
                 UPDATE transactions SET confirmation_status='confirmed',confirmed_by=?,
@@ -1458,6 +1520,18 @@ class BudgetService:
                 """,
                 collection_ids,
             )
+            pending_rows = await connection.execute_fetchall(
+                f"""
+                WITH selected(collection_id) AS (VALUES {selected_values})
+                SELECT t.collection_id,t.creator_id debtor_id,t.counterparty_id creditor_id,
+                       SUM(t.amount) amount
+                FROM transactions t JOIN selected s ON s.collection_id=t.collection_id
+                WHERE t.kind='repayment' AND t.status='active'
+                  AND t.confirmation_status='pending'
+                GROUP BY t.collection_id,t.creator_id,t.counterparty_id
+                """,
+                collection_ids,
+            )
 
         people_by_collection: dict[int, dict[int, dict]] = {}
         for row in participants:
@@ -1467,6 +1541,10 @@ class BudgetService:
             balances_by_collection.setdefault(row["collection_id"], {})[row["user_id"]] = row[
                 "balance"
             ]
+        pending_by_pair = {
+            (row["collection_id"], row["debtor_id"], row["creditor_id"]): row["amount"]
+            for row in pending_rows
+        }
 
         collection_balances = []
         personal_debts = []
@@ -1499,6 +1577,19 @@ class BudgetService:
                         "creditor_name": people[debt.creditor_id]["full_name"],
                         "creditor_username": people[debt.creditor_id]["username"],
                         "amount": debt.amount,
+                        "repayable_amount": max(
+                            0,
+                            debt.amount
+                            - pending_by_pair.get(
+                                (collection_id, debt.debtor_id, debt.creditor_id), 0
+                            ),
+                        ),
+                        "pending_amount": min(
+                            debt.amount,
+                            pending_by_pair.get(
+                                (collection_id, debt.debtor_id, debt.creditor_id), 0
+                            ),
+                        ),
                     }
                 )
         return {"collections": collection_balances, "personal_debts": personal_debts}

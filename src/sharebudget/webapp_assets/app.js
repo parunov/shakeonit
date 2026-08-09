@@ -387,7 +387,8 @@ async function renderCollections() {
   const oweTotals = debtTotals(state.balanceData.personal_debts, "debtor_id");
   const owedTotals = debtTotals(state.balanceData.personal_debts, "creditor_id");
   const myDebts = state.balanceData.personal_debts.filter((debt) => debt.debtor_id === state.bootstrap.user.id);
-  const quickPayments = quickPaymentRows(myDebts);
+  const payableDebts = myDebts.filter((debt) => debt.repayable_amount > 0);
+  const quickPayments = quickPaymentRows(payableDebts);
   const emptySummary = money(0, state.bootstrap.user.preferred_currency);
   const owe = Object.keys(oweTotals).length ? moneyMap(oweTotals) : emptySummary;
   const owed = Object.keys(owedTotals).length ? moneyMap(owedTotals) : emptySummary;
@@ -399,7 +400,7 @@ async function renderCollections() {
       <button class="summary-tile summary-owed" type="button" data-action="collections-summary"><small>Сколько мне должны</small><b>${owed}</b></button>
     </div>
     ${state.paymentReminderVisible ? `<section class="payment-reminder"><span class="payment-reminder-icon">💳</span><span><b>Добавьте реквизиты</b><small>Друзьям будет проще вернуть вам долг. Их покажем только при оформлении возврата.</small></span><button type="button" data-action="payment">Добавить</button><button class="payment-reminder-close" type="button" data-action="dismiss-payment-reminder" aria-label="Напомнить позже">×</button></section>` : ""}
-    ${quickPayments ? `<section class="quick-pay-block ${state.quickPayExpanded ? "expanded" : ""}"><button class="quick-pay-toggle" type="button" data-action="toggle-quick-pay"><span class="quick-pay-symbol">↗</span><span><b>Быстрая оплата</b><small>${myDebts.length} ${myDebts.length === 1 ? "долг" : "долга"} · нажмите, чтобы ${state.quickPayExpanded ? "свернуть" : "развернуть"}</small></span><strong>${myDebts.length}</strong><i>${state.quickPayExpanded ? "⌃" : "⌄"}</i></button>${state.quickPayExpanded ? quickPayments : ""}</section>` : ""}
+    ${quickPayments ? `<section class="quick-pay-block ${state.quickPayExpanded ? "expanded" : ""}"><button class="quick-pay-toggle" type="button" data-action="toggle-quick-pay"><span class="quick-pay-symbol">↗</span><span><b>Быстрая оплата</b><small>${payableDebts.length} ${payableDebts.length === 1 ? "долг" : "долга"} · нажмите, чтобы ${state.quickPayExpanded ? "свернуть" : "развернуть"}</small></span><strong>${payableDebts.length}</strong><i>${state.quickPayExpanded ? "⌃" : "⌄"}</i></button>${state.quickPayExpanded ? quickPayments : ""}</section>` : ""}
     <div class="section-head"><h2>Текущие</h2><button class="text-button" type="button" data-action="create">+ Новый</button></div>
     ${collectionCards(active, "archive")}
     ${archived.length ? `<div class="section-head"><h2>Архив</h2></div>${collectionCards(archived, "delete")}` : ""}`;
@@ -457,7 +458,7 @@ function paintBalance() {
     return `<article class="personal-settlement ${iOwe ? "outgoing" : "incoming"}">
       <span class="person-avatar">${e(initials)}</span>
       <span class="personal-settlement-main"><small>${iOwe ? "Вы должны" : "Вам должен(а)"}</small><b>${userLink(personId, personName, personUsername)}</b><button class="collection-link" type="button" data-action="open-collection" data-id="${debt.collection_id}">${e(debt.collection_title)}</button></span>
-      <span class="personal-settlement-side"><strong class="${iOwe ? "negative" : "positive"}">${money(debt.amount, debt.currency)}</strong>${iOwe ? `<button class="pay-small" type="button" data-action="quick-repay" data-collection-id="${debt.collection_id}" data-creditor-id="${debt.creditor_id}">Оплатить</button>` : ""}</span>
+      <span class="personal-settlement-side"><strong class="${iOwe ? "negative" : "positive"}">${money(debt.amount, debt.currency)}</strong>${iOwe && debt.pending_amount ? `<small>ожидает подтверждения ${money(debt.pending_amount, debt.currency)}</small>` : ""}${iOwe && debt.repayable_amount > 0 ? `<button class="pay-small" type="button" data-action="quick-repay" data-collection-id="${debt.collection_id}" data-creditor-id="${debt.creditor_id}">Оплатить</button>` : ""}</span>
     </article>`;
   }).join("");
   app.innerHTML = `
@@ -507,9 +508,9 @@ function renderProfile() {
 }
 
 function quickPaymentRows(debts) {
-  const mine = (debts || []).filter((debt) => debt.debtor_id === state.bootstrap.user.id);
+  const mine = (debts || []).filter((debt) => debt.debtor_id === state.bootstrap.user.id && debt.repayable_amount > 0);
   if (!mine.length) return "";
-  return `<div class="quick-payments">${mine.map((debt) => `<article class="quick-payment"><span class="quick-payment-avatar">${e(String(debt.creditor_name || "?").split(/\s+/).map((part) => part[0]).join("").slice(0, 2))}</span><span class="quick-payment-info"><small>Перевести</small><b>${userLink(debt.creditor_id, debt.creditor_name, debt.creditor_username)}</b><em>${e(debt.collection_title || "")}</em></span><span class="quick-payment-side"><strong>${money(debt.amount, debt.currency)}</strong><button type="button" data-action="quick-repay" data-collection-id="${debt.collection_id}" data-creditor-id="${debt.creditor_id}">Оплатить</button></span></article>`).join("")}</div>`;
+  return `<div class="quick-payments">${mine.map((debt) => `<article class="quick-payment"><span class="quick-payment-avatar">${e(String(debt.creditor_name || "?").split(/\s+/).map((part) => part[0]).join("").slice(0, 2))}</span><span class="quick-payment-info"><small>Перевести</small><b>${userLink(debt.creditor_id, debt.creditor_name, debt.creditor_username)}</b><em>${e(debt.collection_title || "")}</em></span><span class="quick-payment-side"><strong>${money(debt.repayable_amount, debt.currency)}</strong><button type="button" data-action="quick-repay" data-collection-id="${debt.collection_id}" data-creditor-id="${debt.creditor_id}">Оплатить</button></span></article>`).join("")}</div>`;
 }
 
 async function renderHistory(loadKind = null) {

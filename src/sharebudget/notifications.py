@@ -6,24 +6,28 @@ from collections.abc import Collection
 from html import escape
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
+from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError, TelegramRetryAfter
 
 from .service import BudgetService
 
 LOGGER = logging.getLogger(__name__)
 
 
-async def send_with_retry(send, *, attempts: int = 2):
-    """Retry transient Telegram failures once without duplicating successful messages."""
+async def send_with_retry(send, *, attempts: int = 3):
+    """Retry transient Telegram and flood-control failures with bounded backoff."""
     for attempt in range(attempts):
         try:
             return await send()
         except TelegramForbiddenError:
             raise
+        except TelegramRetryAfter as exc:
+            if attempt + 1 >= attempts:
+                raise
+            await asyncio.sleep(min(float(exc.retry_after), 8.0))
         except TelegramAPIError:
             if attempt + 1 >= attempts:
                 raise
-            await asyncio.sleep(0.35 * (attempt + 1))
+            await asyncio.sleep(0.5 * (attempt + 1))
 
 
 async def notify_subscribers(
@@ -171,11 +175,26 @@ async def replace_repayment_prompt(
         LOGGER.info("Could not deliver final repayment status to chat %s", chat_id)
 
 
-async def clear_repayment_prompts(bot: Bot, service: BudgetService, transaction_id: int) -> None:
+async def clear_repayment_prompts(
+    bot: Bot,
+    service: BudgetService,
+    transaction_id: int,
+    *,
+    legacy_chat_id: int | None = None,
+    legacy_message_id: int | None = None,
+) -> None:
     """Remove every tracked request message for a resolved repayment."""
     messages = await service.take_bot_messages_by_prefix(f"repayment_prompt:{transaction_id}:")
-    for chat_id, message_id in messages:
+    if legacy_chat_id is not None and legacy_message_id is not None:
+        legacy = (legacy_chat_id, legacy_message_id)
+        if legacy not in messages:
+            messages.append(legacy)
+
+    async def remove(chat_id: int, message_id: int) -> None:
         try:
             await bot.delete_message(chat_id, message_id, request_timeout=5)
         except TelegramAPIError:
             LOGGER.info("Could not remove repayment prompt %s in chat %s", message_id, chat_id)
+
+    for offset in range(0, len(messages), 20):
+        await asyncio.gather(*(remove(*item) for item in messages[offset : offset + 20]))

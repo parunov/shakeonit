@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -200,7 +200,7 @@ def _queue_delivery(request: web.Request, awaitable, label: str) -> None:
     async def runner() -> None:
         try:
             async with request.app[DELIVERY_LIMIT_KEY]:
-                await asyncio.wait_for(awaitable, timeout=12)
+                await asyncio.wait_for(awaitable, timeout=45)
         except TimeoutError:
             LOGGER.warning("Telegram delivery timed out: %s", label)
         except Exception:
@@ -245,7 +245,7 @@ async def delivery_context(application: web.Application):
     yield
     tasks = list(application[DELIVERY_TASKS_KEY])
     if tasks:
-        _, pending = await asyncio.wait(tasks, timeout=3)
+        _, pending = await asyncio.wait(tasks, timeout=20)
         for task in pending:
             task.cancel()
         if pending:
@@ -268,10 +268,13 @@ async def _confirm_private_subscription(
             request_timeout=5,
         )
         return True
-    except TelegramAPIError:
+    except TelegramForbiddenError:
         await service.set_notification_subscription(collection["id"], user_id, False)
         LOGGER.info("Telegram write access is unavailable for user %s", user_id)
         return False
+    except TelegramAPIError as exc:
+        LOGGER.warning("Could not confirm notifications for user %s: %s", user_id, exc)
+        return True
 
 
 def _collection_invite_markup(collection_id: int, settings: Settings) -> InlineKeyboardMarkup:
@@ -769,8 +772,11 @@ async def add_repayment(request: web.Request) -> web.Response:
                     await service.replace_bot_message(
                         creditor_id, f"{prompt_prefix}:confirmation", message_id
                     )
-            except TelegramAPIError:
-                LOGGER.info("Creditor %s has no private chat with bot", creditor_id)
+            except TelegramForbiddenError:
+                await service.set_notification_subscription(collection_id, creditor_id, False)
+                LOGGER.info("Creditor %s blocked private bot messages", creditor_id)
+            except TelegramAPIError as exc:
+                LOGGER.warning("Could not deliver repayment prompt to %s: %s", creditor_id, exc)
 
         await asyncio.gather(
             _report(
@@ -822,11 +828,22 @@ async def request_funds(request: web.Request) -> web.Response:
                     )
                 )
                 return True
-            except TelegramAPIError:
+            except TelegramForbiddenError:
+                await service.set_notification_subscription(
+                    collection_id, debt.debtor_id, False
+                )
                 LOGGER.info(
-                    "Could not deliver funds request to user %s for collection %s",
+                    "Debtor %s blocked private bot messages for collection %s",
                     debt.debtor_id,
                     collection_id,
+                )
+                return False
+            except TelegramAPIError as exc:
+                LOGGER.info(
+                    "Could not deliver funds request to user %s for collection %s: %s",
+                    debt.debtor_id,
+                    collection_id,
+                    exc,
                 )
                 return False
 
@@ -1159,22 +1176,75 @@ async def edit_transaction(request: web.Request) -> web.Response:
         if transaction["kind"] == "expense"
         else []
     )
-    sent, notifications_sent = _queue_report(
-        request,
+    update_text = transaction_update_report(
+        _full_name(user),
         collection,
-        transaction_update_report(
-            _full_name(user),
-            collection,
-            transaction,
-            updated,
-            before_shares,
-            after_shares,
-            actor_id=user["id"],
-            actor_username=user.get("username"),
-        ),
-        exclude_user_ids={user["id"]},
-        category="expenses" if transaction["kind"] == "expense" else "repayments",
+        transaction,
+        updated,
+        before_shares,
+        after_shares,
+        actor_id=user["id"],
+        actor_username=user.get("username"),
     )
+    if transaction["kind"] == "repayment" and updated["confirmation_status"] == "pending":
+        prompt_prefix = f"repayment_prompt:{transaction_id}"
+        confirm_markup = repayment_confirmation(transaction_id)
+        comment_line = (
+            f"\nКомментарий: {escape(updated['comment'])}" if updated["comment"] else ""
+        )
+
+        async def refresh_repayment_prompt() -> None:
+            await clear_repayment_prompts(
+                bot,
+                service,
+                transaction_id,
+                legacy_chat_id=updated["counterparty_id"],
+                legacy_message_id=updated["confirmation_message_id"],
+            )
+            await _report(
+                bot,
+                service,
+                collection,
+                update_text,
+                confirm_markup,
+                exclude_user_ids={user["id"], updated["counterparty_id"]},
+                category="repayments",
+                message_kind=f"{prompt_prefix}:event",
+            )
+            if await service.notification_enabled_for_user(
+                updated["counterparty_id"], "repayments"
+            ):
+                message = await send_with_retry(
+                    lambda: bot.send_message(
+                        updated["counterparty_id"],
+                        "🤝 <b>Подтвердите получение</b>\n\n"
+                        f"От: {_name(user)}\n"
+                        f"Сумма: <b>{format_money(updated['amount'], collection['currency'])}</b>\n"
+                        f"Сбор: <b>«{escape(collection['title'])}»</b>{comment_line}",
+                        parse_mode="HTML",
+                        reply_markup=confirm_markup,
+                        request_timeout=5,
+                    )
+                )
+                if isinstance(getattr(message, "message_id", None), int):
+                    await service.replace_bot_message(
+                        updated["counterparty_id"],
+                        f"{prompt_prefix}:confirmation",
+                        message.message_id,
+                    )
+
+        _queue_delivery(
+            request, refresh_repayment_prompt(), f"refresh-repayment-{transaction_id}"
+        )
+        sent, notifications_sent = False, 0
+    else:
+        sent, notifications_sent = _queue_report(
+            request,
+            collection,
+            update_text,
+            exclude_user_ids={user["id"]},
+            category="expenses" if transaction["kind"] == "expense" else "repayments",
+        )
     return web.json_response(
         {
             "ok": True,
@@ -1193,15 +1263,41 @@ async def cancel_transaction(request: web.Request) -> web.Response:
         raise ApiError("Транзакция не найдена", 404)
     collection = await _require_member(service, transaction["collection_id"], user["id"])
     await service.cancel_transaction(transaction_id, user["id"])
-    sent, notifications_sent = _queue_report(
-        request,
-        collection,
+    cancel_text = (
         f"↩️ {_name(user)} отменил(а) транзакцию на "
         f"<b>{format_money(transaction['amount'], collection['currency'])}</b>. "
-        "Балансы пересчитаны.",
-        exclude_user_ids={user["id"]},
-        category="expenses" if transaction["kind"] == "expense" else "repayments",
+        "Балансы пересчитаны."
     )
+    if transaction["kind"] == "repayment":
+        async def deliver_repayment_cancellation() -> None:
+            await clear_repayment_prompts(
+                bot,
+                service,
+                transaction_id,
+                legacy_chat_id=transaction["counterparty_id"],
+                legacy_message_id=transaction["confirmation_message_id"],
+            )
+            await _report(
+                bot,
+                service,
+                collection,
+                cancel_text,
+                exclude_user_ids={user["id"]},
+                category="repayments",
+            )
+
+        _queue_delivery(
+            request, deliver_repayment_cancellation(), f"cancel-repayment-{transaction_id}"
+        )
+        sent, notifications_sent = False, 0
+    else:
+        sent, notifications_sent = _queue_report(
+            request,
+            collection,
+            cancel_text,
+            exclude_user_ids={user["id"]},
+            category="expenses",
+        )
     return web.json_response(
         {
             "ok": True,

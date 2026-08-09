@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS participants (
     user_id INTEGER NOT NULL REFERENCES users(id),
     active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
     notifications_enabled INTEGER NOT NULL DEFAULT 0 CHECK (notifications_enabled IN (0, 1)),
+    notifications_configured INTEGER NOT NULL DEFAULT 0 CHECK (notifications_configured IN (0, 1)),
     joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (collection_id, user_id)
 );
@@ -173,6 +174,16 @@ class Database:
                     "ALTER TABLE participants ADD COLUMN notifications_enabled "
                     "INTEGER NOT NULL DEFAULT 0"
                 )
+            participant_column_names = {column[1] for column in columns}
+            if "notifications_configured" not in participant_column_names:
+                await connection.execute(
+                    "ALTER TABLE participants ADD COLUMN notifications_configured "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
+                await connection.execute(
+                    "UPDATE participants SET notifications_configured=1 "
+                    "WHERE notifications_enabled=1"
+                )
             await connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_participants_user_active
@@ -205,6 +216,16 @@ class Database:
                     await connection.execute(
                         f"ALTER TABLE users ADD COLUMN {column_name} {definition}"
                     )
+            await connection.execute(
+                """
+                UPDATE participants SET notifications_enabled=1
+                WHERE active=1 AND notifications_configured=0
+                  AND EXISTS (
+                      SELECT 1 FROM users u
+                      WHERE u.id=participants.user_id AND u.private_started=1
+                  )
+                """
+            )
             await connection.execute(
                 """
                 INSERT INTO payment_methods(user_id,bank_name,details,position)

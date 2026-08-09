@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -259,6 +260,39 @@ async def test_private_notification_subscription_follows_active_membership(servi
     assert await service.notification_subscription(collection_id, 2) is False
     await service.join(collection_id, 2, subscribe=True)
     assert await service.notification_subscription(collection_id, 2) is True
+
+
+@pytest.mark.asyncio
+async def test_group_join_enables_notifications_after_private_chat_started(service):
+    collection_id = await make_collection(service)
+    await service.remove_participant(collection_id, 2, 2)
+    await service.upsert_user(2, "boris", "Борис", private_started=True)
+
+    await service.join(collection_id, 2, subscribe=False)
+
+    assert await service.notification_subscription(collection_id, 2) is True
+
+
+@pytest.mark.asyncio
+async def test_starting_private_chat_enables_existing_unconfigured_subscriptions(service):
+    collection_id = await make_collection(service)
+    assert await service.notification_subscription(collection_id, 2) is False
+
+    await service.upsert_user(2, "boris", "Борис", private_started=True)
+
+    assert await service.notification_subscription(collection_id, 2) is True
+
+
+@pytest.mark.asyncio
+async def test_explicitly_disabled_collection_notifications_stay_disabled_on_rejoin(service):
+    collection_id = await make_collection(service)
+    await service.upsert_user(2, "boris", "Борис", private_started=True)
+    await service.set_notification_subscription(collection_id, 2, False)
+    await service.remove_participant(collection_id, 2, 2)
+
+    await service.join(collection_id, 2, subscribe=False)
+
+    assert await service.notification_subscription(collection_id, 2) is False
 
 
 @pytest.mark.asyncio
@@ -537,6 +571,39 @@ async def test_pending_repayments_cannot_overbook_debt(service):
     await service.add_repayment(collection_id, 2, 1, 300)
     with pytest.raises(DomainError, match="больше текущего долга"):
         await service.add_repayment(collection_id, 2, 1, 201)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_confirmations_cannot_overpay_changed_debt(service):
+    collection_id = await make_collection(service)
+    expense_id = await service.add_expense(collection_id, 1, 1000, [2], "Такси")
+    first = await service.add_repayment(collection_id, 2, 1, 400)
+    second = await service.add_repayment(collection_id, 2, 1, 400)
+    await service.edit_transaction(expense_id, 1, 500, "Такси")
+
+    results = await asyncio.gather(
+        service.confirm_repayment(first, 1),
+        service.confirm_repayment(second, 1),
+        return_exceptions=True,
+    )
+
+    assert sum(not isinstance(result, Exception) for result in results) == 1
+    assert sum(isinstance(result, DomainError) for result in results) == 1
+    assert await service.get_balances(collection_id) == {1: 100, 2: -100, 3: 0}
+
+
+@pytest.mark.asyncio
+async def test_balance_overview_separates_pending_and_repayable_amount(service):
+    collection_id = await make_collection(service)
+    await service.add_expense(collection_id, 1, 1000, [2], "Такси")
+    await service.add_repayment(collection_id, 2, 1, 400)
+
+    overview = await service.balance_overview(2)
+    debt = overview["personal_debts"][0]
+
+    assert debt["amount"] == 1000
+    assert debt["pending_amount"] == 400
+    assert debt["repayable_amount"] == 600
 
 
 @pytest.mark.asyncio
