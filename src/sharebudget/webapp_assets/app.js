@@ -12,6 +12,10 @@ const historyBadge = document.getElementById("history-badge");
 const botUsername = document.querySelector('meta[name="telegram-bot-username"]')?.content;
 const analyticsEnabled = Boolean(document.querySelector("script[data-goatcounter]"));
 const launchParams = new URLSearchParams(window.location.search);
+const telegramHashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+const telegramInitDataFromUrl = telegramHashParams.get("tgWebAppData")
+  || launchParams.get("tgWebAppData")
+  || "";
 const COLLECTION_SWIPE_REVEAL = 124;
 const API_TIMEOUT_MS = 7000;
 const TELEGRAM_READY_TIMEOUT_MS = 5000;
@@ -61,6 +65,28 @@ let analyticsAttempts = 0;
 let lastTrackedScreen = "";
 let analyticsSessionStarted = false;
 let initInFlight = null;
+let configuredTelegram = null;
+
+function currentTelegramInitData() {
+  return tg?.initData || telegramInitDataFromUrl;
+}
+
+function configureTelegram() {
+  const webApp = window.Telegram?.WebApp;
+  if (!webApp) return false;
+  tg = webApp;
+  state.launchIntent = state.launchIntent || tg.initDataUnsafe?.start_param;
+  if (configuredTelegram === webApp) return true;
+  configuredTelegram = webApp;
+  tg.BackButton?.onClick(() => navigateBack(true));
+  tg.ready();
+  tg.expand();
+  tg.setHeaderColor?.("bg_color");
+  tg.setBackgroundColor?.("bg_color");
+  if (state.collection) tg.BackButton?.show();
+  else tg.BackButton?.hide();
+  return true;
+}
 
 function flushAnalytics() {
   analyticsRetryTimer = null;
@@ -237,7 +263,7 @@ async function performApi(path, options, method) {
     cache: "no-store",
     headers: {
       "Content-Type": "application/json",
-      "X-Telegram-Init-Data": tg?.initData || "",
+      "X-Telegram-Init-Data": currentTelegramInitData(),
       ...(options.headers || {}),
     },
   };
@@ -921,7 +947,11 @@ function confirmAction(message) {
   });
 }
 
-function requestWritePermission() {
+async function requestWritePermission() {
+  if (!tg) {
+    await waitForTelegram(2500);
+    configureTelegram();
+  }
   if (tg?.initDataUnsafe?.user?.allows_write_to_pm) return Promise.resolve(true);
   if (!tg?.requestWriteAccess) return Promise.resolve(false);
   return new Promise((resolve) => {
@@ -1681,14 +1711,12 @@ async function init() {
       message.textContent = "Соединение заняло чуть больше времени. Ещё немного…";
     }
   }, 3500);
-  await waitForTelegram();
-  state.launchIntent = state.launchIntent || tg?.initDataUnsafe?.start_param;
-  tg?.BackButton?.onClick(() => navigateBack(true));
-  tg?.ready();
-  tg?.expand();
-  tg?.setHeaderColor?.("bg_color");
-  tg?.setBackgroundColor?.("bg_color");
-  if (!tg?.initData) {
+  configureTelegram();
+  if (!currentTelegramInitData()) {
+    await waitForTelegram(1200);
+    configureTelegram();
+  }
+  if (!currentTelegramInitData()) {
     clearTimeout(slowLoadingTimer);
     nav.hidden = true;
     app.innerHTML = `<section class="auth-error"><span class="empty-icon">🔐</span><h2>Нужен защищённый запуск</h2><p class="row-note">Telegram открыл старую кнопку без данных профиля. Нажмите ниже — вход произойдёт автоматически, без логина и пароля.</p><div class="sheet-actions"><button class="primary-button" type="button" id="secure-open">Открыть в Telegram</button></div></section>`;
@@ -1735,5 +1763,6 @@ window.addEventListener("online", () => {
   if (state.bootstrap) checkForUpdates(true);
   else runInit();
 });
+document.getElementById("telegram-sdk")?.addEventListener("load", configureTelegram);
 
 runInit();

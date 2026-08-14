@@ -45,11 +45,20 @@ def signed_init_data() -> str:
     return urlencode(data)
 
 
-def test_index() -> str:
+def rendered_index() -> str:
     index = (PROJECT_ROOT / "src/sharebudget/webapp_assets/index.html").read_text("utf-8")
     asset_version = hashlib.sha256(
         (PROJECT_ROOT / "src/sharebudget/webapp_assets/app.js").read_bytes()
     ).hexdigest()[:12]
+    return index.replace("__BOT_USERNAME__", "ShakeOnIt_bot").replace(
+        "__ASSET_VERSION__", asset_version
+    ).replace(
+        "__ANALYTICS_SCRIPT__", ""
+    )
+
+
+def test_index() -> str:
+    index = rendered_index()
     mock = f"""
 <script>
 window.Telegram = {{ WebApp: {{
@@ -73,11 +82,8 @@ window.Telegram = {{ WebApp: {{
 </script>
 """
     return index.replace(
-        '<script src="https://telegram.org/js/telegram-web-app.js" defer></script>', mock
-    ).replace("__BOT_USERNAME__", "ShakeOnIt_bot").replace(
-        "__ASSET_VERSION__", asset_version
-    ).replace(
-        "__ANALYTICS_SCRIPT__", ""
+        '<script id="telegram-sdk" src="https://telegram.org/js/telegram-web-app.js" async></script>',
+        mock,
     )
 
 
@@ -115,6 +121,12 @@ async def create_application(database_path: Path) -> web.Application:
     @web.middleware
     async def inject_telegram(request: web.Request, handler):
         if request.path in {"/app", "/app/"}:
+            if request.query.get("sdk") == "slow":
+                page = rendered_index().replace(
+                    "https://telegram.org/js/telegram-web-app.js",
+                    "/test/slow-telegram-sdk.js",
+                )
+                return web.Response(text=page, content_type="text/html")
             return web.Response(text=test_index(), content_type="text/html")
         return await handler(request)
 
@@ -135,6 +147,12 @@ async def create_application(database_path: Path) -> web.Application:
         return web.json_response({"ok": True})
 
     application.router.add_post("/test/delay", delay)
+
+    async def slow_telegram_sdk(_: web.Request) -> web.Response:
+        await asyncio.sleep(3)
+        return web.Response(text="", content_type="application/javascript")
+
+    application.router.add_get("/test/slow-telegram-sdk.js", slow_telegram_sdk)
     settings = Settings(
         bot_token=TOKEN,
         database_path=database.path,
