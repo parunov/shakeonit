@@ -157,6 +157,42 @@ async def refresh_group_launchers(bot: Bot, service: BudgetService, settings: Se
             )
 
 
+async def configure_bot(bot: Bot, settings: Settings) -> None:
+    """Refresh Telegram-side settings without delaying the HTTP server startup."""
+    logger = logging.getLogger(__name__)
+    try:
+        bot_user = await bot.me()
+        settings.main_app_enabled = bool(bot_user.has_main_web_app)
+    except TelegramAPIError:
+        logger.warning("Could not refresh Main Mini App status", exc_info=True)
+    try:
+        await bot.set_my_commands(
+            [BotCommand(command="app", description="Открыть приложение")]
+        )
+    except TelegramAPIError:
+        logger.warning("Could not refresh bot commands", exc_info=True)
+    if settings.webapp_url:
+        try:
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="Открыть приложение",
+                    web_app=WebAppInfo(url=settings.webapp_url),
+                )
+            )
+        except TelegramAPIError:
+            logger.warning("Could not refresh bot menu button", exc_info=True)
+
+
+async def configure_bot_and_launchers(
+    bot: Bot, service: BudgetService, settings: Settings
+) -> None:
+    await configure_bot(bot, settings)
+    try:
+        await refresh_group_launchers(bot, service, settings)
+    except Exception:
+        logging.getLogger(__name__).exception("Could not refresh group launchers")
+
+
 async def _database_is_ready(service: BudgetService) -> bool:
     async with service.db.connect() as connection:
         cursor = await connection.execute(
@@ -264,24 +300,12 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
         session=AiohttpSession(timeout=10),
     )
-    bot_user = await bot.me()
-    settings.main_app_enabled = bool(bot_user.has_main_web_app)
     dispatcher = Dispatcher(service=service, settings=settings)
     dispatcher.include_router(router)
-    await bot.set_my_commands(
-        [
-            BotCommand(command="app", description="Открыть приложение"),
-        ]
-    )
-    if settings.webapp_url:
-        await bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(
-                text="Открыть приложение",
-                web_app=WebAppInfo(url=settings.webapp_url),
-            )
-        )
     cleanup_task = asyncio.create_task(archive_cleanup(service))
-    launcher_task = asyncio.create_task(refresh_group_launchers(bot, service, settings))
+    configuration_task = asyncio.create_task(
+        configure_bot_and_launchers(bot, service, settings)
+    )
     reminder_task = asyncio.create_task(repayment_reminder_loop(bot, service))
     try:
         if settings.webhook_url:
@@ -293,12 +317,12 @@ async def main() -> None:
             await dispatcher.start_polling(bot)
     finally:
         cleanup_task.cancel()
-        launcher_task.cancel()
+        configuration_task.cancel()
         reminder_task.cancel()
         with suppress(asyncio.CancelledError):
             await cleanup_task
         with suppress(asyncio.CancelledError):
-            await launcher_task
+            await configuration_task
         with suppress(asyncio.CancelledError):
             await reminder_task
         await bot.session.close()

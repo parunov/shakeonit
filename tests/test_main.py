@@ -6,7 +6,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from sharebudget.db import Database
-from sharebudget.main import HEALTH_SERVICE_KEY, dispatch_repayment_reminders_once, health
+from sharebudget.main import (
+    HEALTH_SERVICE_KEY,
+    configure_bot,
+    dispatch_repayment_reminders_once,
+    health,
+)
 from sharebudget.service import BudgetService
 
 
@@ -19,6 +24,26 @@ async def test_health_checks_database_schema(tmp_path):
 
     assert response.status == 200
     assert json.loads(response.text) == {"status": "ok", "database": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_configure_bot_refreshes_telegram_settings():
+    bot = SimpleNamespace(
+        me=AsyncMock(return_value=SimpleNamespace(has_main_web_app=True)),
+        set_my_commands=AsyncMock(),
+        set_chat_menu_button=AsyncMock(),
+    )
+    settings = SimpleNamespace(
+        main_app_enabled=False,
+        webapp_url="https://example.com/app",
+    )
+
+    await configure_bot(bot, settings)
+
+    assert settings.main_app_enabled is True
+    bot.me.assert_awaited_once()
+    bot.set_my_commands.assert_awaited_once()
+    bot.set_chat_menu_button.assert_awaited_once()
 
 
 @pytest.mark.asyncio
