@@ -6,19 +6,29 @@ ENV_FILE=/opt/shakeonit/.env
 TAG=shakeonit-healthcheck
 
 check_url() {
-  curl --fail --silent --show-error --max-time 5 "$@" >/dev/null
+  curl --fail --silent --max-time 5 "$@" >/dev/null
 }
 
-if ! check_url "$APP_HEALTH_URL"; then
-  sleep 2
-  if ! check_url "$APP_HEALTH_URL"; then
-    logger -t "$TAG" "Local application health check failed; restarting shakeonit"
-    systemctl restart shakeonit.service
-    sleep 5
-    if ! check_url "$APP_HEALTH_URL"; then
-      logger -t "$TAG" "Application is still unavailable after restart"
-      exit 1
+wait_for_app() {
+  local attempts=$1
+  local attempt
+  for ((attempt = 1; attempt <= attempts; attempt += 1)); do
+    if check_url "$APP_HEALTH_URL"; then
+      return 0
     fi
+    if ((attempt < attempts)); then
+      sleep 3
+    fi
+  done
+  return 1
+}
+
+if ! wait_for_app 6; then
+  logger -t "$TAG" "Local application health check failed; restarting shakeonit"
+  systemctl restart shakeonit.service
+  if ! wait_for_app 12; then
+    logger -t "$TAG" "Application is still unavailable after restart"
+    exit 1
   fi
 fi
 
