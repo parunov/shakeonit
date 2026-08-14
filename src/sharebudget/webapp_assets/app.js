@@ -13,10 +13,12 @@ const botUsername = document.querySelector('meta[name="telegram-bot-username"]')
 const analyticsEnabled = Boolean(document.querySelector("script[data-goatcounter]"));
 const launchParams = new URLSearchParams(window.location.search);
 const COLLECTION_SWIPE_REVEAL = 124;
-const API_TIMEOUT_MS = 9000;
+const API_TIMEOUT_MS = 7000;
 const TELEGRAM_READY_TIMEOUT_MS = 5000;
 const moneyFormatters = new Map();
 const busyButtonContents = new WeakMap();
+const blockingButtons = new Set();
+const apiInFlight = new Map();
 const dateFormatter = new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 
 const state = {
@@ -39,6 +41,8 @@ const state = {
   collectionHistoryLimit: 10,
   collectionEventsLimit: 10,
   viewStack: [],
+  viewVersion: 0,
+  pendingNavigation: null,
   swipeStart: null,
   collectionSwipe: null,
   collectionClickBlockedUntil: 0,
@@ -56,6 +60,7 @@ let analyticsRetryTimer = null;
 let analyticsAttempts = 0;
 let lastTrackedScreen = "";
 let analyticsSessionStarted = false;
+let initInFlight = null;
 
 function flushAnalytics() {
   analyticsRetryTimer = null;
@@ -214,6 +219,18 @@ async function fetchApi(path, options, timeout = API_TIMEOUT_MS) {
 
 async function api(path, options = {}) {
   const method = String(options.method || "GET").toUpperCase();
+  const inFlightKey = method === "GET" ? path : null;
+  if (inFlightKey && apiInFlight.has(inFlightKey)) return apiInFlight.get(inFlightKey);
+  const request = performApi(path, options, method);
+  if (inFlightKey) apiInFlight.set(inFlightKey, request);
+  try {
+    return await request;
+  } finally {
+    if (inFlightKey && apiInFlight.get(inFlightKey) === request) apiInFlight.delete(inFlightKey);
+  }
+}
+
+async function performApi(path, options, method) {
   const attempts = method === "GET" && path !== "/api/rates" ? 2 : 1;
   const requestOptions = {
     ...options,
@@ -227,7 +244,7 @@ async function api(path, options = {}) {
   let lastError;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const response = await fetchApi(path, requestOptions);
+      const response = await fetchApi(path, requestOptions, path === "/api/rates" ? 3500 : API_TIMEOUT_MS);
       const data = await response.json().catch(() => ({}));
       if (!response.ok || !data.ok) {
         const error = new Error(data.error || "Не удалось выполнить действие");
@@ -270,20 +287,39 @@ function prefetchHistory() {
   else setTimeout(start, 300);
 }
 
-function setBusy(button, busy) {
-  state.busy = busy;
+function setBusy(button, busy, blocksApp = true) {
   if (button) {
     button.disabled = busy;
     if (busy) {
-      if (!busyButtonContents.has(button)) busyButtonContents.set(button, button.innerHTML);
+      if (!busyButtonContents.has(button)) {
+        busyButtonContents.set(button, { html: button.innerHTML, blocksApp });
+        if (blocksApp) blockingButtons.add(button);
+      }
       button.setAttribute("aria-busy", "true");
       button.textContent = "Сохраняем…";
     } else if (busyButtonContents.has(button)) {
-      button.innerHTML = busyButtonContents.get(button);
+      const saved = busyButtonContents.get(button);
+      button.innerHTML = saved.html;
+      blockingButtons.delete(button);
       busyButtonContents.delete(button);
       button.removeAttribute("aria-busy");
     }
   }
+  state.busy = blockingButtons.size > 0;
+  if (!state.busy && state.pendingNavigation) {
+    const nextView = state.pendingNavigation;
+    state.pendingNavigation = null;
+    queueMicrotask(() => navigateTo(nextView));
+  }
+}
+
+function beginView() {
+  state.viewVersion += 1;
+  return state.viewVersion;
+}
+
+function viewIsCurrent(version) {
+  return version === state.viewVersion;
 }
 
 function showSheet(html) {
@@ -379,14 +415,30 @@ function collectionCards(rows, swipeAction = null) {
 }
 
 async function renderCollections() {
+  const viewVersion = beginView();
   state.nav = "collections";
   state.collection = null;
   title.textContent = state.bootstrap.context_chat_id ? "Сборы группы" : "Сборы";
   tg?.BackButton?.hide();
-  if (!state.balanceData) state.balanceData = await api("/api/balance");
-  const oweTotals = debtTotals(state.balanceData.personal_debts, "debtor_id");
-  const owedTotals = debtTotals(state.balanceData.personal_debts, "creditor_id");
-  const myDebts = state.balanceData.personal_debts.filter((debt) => debt.debtor_id === state.bootstrap.user.id);
+  paintCollections();
+  if (!state.balanceData) {
+    try {
+      const overview = await api("/api/balance");
+      if (!viewIsCurrent(viewVersion)) return;
+      state.balanceData = overview;
+      paintCollections();
+    } catch (error) {
+      if (viewIsCurrent(viewVersion)) toast(error.message, true);
+    }
+  }
+  prefetchHistory();
+}
+
+function paintCollections() {
+  const personalDebts = state.balanceData?.personal_debts || [];
+  const oweTotals = debtTotals(personalDebts, "debtor_id");
+  const owedTotals = debtTotals(personalDebts, "creditor_id");
+  const myDebts = personalDebts.filter((debt) => debt.debtor_id === state.bootstrap.user.id);
   const payableDebts = myDebts.filter((debt) => debt.repayable_amount > 0);
   const quickPayments = quickPaymentRows(payableDebts);
   const emptySummary = money(0, state.bootstrap.user.preferred_currency);
@@ -406,26 +458,29 @@ async function renderCollections() {
     ${archived.length ? `<div class="section-head"><h2>Архив</h2></div>${collectionCards(archived, "delete")}` : ""}`;
   updateNav();
   trackScreen("collections", "Сборы");
-  prefetchHistory();
 }
 
 async function renderBalance() {
+  const viewVersion = beginView();
   state.nav = "balance";
   state.collection = null;
   title.textContent = "Мой баланс";
   tg?.BackButton?.hide();
-  app.innerHTML = `<section class="loading-card"><div class="spinner"></div><p>Считаем ваш баланс…</p></section>`;
   updateNav();
   trackScreen("balance", "Баланс");
+  if (state.balanceData) paintBalance();
+  else app.innerHTML = `<section class="loading-card"><div class="spinner"></div><p>Считаем ваш баланс…</p></section>`;
   const overview = state.balanceData || await api("/api/balance");
+  if (!viewIsCurrent(viewVersion)) return;
   state.balanceData = { ...overview, exchange: state.balanceData?.exchange || null };
   paintBalance();
   try {
     const exchange = await api("/api/rates");
+    if (!viewIsCurrent(viewVersion)) return;
     state.balanceData = { ...overview, exchange };
     if (state.nav === "balance" && !state.collection) paintBalance();
   } catch (error) {
-    toast("Курсы валют временно недоступны — показываю исходные суммы", true);
+    if (viewIsCurrent(viewVersion)) toast("Курсы валют временно недоступны — показываю исходные суммы", true);
   }
 }
 
@@ -474,6 +529,7 @@ function paintBalance() {
 }
 
 function renderProfile() {
+  beginView();
   state.nav = "profile";
   state.collection = null;
   title.textContent = "Профиль";
@@ -514,16 +570,18 @@ function quickPaymentRows(debts) {
 }
 
 async function renderHistory(loadKind = null) {
+  const viewVersion = beginView();
   state.nav = "history";
   state.collection = null;
   title.textContent = "История";
   tg?.BackButton?.hide();
-  if (!loadKind) app.innerHTML = `<section class="loading-card"><div class="spinner"></div><p>Собираем всю историю…</p></section>`;
+  if (!loadKind && !state.globalHistory) app.innerHTML = `<section class="loading-card"><div class="spinner"></div><p>Собираем всю историю…</p></section>`;
   updateNav();
   const current = state.globalHistory;
   const offset = loadKind === "transactions" ? current.transactions.length : loadKind === "events" ? current.events.length : 0;
   const query = loadKind ? `?section=${loadKind}&${loadKind === "transactions" ? "transaction_offset" : "event_offset"}=${offset}` : "";
   const page = loadKind ? await api(`/api/history${query}`) : await loadInitialHistory();
+  if (!viewIsCurrent(viewVersion)) return;
   if (!loadKind) {
     state.globalHistory = page;
   } else if (loadKind === "transactions") {
@@ -565,6 +623,7 @@ function expenseStatisticsSheet(stats = state.globalHistory?.expense_stats) {
 }
 
 function renderInvitation() {
+  beginView();
   const invitation = state.bootstrap.invitation;
   state.nav = "collections";
   title.textContent = invitation.collection.title;
@@ -574,6 +633,7 @@ function renderInvitation() {
 }
 
 function renderWelcome() {
+  beginView();
   const firstName = state.bootstrap.user.full_name.split(/\s+/)[0];
   title.textContent = "Добро пожаловать";
   nav.hidden = true;
@@ -622,19 +682,31 @@ async function loadDetails(id, force = false) {
 }
 
 async function openCollection(id, tab = "overview", force = false) {
+  const viewVersion = beginView();
+  const numericId = Number(id);
   if (state.collection?.collection?.id !== Number(id)) {
     state.collectionHistoryLimit = 10;
     state.collectionEventsLimit = 10;
   }
   if (!state.collection) state.collectionReturn = state.nav;
   state.collectionTab = tab;
-  app.innerHTML = `<section class="loading-card"><div class="spinner"></div><p>Обновляем сбор…</p></section>`;
+  const cached = state.details.get(numericId);
+  if (cached) {
+    state.collection = cached;
+    title.textContent = cached.collection.title;
+    tg?.BackButton?.show();
+    renderCollection();
+  } else {
+    app.innerHTML = `<section class="loading-card"><div class="spinner"></div><p>Обновляем сбор…</p></section>`;
+  }
   const data = await loadDetails(id, force);
+  if (!viewIsCurrent(viewVersion)) return false;
   state.collection = data;
   title.textContent = data.collection.title;
   tg?.BackButton?.show();
   renderCollection();
   trackScreen("collection", "Карточка сбора");
+  return true;
 }
 
 function renderCollection() {
@@ -852,22 +924,42 @@ function confirmAction(message) {
 function requestWritePermission() {
   if (tg?.initDataUnsafe?.user?.allows_write_to_pm) return Promise.resolve(true);
   if (!tg?.requestWriteAccess) return Promise.resolve(false);
-  return new Promise((resolve) => tg.requestWriteAccess((allowed) => resolve(Boolean(allowed))));
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (allowed) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(Boolean(allowed));
+    };
+    const timer = setTimeout(() => finish(false), 5000);
+    try {
+      tg.requestWriteAccess(finish);
+    } catch (error) {
+      finish(false);
+    }
+  });
 }
 
 async function refreshCurrent(tab = state.collectionTab) {
+  const viewVersion = state.viewVersion;
+  const collectionId = state.collection?.collection?.id;
   await reloadBootstrap();
-  if (state.collection) await openCollection(state.collection.collection.id, tab, true);
+  if (!viewIsCurrent(viewVersion)) return;
+  if (collectionId) await openCollection(collectionId, tab, true);
 }
 
 async function refreshVisibleView() {
+  const viewVersion = state.viewVersion;
   const collectionId = state.collection?.collection?.id;
   const collectionTab = state.collectionTab;
+  const visibleNav = state.nav;
   await reloadBootstrap();
+  if (!viewIsCurrent(viewVersion)) return;
   if (collectionId) await openCollection(collectionId, collectionTab, true);
-  else if (state.nav === "history") await renderHistory();
-  else if (state.nav === "balance") await renderBalance();
-  else if (state.nav === "profile") renderProfile();
+  else if (visibleNav === "history") await renderHistory();
+  else if (visibleNav === "balance") await renderBalance();
+  else if (visibleNav === "profile") renderProfile();
   else await renderCollections();
   showPendingRepaymentConfirmation();
 }
@@ -876,7 +968,7 @@ async function checkForUpdates(force = false) {
   if (!state.bootstrap || state.refreshInFlight || state.busy || !sheetLayer.hidden) return;
   if (document.visibilityState !== "visible") return;
   const now = Date.now();
-  if (!force && now - state.lastSyncCheck < 5000) return;
+  if (now - state.lastSyncCheck < (force ? 1500 : 5000)) return;
   state.lastSyncCheck = now;
   state.refreshInFlight = true;
   try {
@@ -933,8 +1025,12 @@ function scheduleSync() {
 
 app.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-action]");
-  if (!target || state.busy) return;
+  if (!target) return;
   const action = target.dataset.action;
+  if (state.busy) {
+    toast("Завершаем текущее действие. Повторите нажатие через мгновение");
+    return;
+  }
   if (target.closest(".collection-swipe-row") && performance.now() < state.collectionClickBlockedUntil) {
     event.preventDefault();
     return;
@@ -983,8 +1079,9 @@ app.addEventListener("click", async (event) => {
       return await renderCollections();
     }
     if (action === "quick-repay") {
-      await openCollection(target.dataset.collectionId, "history", true);
-      repaySheet(target.dataset.creditorId);
+      if (await openCollection(target.dataset.collectionId, "history", true)) {
+        repaySheet(target.dataset.creditorId);
+      }
       return;
     }
     if (action === "balance-mode") {
@@ -994,10 +1091,12 @@ app.addEventListener("click", async (event) => {
     }
     if (action === "load-history") return await renderHistory(target.dataset.kind);
     if (action === "expense-statistics") {
+      const viewVersion = state.viewVersion;
       let statistics = state.globalHistory?.expense_stats;
       if (!statistics?.by_collection_loaded) {
-        setBusy(target, true);
+        setBusy(target, true, false);
         statistics = await api("/api/expense-statistics");
+        if (!viewIsCurrent(viewVersion)) return;
         if (state.globalHistory) state.globalHistory.expense_stats = statistics;
       }
       trackEvent("expense-statistics-opened", "Открыта статистика затрат");
@@ -1033,7 +1132,9 @@ app.addEventListener("click", async (event) => {
     if (action === "tab") { state.collectionTab = target.dataset.tab; renderCollection(); return; }
     if (action === "edit-transaction") return editSheet(target.dataset.id);
     if (action === "edit-history-transaction") {
+      const viewVersion = state.viewVersion;
       const details = await api(`/api/transactions/${target.dataset.id}/edit-context`);
+      if (!viewIsCurrent(viewVersion)) return;
       return editSheet(target.dataset.id, details, "global");
     }
     if (action === "request-funds") {
@@ -1144,13 +1245,13 @@ app.addEventListener("click", async (event) => {
 });
 
 app.addEventListener("change", async (event) => {
-  if (event.target.dataset.notificationPref && !state.busy) {
+  if (event.target.dataset.notificationPref && !event.target.disabled) {
     const preferences = {};
     app.querySelectorAll("[data-notification-pref]").forEach((input) => {
       preferences[input.dataset.notificationPref] = input.checked;
     });
     try {
-      state.busy = true;
+      event.target.disabled = true;
       await api("/api/me/notifications", { method: "PATCH", body: JSON.stringify(preferences) });
       state.bootstrap.user.notification_preferences = preferences;
       haptic();
@@ -1159,13 +1260,13 @@ app.addEventListener("change", async (event) => {
       event.target.checked = !event.target.checked;
       toast(error.message, true);
     } finally {
-      state.busy = false;
+      event.target.disabled = false;
     }
     return;
   }
-  if (event.target.id !== "preferred-currency" || state.busy) return;
+  if (event.target.id !== "preferred-currency" || event.target.disabled) return;
   try {
-    state.busy = true;
+    event.target.disabled = true;
     await api("/api/me/currency", {
       method: "PATCH",
       body: JSON.stringify({ currency: event.target.value }),
@@ -1177,13 +1278,21 @@ app.addEventListener("change", async (event) => {
   } catch (error) {
     toast(error.message, true);
   } finally {
-    state.busy = false;
+    event.target.disabled = false;
   }
 });
 
 sheet.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-action]");
-  if (!target || state.busy) return;
+  if (!target) return;
+  if (target.dataset.action === "close-sheet") {
+    closeSheet();
+    return;
+  }
+  if (state.busy) {
+    toast("Дождитесь завершения сохранения");
+    return;
+  }
   if (target.dataset.action === "open-user") {
     event.preventDefault();
     openTelegramUser(target);
@@ -1420,21 +1529,34 @@ sheet.addEventListener("submit", async (event) => {
   }
 });
 
+async function navigateTo(nextView) {
+  rememberView(nextView);
+  if (nextView === "collections") await renderCollections();
+  if (nextView === "balance") await renderBalance();
+  if (nextView === "history") await renderHistory();
+  if (nextView === "profile") renderProfile();
+}
+
 nav.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-nav]");
-  if (!button || state.busy) return;
+  if (!button) return;
+  if (state.busy) {
+    state.pendingNavigation = button.dataset.nav;
+    toast("Завершаем сохранение — затем откроем выбранный экран");
+    return;
+  }
   try {
-    rememberView(button.dataset.nav);
-    if (button.dataset.nav === "collections") await renderCollections();
-    if (button.dataset.nav === "balance") await renderBalance();
-    if (button.dataset.nav === "history") await renderHistory();
-    if (button.dataset.nav === "profile") renderProfile();
+    await navigateTo(button.dataset.nav);
   } catch (error) { toast(error.message, true); }
 });
 
 avatar.addEventListener("click", () => {
-  rememberView("profile");
-  renderProfile();
+  if (state.busy) {
+    state.pendingNavigation = "profile";
+    toast("Завершаем сохранение — затем откроем профиль");
+    return;
+  }
+  navigateTo("profile").catch((error) => toast(error.message, true));
 });
 document.getElementById("sheet-backdrop").addEventListener("click", closeSheet);
 
@@ -1596,9 +1718,22 @@ async function init() {
   }
 }
 
+function runInit() {
+  if (initInFlight) return initInFlight;
+  initInFlight = init().finally(() => { initInFlight = null; });
+  return initInFlight;
+}
+
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") checkForUpdates(true);
 });
 window.addEventListener("focus", () => checkForUpdates(true));
+window.addEventListener("pageshow", (event) => {
+  if (event.persisted) checkForUpdates(true);
+});
+window.addEventListener("online", () => {
+  if (state.bootstrap) checkForUpdates(true);
+  else runInit();
+});
 
-init();
+runInit();

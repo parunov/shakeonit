@@ -142,7 +142,7 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert 'data-goatcounter="https://stats.example.com/count"' in page_text
         assert "https://stats.example.com/count.js" in page_text
         assert "https://stats.example.com" in page.headers["Content-Security-Policy"]
-        assert 'telegram-web-app.js" async' in page_text
+        assert 'telegram-web-app.js" defer' in page_text
         assert "base-uri 'none'" in page.headers["Content-Security-Policy"]
         assert page.headers["Strict-Transport-Security"].startswith("max-age=31536000")
         assert page.headers["X-Robots-Tag"] == "noindex, nofollow"
@@ -172,7 +172,10 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert "formatPaymentDetails" in script_text
         assert "data-payment-details" in script_text
         assert "COLLECTION_SWIPE_REVEAL = 124" in script_text
-        assert "API_TIMEOUT_MS = 9000" in script_text
+        assert "API_TIMEOUT_MS = 7000" in script_text
+        assert "apiInFlight" in script_text
+        assert "viewVersion" in script_text
+        assert "pendingNavigation" in script_text
         assert "waitForTelegram" in script_text
         assert "reopenInTelegram" in script_text
         assert "state.globalHistory?.expense_stats" in script_text

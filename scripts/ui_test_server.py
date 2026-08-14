@@ -47,6 +47,9 @@ def signed_init_data() -> str:
 
 def test_index() -> str:
     index = (PROJECT_ROOT / "src/sharebudget/webapp_assets/index.html").read_text("utf-8")
+    asset_version = hashlib.sha256(
+        (PROJECT_ROOT / "src/sharebudget/webapp_assets/app.js").read_bytes()
+    ).hexdigest()[:12]
     mock = f"""
 <script>
 window.Telegram = {{ WebApp: {{
@@ -70,9 +73,9 @@ window.Telegram = {{ WebApp: {{
 </script>
 """
     return index.replace(
-        '<script src="https://telegram.org/js/telegram-web-app.js" async></script>', mock
+        '<script src="https://telegram.org/js/telegram-web-app.js" defer></script>', mock
     ).replace("__BOT_USERNAME__", "ShakeOnIt_bot").replace(
-        "__ASSET_VERSION__", "ui-test"
+        "__ASSET_VERSION__", asset_version
     ).replace(
         "__ANALYTICS_SCRIPT__", ""
     )
@@ -99,6 +102,15 @@ async def create_application(database_path: Path) -> web.Application:
     dinner_id = await service.create_collection(-100500, "Ужин с друзьями", "EUR", 2)
     await service.join(dinner_id, 1, subscribe=True)
     await service.add_expense(dinner_id, 2, 5_000, [1], "Общий счёт")
+    delayed_request = {"path": "", "seconds": 0.0}
+
+    @web.middleware
+    async def delay_next_api(request: web.Request, handler):
+        if delayed_request["path"] and request.path == delayed_request["path"]:
+            seconds = delayed_request["seconds"]
+            delayed_request.update(path="", seconds=0.0)
+            await asyncio.sleep(seconds)
+        return await handler(request)
 
     @web.middleware
     async def inject_telegram(request: web.Request, handler):
@@ -106,13 +118,23 @@ async def create_application(database_path: Path) -> web.Application:
             return web.Response(text=test_index(), content_type="text/html")
         return await handler(request)
 
-    application = web.Application(middlewares=[inject_telegram])
+    application = web.Application(middlewares=[delay_next_api, inject_telegram])
 
     async def mutate(_: web.Request) -> web.Response:
         await service.add_expense(collection_id, 2, 900, [1, 2, 3], "Фоновое обновление")
         return web.json_response({"ok": True})
 
     application.router.add_post("/test/mutate", mutate)
+
+    async def delay(request: web.Request) -> web.Response:
+        payload = await request.json()
+        delayed_request.update(
+            path=str(payload.get("path") or ""),
+            seconds=max(0.0, min(float(payload.get("seconds") or 0), 5.0)),
+        )
+        return web.json_response({"ok": True})
+
+    application.router.add_post("/test/delay", delay)
     settings = Settings(
         bot_token=TOKEN,
         database_path=database.path,
