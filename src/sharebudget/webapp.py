@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -62,12 +63,80 @@ USER_SYNC_CACHE_SECONDS = 10 * 60
 USER_SYNC_CACHE_LIMIT = 10_000
 AUTH_CACHE_SECONDS = 5 * 60
 AUTH_CACHE_LIMIT = 10_000
+SESSION_COOKIE_NAME = "__Host-shakeonit-session"
+SESSION_MAX_AGE = 30 * 24 * 60 * 60
+SESSION_REFRESH_AGE = 7 * 24 * 60 * 60
 
 
 class ApiError(Exception):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
         self.status = status
+
+
+class ExpiredAuthError(ApiError):
+    def __init__(self, message: str, status: int = 401, *, user_id: int | None = None):
+        super().__init__(message, status)
+        self.user_id = user_id
+
+
+def _session_signing_key(bot_token: str) -> bytes:
+    return hmac.new(b"ShakeOnItWebSession", bot_token.encode(), hashlib.sha256).digest()
+
+
+def _encode_session(user: dict, bot_token: str, now: int | None = None) -> str:
+    issued_at = int(time.time()) if now is None else now
+    safe_user = {
+        key: user[key]
+        for key in (
+            "id",
+            "first_name",
+            "last_name",
+            "username",
+            "language_code",
+            "allows_write_to_pm",
+        )
+        if key in user
+    }
+    payload = json.dumps(
+        {"exp": issued_at + SESSION_MAX_AGE, "user": safe_user},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    encoded = base64.urlsafe_b64encode(payload).rstrip(b"=").decode()
+    signature = hmac.new(_session_signing_key(bot_token), encoded.encode(), hashlib.sha256).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def _decode_session(value: str, bot_token: str, now: int | None = None) -> tuple[dict, int]:
+    if not value or len(value) > 4096:
+        raise ApiError("Откройте приложение из Telegram", 401)
+    try:
+        encoded, received_signature = value.split(".", 1)
+    except ValueError as exc:
+        raise ApiError("Откройте приложение из Telegram", 401) from exc
+    expected_signature = hmac.new(
+        _session_signing_key(bot_token), encoded.encode(), hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(expected_signature, received_signature):
+        raise ApiError("Откройте приложение из Telegram", 401)
+    try:
+        padding = "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(encoded + padding))
+        expires_at = int(payload["exp"])
+        user = payload["user"]
+        user["id"] = int(user["id"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ApiError("Откройте приложение из Telegram", 401) from exc
+    current = int(time.time()) if now is None else now
+    if expires_at < current or expires_at > current + SESSION_MAX_AGE + 60:
+        raise ExpiredAuthError(
+            "Сессия устарела. Закройте и снова откройте приложение", 401
+        )
+    if user.get("is_bot") or not user.get("first_name"):
+        raise ApiError("Некорректные данные пользователя", 401)
+    return {"auth_date": str(current), "user": user}, expires_at
 
 
 def validate_init_data(raw: str, bot_token: str, max_age: int = 86400) -> dict:
@@ -93,7 +162,11 @@ def validate_init_data(raw: str, bot_token: str, max_age: int = 86400) -> dict:
         raise ApiError("Некорректные данные пользователя", 401) from exc
     now = int(time.time())
     if auth_date > now + 60 or now - auth_date > max_age:
-        raise ApiError("Сессия устарела. Закройте и снова откройте приложение", 401)
+        raise ExpiredAuthError(
+            "Сессия устарела. Закройте и снова откройте приложение",
+            401,
+            user_id=user["id"],
+        )
     if user.get("is_bot") or not user.get("first_name"):
         raise ApiError("Некорректные данные пользователя", 401)
     data["user"] = user
@@ -307,23 +380,43 @@ async def api_middleware(request: web.Request, handler):
         settings = request.app[SETTINGS_KEY]
         raw_init_data = request.headers.get("X-Telegram-Init-Data", "")
         now_epoch = int(time.time())
-        auth_cache = request.app[AUTH_CACHE_KEY]
-        cached_auth = auth_cache.get(raw_init_data)
-        if cached_auth and cached_auth[1] >= now_epoch:
-            auth = cached_auth[0]
+        session_expires_at = 0
+        authenticated_with_telegram = bool(raw_init_data)
+        if raw_init_data:
+            auth_cache = request.app[AUTH_CACHE_KEY]
+            cached_auth = auth_cache.get(raw_init_data)
+            if cached_auth and cached_auth[1] >= now_epoch:
+                auth = cached_auth[0]
+            else:
+                try:
+                    auth = validate_init_data(
+                        raw_init_data,
+                        settings.bot_token,
+                        settings.webapp_auth_max_age,
+                    )
+                except ExpiredAuthError as expired:
+                    auth, session_expires_at = _decode_session(
+                        request.cookies.get(SESSION_COOKIE_NAME, ""),
+                        settings.bot_token,
+                        now_epoch,
+                    )
+                    if expired.user_id != auth["user"]["id"]:
+                        raise ApiError("Откройте приложение из Telegram", 401) from expired
+                    authenticated_with_telegram = False
+                else:
+                    expires_at = min(
+                        int(auth["auth_date"]) + settings.webapp_auth_max_age,
+                        now_epoch + AUTH_CACHE_SECONDS,
+                    )
+                    auth_cache[raw_init_data] = (auth, expires_at)
+                    if len(auth_cache) > AUTH_CACHE_LIMIT:
+                        auth_cache.pop(next(iter(auth_cache)), None)
         else:
-            auth = validate_init_data(
-                raw_init_data,
+            auth, session_expires_at = _decode_session(
+                request.cookies.get(SESSION_COOKIE_NAME, ""),
                 settings.bot_token,
-                settings.webapp_auth_max_age,
+                now_epoch,
             )
-            expires_at = min(
-                int(auth["auth_date"]) + settings.webapp_auth_max_age,
-                now_epoch + AUTH_CACHE_SECONDS,
-            )
-            auth_cache[raw_init_data] = (auth, expires_at)
-            if len(auth_cache) > AUTH_CACHE_LIMIT:
-                auth_cache.pop(next(iter(auth_cache)), None)
         request[AUTH_KEY] = auth
         user = auth["user"]
         full_name = " ".join(
@@ -345,7 +438,18 @@ async def api_middleware(request: web.Request, handler):
                 cache[user["id"]] = (identity, now)
                 if len(cache) > USER_SYNC_CACHE_LIMIT:
                     cache.pop(next(iter(cache)), None)
-        return await handler(request)
+        response = await handler(request)
+        if authenticated_with_telegram or session_expires_at - now_epoch <= SESSION_REFRESH_AGE:
+            response.set_cookie(
+                SESSION_COOKIE_NAME,
+                _encode_session(user, settings.bot_token, now_epoch),
+                max_age=SESSION_MAX_AGE,
+                secure=True,
+                httponly=True,
+                samesite="Strict",
+                path="/",
+            )
+        return response
     except (ApiError, DomainError, ValueError) as exc:
         status = exc.status if isinstance(exc, ApiError) else 400
         return web.json_response({"ok": False, "error": str(exc)}, status=status)

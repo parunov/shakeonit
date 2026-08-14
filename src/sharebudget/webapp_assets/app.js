@@ -558,10 +558,9 @@ async function renderHistory(loadKind = null) {
   trackScreen("history", "История");
 }
 
-function expenseStatisticsSheet() {
-  const stats = state.globalHistory?.expense_stats;
+function expenseStatisticsSheet(stats = state.globalHistory?.expense_stats) {
   if (!stats) return;
-  const collections = stats.by_collection.map((item) => `<div class="statistics-collection"><div class="row-between"><div><div class="row-title">${e(item.title)}</div><div class="row-note">${item.operation_count} операций</div></div><div class="amount">${money(item.personal_amount, item.currency)}</div></div><div class="statistics-flow"><span>Оплачено вами <b>${money(item.paid_amount, item.currency)}</b></span><span>Возвращено вами <b>${money(item.repaid_amount, item.currency)}</b></span>${item.received_amount ? `<span>Получено возвратов <b>${money(item.received_amount, item.currency)}</b></span>` : ""}</div></div>`).join("");
+  const collections = (stats.by_collection || []).map((item) => `<div class="statistics-collection"><div class="row-between"><div><div class="row-title">${e(item.title)}</div><div class="row-note">${item.operation_count} операций</div></div><div class="amount">${money(item.personal_amount, item.currency)}</div></div><div class="statistics-flow"><span>Оплачено вами <b>${money(item.paid_amount, item.currency)}</b></span><span>Возвращено вами <b>${money(item.repaid_amount, item.currency)}</b></span>${item.received_amount ? `<span>Получено возвратов <b>${money(item.received_amount, item.currency)}</b></span>` : ""}</div></div>`).join("");
   showSheet(`<h2>Мои расходы</h2><p class="sheet-intro">«На меня распределено» показывает вашу личную долю общих затрат. Возвраты учитываются отдельно как фактически переведённые вами средства.</p><div class="statistics-period"><span>Этот месяц</span><strong>${moneyMap(stats.monthly_personal_by_currency)}</strong><small>${stats.monthly_personal_count} затрат относятся на вас</small></div><div class="stats-grid statistics-grid"><div><small>Оплачено вами</small><b>${moneyMap(stats.monthly_paid_by_currency)}</b><span>${stats.monthly_paid_count} операций</span></div><div><small>Возвращено вами</small><b>${moneyMap(stats.monthly_repaid_by_currency)}</b><span>${stats.monthly_repaid_count} переводов</span></div><div><small>Получено возвратов</small><b>${moneyMap(stats.monthly_received_by_currency)}</b><span>${stats.monthly_received_count} переводов</span></div><div><small>Ваша доля за всё время</small><b>${moneyMap(stats.total_personal_by_currency)}</b><span>${stats.personal_count} затрат</span></div></div><div class="section-head"><h2>По сборам</h2></div><div class="statistics-collections">${collections || '<div class="card debt-row">Данных пока нет</div>'}</div><div class="sheet-actions"><button class="secondary-button" type="button" data-action="close-sheet">Закрыть</button></div>`);
 }
 
@@ -995,12 +994,14 @@ app.addEventListener("click", async (event) => {
     }
     if (action === "load-history") return await renderHistory(target.dataset.kind);
     if (action === "expense-statistics") {
-      if (!state.globalHistory.expense_stats.by_collection_loaded) {
+      let statistics = state.globalHistory?.expense_stats;
+      if (!statistics?.by_collection_loaded) {
         setBusy(target, true);
-        state.globalHistory.expense_stats = await api("/api/expense-statistics");
+        statistics = await api("/api/expense-statistics");
+        if (state.globalHistory) state.globalHistory.expense_stats = statistics;
       }
       trackEvent("expense-statistics-opened", "Открыта статистика затрат");
-      return expenseStatisticsSheet();
+      return expenseStatisticsSheet(statistics);
     }
     if (action === "load-collection-history") {
       if (target.dataset.kind === "transactions") state.collectionHistoryLimit += 10;
@@ -1544,6 +1545,13 @@ document.addEventListener("touchend", async (event) => {
   }
 }, { passive: true });
 
+function reopenInTelegram() {
+  const startParam = state.launchIntent === "create" ? "create" : "app";
+  const url = `https://t.me/${botUsername}?startapp=${startParam}`;
+  if (tg?.openTelegramLink) tg.openTelegramLink(url);
+  else window.location.href = url;
+}
+
 async function init() {
   const slowLoadingTimer = setTimeout(() => {
     const message = app.querySelector(".loading-card p");
@@ -1563,10 +1571,7 @@ async function init() {
     nav.hidden = true;
     app.innerHTML = `<section class="auth-error"><span class="empty-icon">🔐</span><h2>Нужен защищённый запуск</h2><p class="row-note">Telegram открыл старую кнопку без данных профиля. Нажмите ниже — вход произойдёт автоматически, без логина и пароля.</p><div class="sheet-actions"><button class="primary-button" type="button" id="secure-open">Открыть в Telegram</button></div></section>`;
     document.getElementById("secure-open")?.addEventListener("click", () => {
-      const startParam = state.launchIntent === "create" ? "create" : "app";
-      const url = `https://t.me/${botUsername}?startapp=${startParam}`;
-      if (tg?.openTelegramLink) tg.openTelegramLink(url);
-      else window.location.href = url;
+      reopenInTelegram();
     });
     return;
   }
@@ -1580,8 +1585,12 @@ async function init() {
     scheduleSync();
   } catch (error) {
     nav.hidden = true;
-    app.innerHTML = `<section class="auth-error"><span class="empty-icon">↻</span><h2>Не удалось открыть приложение</h2><p class="row-note">${e(error.message)}</p><div class="sheet-actions"><button class="primary-button" type="button" id="retry">Попробовать снова</button></div></section>`;
-    document.getElementById("retry")?.addEventListener("click", () => window.location.reload());
+    const needsFreshLogin = error.status === 401;
+    app.innerHTML = `<section class="auth-error"><span class="empty-icon">↻</span><h2>Не удалось открыть приложение</h2><p class="row-note">${e(error.message)}</p><div class="sheet-actions"><button class="primary-button" type="button" id="retry">${needsFreshLogin ? "Обновить вход" : "Попробовать снова"}</button></div></section>`;
+    document.getElementById("retry")?.addEventListener("click", () => {
+      if (needsFreshLogin) reopenInTelegram();
+      else window.location.reload();
+    });
   } finally {
     clearTimeout(slowLoadingTimer);
   }

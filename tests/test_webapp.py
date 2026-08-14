@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import time
+from http.cookies import SimpleCookie
 from time import perf_counter
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -173,6 +174,9 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert "COLLECTION_SWIPE_REVEAL = 124" in script_text
         assert "API_TIMEOUT_MS = 9000" in script_text
         assert "waitForTelegram" in script_text
+        assert "reopenInTelegram" in script_text
+        assert "state.globalHistory?.expense_stats" in script_text
+        assert "expenseStatisticsSheet(statistics)" in script_text
         assert "busyButtonContents" in script_text
         assert script_text.index("await waitForTelegram();") < script_text.index(
             "tg?.BackButton?.onClick"
@@ -213,6 +217,43 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert payload["is_new_user"] is True
         assert payload["sync_version"]
         assert payload["initial_balance"] == {"collections": [], "personal_debts": []}
+
+        session_cookie = SimpleCookie()
+        session_cookie.load(authorized.headers["Set-Cookie"])
+        session_name, session_morsel = next(iter(session_cookie.items()))
+        resumed = await client.get(
+            "/api/bootstrap",
+            headers={
+                "X-Telegram-Init-Data": signed_init_data(
+                    auth_date=int(time.time()) - 8 * 24 * 60 * 60
+                ),
+                "Cookie": f"{session_name}={session_morsel.value}",
+            },
+        )
+        assert resumed.status == 200
+        assert (await resumed.json())["user"]["id"] == 42
+
+        wrong_user = await client.get(
+            "/api/bootstrap",
+            headers={
+                "X-Telegram-Init-Data": signed_init_data(
+                    auth_date=int(time.time()) - 8 * 24 * 60 * 60,
+                    user={"id": 77, "first_name": "Иван", "username": "ivan"},
+                ),
+                "Cookie": f"{session_name}={session_morsel.value}",
+            },
+        )
+        assert wrong_user.status == 401
+
+        tampered = signed_init_data().replace("anna", "ivan")
+        rejected = await client.get(
+            "/api/bootstrap",
+            headers={
+                "X-Telegram-Init-Data": tampered,
+                "Cookie": f"{session_name}={session_morsel.value}",
+            },
+        )
+        assert rejected.status == 401
 
         styles = await client.get("/app/static/styles.css")
         styles_text = await styles.text()

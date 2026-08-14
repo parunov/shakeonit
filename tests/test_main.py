@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -5,8 +6,19 @@ from unittest.mock import AsyncMock
 import pytest
 
 from sharebudget.db import Database
-from sharebudget.main import dispatch_repayment_reminders_once
+from sharebudget.main import HEALTH_SERVICE_KEY, dispatch_repayment_reminders_once, health
 from sharebudget.service import BudgetService
+
+
+@pytest.mark.asyncio
+async def test_health_checks_database_schema(tmp_path):
+    database = Database(tmp_path / "health.db")
+    await database.initialize()
+    service = BudgetService(database)
+    response = await health(SimpleNamespace(app={HEALTH_SERVICE_KEY: service}))
+
+    assert response.status == 200
+    assert json.loads(response.text) == {"status": "ok", "database": "ok"}
 
 
 @pytest.mark.asyncio
@@ -44,4 +56,3 @@ async def test_repayment_reminder_is_sent_with_actions_and_not_duplicated(tmp_pa
         for button in row
     }
     assert callbacks == {f"repayconfirm:{repayment_id}", f"repayreject:{repayment_id}"}
-

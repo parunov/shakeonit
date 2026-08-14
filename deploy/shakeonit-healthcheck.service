@@ -1,0 +1,11 @@
+[Unit]
+Description=ShakeOnIt application and HTTPS health check
+After=network-online.target shakeonit.service nginx.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/shakeonit-healthcheck
+TimeoutStartSec=30
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict

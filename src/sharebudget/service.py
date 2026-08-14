@@ -1356,8 +1356,20 @@ class BudgetService:
         return transactions, events
 
     async def expense_statistics(
-        self, user_id: int, *, include_collections: bool = True
+        self,
+        user_id: int,
+        *,
+        include_collections: bool = True,
+        now: datetime | None = None,
     ) -> dict:
+        now_utc = (now or datetime.now(UTC)).astimezone(UTC)
+        local_zone = timezone(timedelta(hours=3), "Europe/Minsk")
+        month_start_utc = (
+            now_utc.astimezone(local_zone)
+            .replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            .astimezone(UTC)
+            .strftime("%Y-%m-%d %H:%M:%S")
+        )
         async with self.db.connect() as connection:
             currency_rows = await connection.execute_fetchall(
                 """
@@ -1366,20 +1378,20 @@ class BudgetService:
                     FROM expense_shares s
                     JOIN transactions t ON t.id=s.transaction_id AND t.status='active'
                     JOIN collections c ON c.id=t.collection_id
-                    WHERE s.user_id=?
+                    WHERE s.user_id=:user_id
                     UNION ALL
                     SELECT t.collection_id,c.currency,t.created_at,'paid',t.amount
                     FROM transactions t JOIN collections c ON c.id=t.collection_id
-                    WHERE t.creator_id=? AND t.kind='expense' AND t.status='active'
+                    WHERE t.creator_id=:user_id AND t.kind='expense' AND t.status='active'
                     UNION ALL
                     SELECT t.collection_id,c.currency,t.confirmed_at,'repaid',t.amount
                     FROM transactions t JOIN collections c ON c.id=t.collection_id
-                    WHERE t.creator_id=? AND t.kind='repayment' AND t.status='active'
+                    WHERE t.creator_id=:user_id AND t.kind='repayment' AND t.status='active'
                       AND t.confirmation_status='confirmed'
                     UNION ALL
                     SELECT t.collection_id,c.currency,t.confirmed_at,'received',t.amount
                     FROM transactions t JOIN collections c ON c.id=t.collection_id
-                    WHERE t.counterparty_id=? AND t.kind='repayment' AND t.status='active'
+                    WHERE t.counterparty_id=:user_id AND t.kind='repayment' AND t.status='active'
                       AND t.confirmation_status='confirmed'
                 )
                 SELECT currency,
@@ -1387,21 +1399,21 @@ class BudgetService:
                        SUM(CASE WHEN metric='paid' THEN amount ELSE 0 END) paid_amount,
                        SUM(CASE WHEN metric='repaid' THEN amount ELSE 0 END) repaid_amount,
                        SUM(CASE WHEN metric='received' THEN amount ELSE 0 END) received_amount,
-                       SUM(CASE WHEN metric='personal' AND created_at>=datetime('now','start of month') THEN amount ELSE 0 END) monthly_personal_amount,
-                       SUM(CASE WHEN metric='paid' AND created_at>=datetime('now','start of month') THEN amount ELSE 0 END) monthly_paid_amount,
-                       SUM(CASE WHEN metric='repaid' AND created_at>=datetime('now','start of month') THEN amount ELSE 0 END) monthly_repaid_amount,
-                       SUM(CASE WHEN metric='received' AND created_at>=datetime('now','start of month') THEN amount ELSE 0 END) monthly_received_amount,
+                       SUM(CASE WHEN metric='personal' AND created_at>=:month_start THEN amount ELSE 0 END) monthly_personal_amount,
+                       SUM(CASE WHEN metric='paid' AND created_at>=:month_start THEN amount ELSE 0 END) monthly_paid_amount,
+                       SUM(CASE WHEN metric='repaid' AND created_at>=:month_start THEN amount ELSE 0 END) monthly_repaid_amount,
+                       SUM(CASE WHEN metric='received' AND created_at>=:month_start THEN amount ELSE 0 END) monthly_received_amount,
                        SUM(metric='personal') personal_count,
                        SUM(metric='paid') paid_count,
                        SUM(metric='repaid') repaid_count,
                        SUM(metric='received') received_count,
-                       SUM(metric='personal' AND created_at>=datetime('now','start of month')) monthly_personal_count,
-                       SUM(metric='paid' AND created_at>=datetime('now','start of month')) monthly_paid_count,
-                       SUM(metric='repaid' AND created_at>=datetime('now','start of month')) monthly_repaid_count,
-                       SUM(metric='received' AND created_at>=datetime('now','start of month')) monthly_received_count
+                       SUM(metric='personal' AND created_at>=:month_start) monthly_personal_count,
+                       SUM(metric='paid' AND created_at>=:month_start) monthly_paid_count,
+                       SUM(metric='repaid' AND created_at>=:month_start) monthly_repaid_count,
+                       SUM(metric='received' AND created_at>=:month_start) monthly_received_count
                 FROM movements GROUP BY currency ORDER BY currency
                 """,
-                (user_id, user_id, user_id, user_id),
+                {"user_id": user_id, "month_start": month_start_utc},
             )
             collection_rows = []
             if include_collections:
@@ -1410,17 +1422,17 @@ class BudgetService:
                 WITH movements AS (
                     SELECT t.id transaction_id,t.collection_id,'personal' metric,s.amount
                     FROM expense_shares s JOIN transactions t ON t.id=s.transaction_id
-                    WHERE s.user_id=? AND t.status='active'
+                    WHERE s.user_id=:user_id AND t.status='active'
                     UNION ALL
                     SELECT t.id,t.collection_id,'paid',t.amount FROM transactions t
-                    WHERE t.creator_id=? AND t.kind='expense' AND t.status='active'
+                    WHERE t.creator_id=:user_id AND t.kind='expense' AND t.status='active'
                     UNION ALL
                     SELECT t.id,t.collection_id,'repaid',t.amount FROM transactions t
-                    WHERE t.creator_id=? AND t.kind='repayment' AND t.status='active'
+                    WHERE t.creator_id=:user_id AND t.kind='repayment' AND t.status='active'
                       AND t.confirmation_status='confirmed'
                     UNION ALL
                     SELECT t.id,t.collection_id,'received',t.amount FROM transactions t
-                    WHERE t.counterparty_id=? AND t.kind='repayment' AND t.status='active'
+                    WHERE t.counterparty_id=:user_id AND t.kind='repayment' AND t.status='active'
                       AND t.confirmation_status='confirmed'
                 )
                 SELECT c.id collection_id,c.title,c.currency,
@@ -1433,7 +1445,7 @@ class BudgetService:
                 GROUP BY c.id,c.title,c.currency
                 ORDER BY personal_amount DESC,repaid_amount DESC,c.title LIMIT 20
                 """,
-                    (user_id, user_id, user_id, user_id),
+                    {"user_id": user_id},
                 )
 
         def amounts(field: str) -> dict[str, int]:

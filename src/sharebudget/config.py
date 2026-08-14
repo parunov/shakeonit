@@ -16,7 +16,10 @@ class Settings(BaseSettings):
     webhook_key_path: Path | None = None
     webapp_url: str | None = None
     analytics_url: str | None = None
-    webapp_auth_max_age: int = 86400
+    # Telegram can resume an existing WebView instead of issuing fresh initData.
+    # A seven-day bootstrap window bridges upgrades for returning users; after the
+    # first successful request an HttpOnly rolling session is used instead.
+    webapp_auth_max_age: int = 7 * 24 * 60 * 60
     bot_username: str = "ShakeOnIt_bot"
     main_app_enabled: bool = False
 

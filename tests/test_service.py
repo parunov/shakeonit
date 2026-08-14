@@ -226,6 +226,45 @@ async def test_expense_statistics_separates_personal_share_paid_and_repaid(servi
 
 
 @pytest.mark.asyncio
+async def test_expense_statistics_uses_minsk_month_and_confirmed_repayments(service):
+    collection_id = await make_collection(service)
+    july_expense = await service.add_expense(collection_id, 2, 500, [1], "До полуночи")
+    august_expense = await service.add_expense(collection_id, 2, 300, [1], "После полуночи")
+    repayment_id = await service.add_repayment(collection_id, 1, 2, 100, "Возврат")
+    await service.confirm_repayment(repayment_id, 2)
+    pending_id = await service.add_repayment(collection_id, 1, 2, 100, "Ожидает")
+
+    async with service.db.connect() as connection:
+        await connection.execute(
+            "UPDATE transactions SET created_at=? WHERE id=?",
+            ("2026-07-31 20:30:00", july_expense),
+        )
+        await connection.execute(
+            "UPDATE transactions SET created_at=? WHERE id=?",
+            ("2026-07-31 21:30:00", august_expense),
+        )
+        await connection.execute(
+            "UPDATE transactions SET confirmed_at=? WHERE id=?",
+            ("2026-07-31 21:45:00", repayment_id),
+        )
+        await connection.execute(
+            "UPDATE transactions SET created_at=? WHERE id=?",
+            ("2026-07-31 22:00:00", pending_id),
+        )
+        await connection.commit()
+
+    stats = await service.expense_statistics(
+        1, now=datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    )
+
+    assert stats["total_personal_by_currency"] == {"EUR": 800}
+    assert stats["monthly_personal_by_currency"] == {"EUR": 300}
+    assert stats["monthly_personal_count"] == 1
+    assert stats["monthly_repaid_by_currency"] == {"EUR": 100}
+    assert stats["monthly_repaid_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_visible_collections_include_group_catalog_and_user_collections(service):
     own_group_collection = await service.create_collection(-100, "Берлин", "EUR", 1)
     available_group_collection = await service.create_collection(-100, "Подарок", "EUR", 2)

@@ -66,7 +66,7 @@ sudo systemctl status shakeonit --no-pager
 sudo journalctl -u shakeonit -n 100 --no-pager
 ```
 
-Сервис запускается от отдельного системного пользователя `shakeonit`, автоматически стартует после перезагрузки VPS и перезапускается при временной ошибке.
+Сервис запускается от отдельного системного пользователя `shakeonit`, автоматически стартует после перезагрузки VPS и перезапускается при временной ошибке. Таймер `shakeonit-healthcheck.timer` каждую минуту проверяет приложение, базу данных и локальный HTTPS-прокси; при сбое он автоматически перезапускает нужный сервис.
 
 Чтобы подсказка появлялась сразу после ввода `@ShakeOnIt_bot`, включите inline mode через `@BotFather`: `/setinline` → `@ShakeOnIt_bot` → задайте placeholder, например `Подсказка по общим расходам`.
 
@@ -74,7 +74,7 @@ sudo journalctl -u shakeonit -n 100 --no-pager
 
 Mini App «По рукам — делим расходы» — основной интерфейс сервиса и использует ту же базу и правила расчета, что и бот. Оно открывается с контекстом Telegram-группы или конкретного сбора. В приложении доступны сборы, балансы, затраты, возвраты, история, участники, приглашения, платежные данные, архив и административные действия. После значимых изменений бот отправляет в Telegram-группу один короткий отчет без звукового уведомления.
 
-Авторизация выполняется через проверку подписи `Telegram.WebApp.initData`; отдельные логин и пароль не нужны. Сессии старше `WEBAPP_AUTH_MAX_AGE` отклоняются.
+Авторизация выполняется через проверку подписи `Telegram.WebApp.initData`; отдельные логин и пароль не нужны. После успешной проверки сервер выдаёт защищённую HttpOnly-сессию и продлевает её при использовании, поэтому возобновлённый Telegram WebView не перестаёт работать через сутки.
 
 Production-настройка с доверенным HTTPS, nginx и автоматическим сертификатом:
 
@@ -91,6 +91,13 @@ sudo bash deploy/configure-miniapp.sh 153-76-201-10.sslip.io
 cd /opt/shakeonit
 sudo /opt/shakeonit/.venv/bin/python -m pip install --editable /opt/shakeonit
 sudo systemctl restart shakeonit
+sudo systemctl status shakeonit-healthcheck.timer --no-pager
+```
+
+Разовая внешняя проверка доступности:
+
+```bash
+python scripts/availability_probe.py https://153-76-201-10.sslip.io/health --requests 500 --concurrency 20
 ```
 
 ## Как пользоваться

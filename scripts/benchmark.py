@@ -24,7 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from sharebudget.config import Settings  # noqa: E402
 from sharebudget.db import Database  # noqa: E402
 from sharebudget.service import BudgetService  # noqa: E402
-from sharebudget.webapp import setup_webapp_routes  # noqa: E402
+from sharebudget.webapp import DELIVERY_TASKS_KEY, setup_webapp_routes  # noqa: E402
 
 TOKEN = "123456:benchmark-token"
 
@@ -178,6 +178,14 @@ async def run(args: argparse.Namespace) -> None:
                 await response.read()
                 return response.status == 200
 
+            async def expense_statistics(index: int) -> bool:
+                response = await client.get(
+                    "/api/expense-statistics",
+                    headers={"X-Telegram-Init-Data": auth[index % len(auth)]},
+                )
+                await response.read()
+                return response.status == 200
+
             await sync(0)
             await details(0)
             results = [
@@ -218,7 +226,16 @@ async def run(args: argparse.Namespace) -> None:
                     args.concurrency,
                     history_page,
                 ),
+                await measure(
+                    "expense_statistics",
+                    max(50, args.requests // 5),
+                    args.concurrency,
+                    expense_statistics,
+                ),
             ]
+            deliveries = list(application[DELIVERY_TASKS_KEY])
+            if deliveries:
+                await asyncio.gather(*deliveries, return_exceptions=True)
             print(
                 json.dumps(
                     {

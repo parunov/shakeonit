@@ -34,6 +34,8 @@ from .render import telegram_user_link
 from .service import BudgetService
 from .webapp import setup_webapp_routes
 
+HEALTH_SERVICE_KEY = web.AppKey("health_service", BudgetService)
+
 
 async def archive_cleanup(service: BudgetService) -> None:
     while True:
@@ -155,8 +157,28 @@ async def refresh_group_launchers(bot: Bot, service: BudgetService, settings: Se
             )
 
 
-async def health(_: web.Request) -> web.Response:
-    return web.json_response({"status": "ok"})
+async def _database_is_ready(service: BudgetService) -> bool:
+    async with service.db.connect() as connection:
+        cursor = await connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='users'"
+        )
+        row = await cursor.fetchone()
+    return bool(row and row[0] == 1)
+
+
+async def health(request: web.Request) -> web.Response:
+    try:
+        ready = await asyncio.wait_for(
+            _database_is_ready(request.app[HEALTH_SERVICE_KEY]), timeout=2
+        )
+    except Exception:
+        logging.getLogger(__name__).exception("Health check failed")
+        ready = False
+    status = 200 if ready else 503
+    return web.json_response(
+        {"status": "ok" if ready else "unavailable", "database": "ok" if ready else "error"},
+        status=status,
+    )
 
 
 async def start_webhook(
@@ -168,6 +190,7 @@ async def start_webhook(
     if not settings.webhook_secret:
         raise RuntimeError("WEBHOOK_SECRET is required when WEBHOOK_URL is configured")
     application = web.Application(client_max_size=128 * 1024)
+    application[HEALTH_SERVICE_KEY] = service
     application.router.add_get("/health", health)
     setup_webapp_routes(application, bot, service, settings)
     SimpleRequestHandler(

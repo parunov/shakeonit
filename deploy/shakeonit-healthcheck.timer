@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the ShakeOnIt health check every minute
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=60s
+AccuracySec=10s
+Persistent=true
+Unit=shakeonit-healthcheck.service
+
+[Install]
+WantedBy=timers.target

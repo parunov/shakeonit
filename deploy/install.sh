@@ -4,6 +4,8 @@ set -euo pipefail
 APP_DIR=/opt/shakeonit
 SERVICE_USER=shakeonit
 SERVICE_FILE=/etc/systemd/system/shakeonit.service
+HEALTHCHECK_SERVICE_FILE=/etc/systemd/system/shakeonit-healthcheck.service
+HEALTHCHECK_TIMER_FILE=/etc/systemd/system/shakeonit-healthcheck.timer
 
 if [[ $EUID -ne 0 ]]; then
   echo "Run this script as root: sudo bash deploy/install.sh" >&2
@@ -33,9 +35,16 @@ else
 fi
 
 install -o root -g root -m 0644 "$APP_DIR/deploy/shakeonit.service" "$SERVICE_FILE"
+install -o root -g root -m 0755 "$APP_DIR/deploy/healthcheck.sh" /usr/local/sbin/shakeonit-healthcheck
+install -o root -g root -m 0644 \
+  "$APP_DIR/deploy/shakeonit-healthcheck.service" "$HEALTHCHECK_SERVICE_FILE"
+install -o root -g root -m 0644 \
+  "$APP_DIR/deploy/shakeonit-healthcheck.timer" "$HEALTHCHECK_TIMER_FILE"
 systemctl daemon-reload
 systemctl enable shakeonit.service
+systemctl enable shakeonit-healthcheck.timer
 
 echo "Installation complete. Set BOT_TOKEN in $APP_DIR/.env, then run:"
 echo "  sudo systemctl restart shakeonit"
+echo "  sudo systemctl start shakeonit-healthcheck.timer"
 echo "  sudo systemctl status shakeonit --no-pager"

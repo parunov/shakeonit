@@ -2,6 +2,7 @@
 Description=ShakeOnIt Telegram bot
 Wants=network-online.target
 After=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -10,8 +11,9 @@ Group=shakeonit
 WorkingDirectory=/opt/shakeonit
 EnvironmentFile=/opt/shakeonit/.env
 ExecStart=/opt/shakeonit/.venv/bin/sharebudget
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=3
+TimeoutStartSec=45
 TimeoutStopSec=30
 UMask=0077
 
