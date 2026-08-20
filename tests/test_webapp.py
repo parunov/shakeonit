@@ -143,7 +143,11 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert "https://stats.example.com/count.js" in page_text
         assert "https://stats.example.com" in page.headers["Content-Security-Policy"]
         assert 'id="telegram-sdk"' in page_text
-        assert 'telegram-web-app.js" async' in page_text
+        assert 'telegram-web-app.js?63" async' in page_text
+        assert "/app/static/telegram-ready.js?v=" in page_text
+        assert page_text.index("telegram-web-app.js?63") < page_text.index(
+            "/app/static/telegram-ready.js?v="
+        )
         assert "base-uri 'none'" in page.headers["Content-Security-Policy"]
         assert page.headers["Strict-Transport-Security"].startswith("max-age=31536000")
         assert page.headers["X-Robots-Tag"] == "noindex, nofollow"
@@ -185,6 +189,9 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert "expenseStatisticsSheet(statistics)" in script_text
         assert "busyButtonContents" in script_text
         assert "await waitForTelegram(1200);" in script_text
+        assert "function resumeApp()" in script_text
+        assert 'window.addEventListener("pageshow", resumeApp);' in script_text
+        assert "if (!state.bootstrap && currentTelegramInitData()) runInit();" in script_text
         assert script_text.index("configureTelegram();") < script_text.index(
             "await reloadBootstrap();"
         )
@@ -205,6 +212,15 @@ async def test_webapp_serves_ui_and_authenticates_api(tmp_path):
         assert "?start=contact_" in script_text
         assert "startapp=collection_${collection.id}" not in script_text
         assert "start=collection_${collection.id}" not in script_text
+
+        ready_script = await client.get("/app/static/telegram-ready.js")
+        assert ready_script.status == 200
+        assert ready_script.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+        ready_script_text = await ready_script.text()
+        assert 'const eventType = "web_app_ready"' in ready_script_text
+        assert "TelegramWebviewProxy?.postEvent" in ready_script_text
+        assert '"notify" in window.external' in ready_script_text
+        assert "window.parent.postMessage" in ready_script_text
 
         unauthorized = await client.get("/api/bootstrap")
         assert unauthorized.status == 401

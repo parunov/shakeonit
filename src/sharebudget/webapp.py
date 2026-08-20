@@ -43,7 +43,10 @@ LOGGER = logging.getLogger(__name__)
 WEBAPP_DIR = Path(__file__).with_name("webapp_assets")
 WEBAPP_TEMPLATE = (WEBAPP_DIR / "index.html").read_text(encoding="utf-8")
 ASSET_VERSION = hashlib.sha256(
-    b"".join((WEBAPP_DIR / name).read_bytes() for name in ("styles.css", "app.js"))
+    b"".join(
+        (WEBAPP_DIR / name).read_bytes()
+        for name in ("styles.css", "telegram-ready.js", "app.js")
+    )
 ).hexdigest()[:12]
 BOT_KEY = web.AppKey("bot", Bot)
 SERVICE_KEY = web.AppKey("service", BudgetService)
@@ -1748,7 +1751,7 @@ async def app_index(request: web.Request) -> web.Response:
 
 async def app_asset(request: web.Request) -> web.FileResponse:
     filename = request.match_info["filename"]
-    if filename not in {"app.js", "styles.css"}:
+    if filename not in {"app.js", "styles.css", "telegram-ready.js"}:
         raise web.HTTPNotFound()
     response = web.FileResponse(WEBAPP_DIR / filename)
     response.headers["Cache-Control"] = "public, max-age=31536000, immutable"

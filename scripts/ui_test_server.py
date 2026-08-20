@@ -48,7 +48,10 @@ def signed_init_data() -> str:
 def rendered_index() -> str:
     index = (PROJECT_ROOT / "src/sharebudget/webapp_assets/index.html").read_text("utf-8")
     asset_version = hashlib.sha256(
-        (PROJECT_ROOT / "src/sharebudget/webapp_assets/app.js").read_bytes()
+        b"".join(
+            (PROJECT_ROOT / "src/sharebudget/webapp_assets" / name).read_bytes()
+            for name in ("styles.css", "telegram-ready.js", "app.js")
+        )
     ).hexdigest()[:12]
     return index.replace("__BOT_USERNAME__", "ShakeOnIt_bot").replace(
         "__ASSET_VERSION__", asset_version
@@ -82,7 +85,7 @@ window.Telegram = {{ WebApp: {{
 </script>
 """
     return index.replace(
-        '<script id="telegram-sdk" src="https://telegram.org/js/telegram-web-app.js" async></script>',
+        '<script id="telegram-sdk" src="https://telegram.org/js/telegram-web-app.js?63" async></script>',
         mock,
     )
 
@@ -122,7 +125,20 @@ async def create_application(database_path: Path) -> web.Application:
     async def inject_telegram(request: web.Request, handler):
         if request.path in {"/app", "/app/"}:
             if request.query.get("sdk") == "slow":
-                page = rendered_index().replace(
+                ready_probe = """
+<script>
+window.TelegramWebviewProxy = {
+  postEvent(type) {
+    if (type === "web_app_ready") {
+      window.__telegramReadyAt = performance.now();
+      document.documentElement.dataset.telegramReady = "true";
+      document.documentElement.dataset.telegramReadyAt = String(window.__telegramReadyAt);
+    }
+  }
+};
+</script>
+"""
+                page = rendered_index().replace("<head>", f"<head>{ready_probe}").replace(
                     "https://telegram.org/js/telegram-web-app.js",
                     "/test/slow-telegram-sdk.js",
                 )

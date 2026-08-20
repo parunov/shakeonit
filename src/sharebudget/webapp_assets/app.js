@@ -1753,16 +1753,23 @@ function runInit() {
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") checkForUpdates(true);
+  if (document.visibilityState === "visible") resumeApp();
 });
-window.addEventListener("focus", () => checkForUpdates(true));
-window.addEventListener("pageshow", (event) => {
-  if (event.persisted) checkForUpdates(true);
-});
+window.addEventListener("focus", resumeApp);
+window.addEventListener("pageshow", resumeApp);
 window.addEventListener("online", () => {
+  resumeApp();
+});
+
+function resumeApp() {
+  configureTelegram();
   if (state.bootstrap) checkForUpdates(true);
   else runInit();
+}
+
+document.getElementById("telegram-sdk")?.addEventListener("load", () => {
+  configureTelegram();
+  if (!state.bootstrap && currentTelegramInitData()) runInit();
 });
-document.getElementById("telegram-sdk")?.addEventListener("load", configureTelegram);
 
 runInit();
